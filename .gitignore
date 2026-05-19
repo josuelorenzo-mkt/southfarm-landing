@@ -40,3 +40,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 southfarm_app/
+backend/data/
+backend/node_modules/
