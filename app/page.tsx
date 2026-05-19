@@ -79,7 +79,7 @@ function AndroidDownload() {
         </svg>
         Descargar App
       </a>
-      <p className="text-zinc-500 text-sm">v0.1 · ~2 MB · Android 8+</p>
+      <p className="text-zinc-500 text-sm">v1.0.0 · ~44 MB · Android 8+</p>
       <button
         onClick={() => setShowGuide(!showGuide)}
         className="text-zinc-500 text-sm hover:text-zinc-300 transition-colors"
