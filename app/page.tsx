@@ -70,7 +70,7 @@ function AndroidDownload() {
   return (
     <div className="flex flex-col items-center gap-6 animate-fade-in">
       <a
-        href="/southfarm.apk"
+        href="https://github.com/josuelorenzo-mkt/southfarm-landing/releases/download/v1.0.0/southfarm.apk"
         download
         className="bg-green-500 hover:bg-green-400 text-black font-bold text-lg px-12 py-4 rounded-2xl transition-all shadow-lg shadow-green-500/25 active:scale-95 flex items-center gap-2"
       >
