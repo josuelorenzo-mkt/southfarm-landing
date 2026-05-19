@@ -42,4 +42,4 @@ next-env.d.ts
 southfarm_app/
 backend/data/
 backend/node_modules/
-public/southfarm.apk
+# public/southfarm.apk  — needed for direct download
