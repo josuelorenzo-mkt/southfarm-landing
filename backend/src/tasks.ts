@@ -69,6 +69,41 @@ tasksRouter.get('/runs/:id', (req: Request, res: Response) => {
   res.json(run);
 });
 
+// GET /api/tasks/active — get active task for a device (for app polling)
+tasksRouter.get('/active', (req: Request, res: Response) => {
+  const userId = (req as any).userId;
+  const { device_id } = req.query;
+  
+  // Find the numeric device ID
+  let query = 'SELECT tr.*, d.device_name, d.device_id as device_string FROM task_runs tr JOIN devices d ON tr.device_id = d.id WHERE tr.user_id = ? AND tr.status IN (\'pending\', \'running\', \'paused\')';
+  const params: any[] = [userId];
+  
+  if (device_id) {
+    query += ' AND d.device_id = ?';
+    params.push(device_id as string);
+  }
+  
+  query += ' ORDER BY tr.created_at DESC LIMIT 1';
+  
+  const run: any = db.prepare(query).get(...params);
+  if (!run) {
+    res.json({ active: false });
+    return;
+  }
+  
+  res.json({
+    active: true,
+    task: {
+      id: run.id,
+      task_type: run.task_type,
+      status: run.status,
+      params: JSON.parse(run.params || '{}'),
+      created_at: run.created_at,
+      device_name: run.device_name,
+    }
+  });
+});
+
 // PATCH /api/tasks/runs/:id/pause
 tasksRouter.patch('/runs/:id/pause', (req: Request, res: Response) => {
   const run: any = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, (req as any).userId);
