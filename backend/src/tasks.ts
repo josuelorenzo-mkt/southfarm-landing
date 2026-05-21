@@ -58,23 +58,11 @@ tasksRouter.get('/runs', (req: Request, res: Response) => {
 });
 
 // GET /api/tasks/runs/:id — status
-tasksRouter.get('/runs/:id', (req: Request, res: Response) => {
-  const run: any = db.prepare(
-    'SELECT tr.*, d.device_name FROM task_runs tr JOIN devices d ON tr.device_id = d.id WHERE tr.id = ? AND tr.user_id = ?'
-  ).get(req.params.id, (req as any).userId);
-  if (!run) {
-    res.status(404).json({ error: 'Ejecución no encontrada' });
-    return;
-  }
-  res.json(run);
-});
-
 // GET /api/tasks/active — get active task for a device (for app polling)
 tasksRouter.get('/active', (req: Request, res: Response) => {
   const userId = (req as any).userId;
   const { device_id } = req.query;
   
-  // Find the numeric device ID
   let query = 'SELECT tr.*, d.device_name, d.device_id as device_string FROM task_runs tr JOIN devices d ON tr.device_id = d.id WHERE tr.user_id = ? AND tr.status IN (\'pending\', \'running\', \'paused\')';
   const params: any[] = [userId];
   
@@ -102,6 +90,18 @@ tasksRouter.get('/active', (req: Request, res: Response) => {
       device_name: run.device_name,
     }
   });
+});
+
+// GET /api/tasks/runs/:id — status
+tasksRouter.get('/runs/:id', (req: Request, res: Response) => {
+  const run: any = db.prepare(
+    'SELECT tr.*, d.device_name FROM task_runs tr JOIN devices d ON tr.device_id = d.id WHERE tr.id = ? AND tr.user_id = ?'
+  ).get(req.params.id, (req as any).userId);
+  if (!run) {
+    res.status(404).json({ error: 'Ejecución no encontrada' });
+    return;
+  }
+  res.json(run);
 });
 
 // PATCH /api/tasks/runs/:id/pause

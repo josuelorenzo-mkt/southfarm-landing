@@ -120,8 +120,8 @@ app.post('/api/tasks/run', auth, (req, res) => {
     const { task_type, device_id, params } = req.body;
     if (!task_type)
         return res.status(400).json({ error: 'task_type required' });
-    const r = db.prepare('INSERT INTO task_runs (user_id, device_id, task_type, params) VALUES (?, ?, ?, ?)')
-        .run(req.user.userId, device_id || null, task_type, typeof params === 'string' ? params : (params ? JSON.stringify(params) : null));
+    const r = db.prepare('INSERT INTO task_runs (user_id, device_id, task_type, params, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(req.user.userId, device_id || null, task_type, typeof params === 'string' ? params : (params ? JSON.stringify(params) : null), 'pending', new Date().toISOString());
     res.status(201).json({ task_run: { id: r.lastInsertRowid, task_type, status: 'pending' } });
 });
 app.get('/api/tasks/runs', auth, (req, res) => {
@@ -139,6 +139,49 @@ app.get('/api/tasks/runs', auth, (req, res) => {
 app.get('/api/tasks/runs/:id', auth, (req, res) => {
     const run = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
     run ? res.json({ run }) : res.status(404).json({ error: 'Run not found' });
+});
+// GET /api/tasks/active — active task for a device (app polling)
+app.get('/api/tasks/active', auth, (req, res) => {
+    const userId = req.user.userId;
+    const { device_id } = req.query;
+    let query = `SELECT tr.*, d.device_name, d.device_id as device_string FROM task_runs tr JOIN devices d ON tr.device_id = d.id WHERE tr.user_id = ? AND tr.status IN ('pending', 'running', 'paused')`;
+    const params = [userId];
+    if (device_id) {
+        query += ' AND d.device_id = ?';
+        params.push(device_id);
+    }
+    query += ' ORDER BY tr.created_at DESC LIMIT 1';
+    const run = db.prepare(query).get(...params);
+    if (!run)
+        return res.json({ active: false });
+    res.json({
+        active: true,
+        task: { id: run.id, task_type: run.task_type, status: run.status, params: JSON.parse(run.params || '{}'), created_at: run.created_at, device_name: run.device_name }
+    });
+});
+// PATCH /api/tasks/runs/:id/pause
+app.patch('/api/tasks/runs/:id/pause', auth, (req, res) => {
+    const run = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+    if (!run)
+        return res.status(404).json({ error: 'No encontrada' });
+    db.prepare('UPDATE task_runs SET status = ? WHERE id = ?').run('paused', run.id);
+    res.json({ ok: true, status: 'paused' });
+});
+// PATCH /api/tasks/runs/:id/resume
+app.patch('/api/tasks/runs/:id/resume', auth, (req, res) => {
+    const run = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+    if (!run)
+        return res.status(404).json({ error: 'No encontrada' });
+    db.prepare('UPDATE task_runs SET status = ? WHERE id = ?').run('running', run.id);
+    res.json({ ok: true, status: 'running' });
+});
+// PATCH /api/tasks/runs/:id/stop
+app.patch('/api/tasks/runs/:id/stop', auth, (req, res) => {
+    const run = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
+    if (!run)
+        return res.status(404).json({ error: 'No encontrada' });
+    db.prepare('UPDATE task_runs SET status = ?, completed_at = ? WHERE id = ?').run('cancelled', new Date().toISOString(), run.id);
+    res.json({ ok: true, status: 'cancelled' });
 });
 app.patch('/api/tasks/runs/:id', auth, (req, res) => {
     const { status, result } = req.body;
