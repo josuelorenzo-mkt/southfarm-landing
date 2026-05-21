@@ -35,8 +35,8 @@ tasksRouter.post('/run', (req: Request, res: Response) => {
   }
 
   const result = db.prepare(
-    'INSERT INTO task_runs (user_id, device_id, task_type, params, status) VALUES (?, ?, ?, ?, ?)'
-  ).run(userId, device_id, task_type, JSON.stringify(params || {}), 'pending');
+    'INSERT INTO task_runs (user_id, device_id, task_type, params, status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(userId, device_id, task_type, JSON.stringify(params || {}), 'pending', new Date().toISOString());
 
   // TODO: Actually trigger the task execution on the device via ADB
   // For now, mark as queued
@@ -67,4 +67,28 @@ tasksRouter.get('/runs/:id', (req: Request, res: Response) => {
     return;
   }
   res.json(run);
+});
+
+// PATCH /api/tasks/runs/:id/pause
+tasksRouter.patch('/runs/:id/pause', (req: Request, res: Response) => {
+  const run: any = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, (req as any).userId);
+  if (!run) { res.status(404).json({ error: 'No encontrada' }); return; }
+  db.prepare('UPDATE task_runs SET status = ? WHERE id = ?').run('paused', run.id);
+  res.json({ ok: true, status: 'paused' });
+});
+
+// PATCH /api/tasks/runs/:id/resume
+tasksRouter.patch('/runs/:id/resume', (req: Request, res: Response) => {
+  const run: any = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, (req as any).userId);
+  if (!run) { res.status(404).json({ error: 'No encontrada' }); return; }
+  db.prepare('UPDATE task_runs SET status = ? WHERE id = ?').run('running', run.id);
+  res.json({ ok: true, status: 'running' });
+});
+
+// PATCH /api/tasks/runs/:id/stop
+tasksRouter.patch('/runs/:id/stop', (req: Request, res: Response) => {
+  const run: any = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, (req as any).userId);
+  if (!run) { res.status(404).json({ error: 'No encontrada' }); return; }
+  db.prepare('UPDATE task_runs SET status = ?, completed_at = ? WHERE id = ?').run('cancelled', new Date().toISOString(), run.id);
+  res.json({ ok: true, status: 'cancelled' });
 });
