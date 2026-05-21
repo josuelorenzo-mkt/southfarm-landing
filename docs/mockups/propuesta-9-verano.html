@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1280">
+<title>SouthFarm — Propuesta 9: Verano</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1712;color:#f0e6d2;font-family:'Outfit',sans-serif;min-height:100vh;display:flex}
+.badge{position:fixed;top:16px;right:16px;background:#e8a838;color:#1a1510;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;z-index:100}
+.sidebar{width:60px;background:#14110c;display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:20px;flex-shrink:0}
+.sidebar .logo{color:#e8a838;font-weight:700;font-size:18px;margin-bottom:24px}
+.sidebar .ico{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:10px;cursor:pointer;opacity:.5}
+.sidebar .ico:hover,.sidebar .ico.active{opacity:1;background:#262018}
+.sidebar .ico svg{width:20px;height:20px;stroke:#e8dcc8;fill:none;stroke-width:1.5}
+.content{flex:1;padding:24px 32px;overflow:hidden}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
+.topbar h1{font-size:22px;font-weight:600;color:#e8a838}
+.strip{display:flex;margin-bottom:32px;border:1px solid #332a1e;border-radius:8px;overflow:hidden}
+.strip .stat{flex:1;padding:20px;text-align:center;border-right:1px solid #332a1e}
+.strip .stat:last-child{border:none}
+.strip .num{font-size:36px;font-weight:700;color:#e8a838}
+.strip .label{font-size:11px;text-transform:uppercase;letter-spacing:2px;opacity:.4;margin-top:4px}
+.section-title{font-size:13px;text-transform:uppercase;letter-spacing:2px;opacity:.4;margin-bottom:16px;font-weight:600}
+.devices-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:32px}
+.dcard{background:#262018;border:1px solid #332a1e;border-radius:10px;padding:16px;min-width:200px;flex-shrink:0}
+.dcard .name{font-weight:600;font-size:15px;margin-bottom:4px}
+.dcard .meta{font-size:12px;opacity:.4;margin-bottom:8px}
+.dcard .st{display:inline-block;padding:3px 10px;border-radius:12px;background:#4a3a26;color:#e8a838;font-size:11px;font-weight:600}
+.activity-table{width:100%}
+.activity-table .row{display:flex;align-items:center;padding:12px 0;border-bottom:1px solid #332a1e;gap:12px}
+.activity-table .row:last-child{border:none}
+.activity-table .av{width:28px;height:28px;border-radius:50%;background:#4a3a26;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#e8a838;flex-shrink:0}
+.activity-table .txt{flex:1;font-size:13px}.activity-table .txt strong{color:#e8a838}
+.activity-table .tm{font-size:11px;opacity:.3}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 9: Verano</div>
+<div class="sidebar">
+  <div class="logo">S</div>
+  <div class="ico active"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></div>
+  <div class="ico"><svg viewBox="0 0 24 24"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg></div>
+  <div class="ico"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+  <div class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09a1.65 1.65 0 00-1.08-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09a1.65 1.65 0 001.51-1.08 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001.08 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9c.26.604.852.997 1.51 1H21a2 2 0 010 4h-.09c-.658.003-1.25.396-1.51 1z"/></svg></div>
+</div>
+<div class="content">
+  <div class="topbar"><h1>Dashboard</h1><span style="opacity:.4;font-size:13px">May 21, 2026</span></div>
+  <div class="strip">
+    <div class="stat"><div class="num">12</div><div class="label">Sessions</div></div>
+    <div class="stat"><div class="num">347</div><div class="label">Reels</div></div>
+    <div class="stat"><div class="num">89</div><div class="label">Likes</div></div>
+    <div class="stat"><div class="num">84</div><div class="label">Minutes</div></div>
+  </div>
+  <div class="section-title">Fleet</div>
+  <div class="devices-scroll">
+    <div class="dcard"><div class="name">POCO C71</div><div class="meta">192.168.0.6 · Android 14</div><div class="st">Active</div></div>
+    <div class="dcard"><div class="name">POCO C71 #2</div><div class="meta">192.168.0.7 · Android 14</div><div class="st">Active</div></div>
+  </div>
+  <div class="section-title">Activity</div>
+  <div class="activity-table">
+    <div class="row"><div class="av">C1</div><div class="txt"><strong>@clipper1</strong> completed warmup session — 42 reels, 15 likes</div><div class="tm">2m</div></div>
+    <div class="row"><div class="av">C2</div><div class="txt"><strong>@clipper2</strong> started posting batch — 3 videos queued</div><div class="tm">8m</div></div>
+    <div class="row"><div class="av">C3</div><div class="txt"><strong>@clipper3</strong> account verified — ready for warmup</div><div class="tm">23m</div></div>
+  </div>
+</div>
+</body>
+</html>

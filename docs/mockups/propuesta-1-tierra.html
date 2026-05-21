@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SouthFarm — Tierra</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600;700&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Instrument Sans',sans-serif;display:flex;min-height:100vh;background:#f7f4f0}
+.panel-left{width:40%;background:#2c2417;color:#e8e0d4;display:flex;flex-direction:column;justify-content:space-between;padding:48px 40px;position:fixed;top:0;left:0;height:100vh}
+.content-right{margin-left:40%;width:60%;padding:56px 48px;background:#f7f4f0}
+.logo{font-family:'Cormorant Garamond',serif;font-size:28px;font-weight:700;color:#a8c4a0;letter-spacing:1px}
+.logo span{color:#e8e0d4;font-weight:400}
+.nav{margin-top:48px;display:flex;flex-direction:column;gap:16px}
+.nav a{color:#c4b9a8;text-decoration:none;font-size:15px;font-weight:500;transition:color .2s;padding:8px 0;border-left:2px solid transparent;padding-left:16px}
+.nav a:hover,.nav a.active{color:#a8c4a0;border-left-color:#5b7c5a}
+.badge{position:fixed;top:20px;right:20px;background:#2c2417;color:#a8c4a0;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:600;z-index:100;letter-spacing:.5px}
+.leaf-art{opacity:.15;width:100%}
+.leaf-art svg{width:100%;height:auto}
+.section-title{font-family:'Cormorant Garamond',serif;font-size:15px;color:#8a7e6f;text-transform:uppercase;letter-spacing:3px;margin-bottom:24px}
+.stats-row{display:flex;gap:40px;margin-bottom:64px}
+.stat-num{font-family:'Cormorant Garamond',serif;font-size:56px;font-weight:700;color:#2c2417;line-height:1}
+.stat-label{font-size:13px;color:#8a7e6f;margin-top:4px;text-transform:uppercase;letter-spacing:1px}
+.devices-section{margin-bottom:64px}
+.device-pill{display:inline-flex;align-items:center;gap:8px;background:#fff;padding:10px 20px;border-radius:40px;margin:0 12px 12px 0;border:1px solid #e8e0d4}
+.device-dot{width:8px;height:8px;border-radius:50%;background:#5b7c5a}
+.device-name{font-weight:600;font-size:14px;color:#2c2417}
+.device-meta{font-size:12px;color:#8a7e6f}
+.timeline{position:relative;padding-left:24px;border-left:2px solid #d4cfc7}
+.timeline-item{margin-bottom:32px;position:relative}
+.timeline-item::before{content:'';position:absolute;left:-29px;top:6px;width:12px;height:12px;border-radius:50%;background:#5b7c5a;border:3px solid #f7f4f0}
+.timeline-user{font-weight:600;color:#2c2417;font-size:15px}
+.timeline-time{font-size:12px;color:#8a7e6f;margin-left:8px}
+.timeline-stats{font-size:13px;color:#6b6054;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 1: Tierra</div>
+<div class="panel-left">
+  <div>
+    <div class="logo">South<span>Farm</span></div>
+    <nav class="nav">
+      <a href="#" class="active">Dashboard</a>
+      <a href="#">Fleet</a>
+      <a href="#">Sessions</a>
+      <a href="#">Analytics</a>
+      <a href="#">Settings</a>
+    </nav>
+  </div>
+  <div class="leaf-art">
+    <svg viewBox="0 0 200 240" fill="none">
+      <path d="M100 240 C100 240 40 180 40 120 C40 60 100 20 100 20 C100 20 160 60 160 120 C160 180 100 240 100 240Z" fill="#5b7c5a"/>
+      <path d="M100 220 L100 60" stroke="#2c2417" stroke-width="1.5"/>
+      <path d="M100 100 L70 75" stroke="#2c2417" stroke-width="1"/>
+      <path d="M100 130 L140 100" stroke="#2c2417" stroke-width="1"/>
+      <path d="M100 160 L65 140" stroke="#2c2417" stroke-width="1"/>
+      <path d="M100 185 L135 160" stroke="#2c2417" stroke-width="1"/>
+      <path d="M60 220 C55 200 30 190 20 210 C30 195 55 205 60 220Z" fill="#5b7c5a" opacity=".5"/>
+      <path d="M140 230 C145 210 170 200 180 220 C170 205 145 215 140 230Z" fill="#5b7c5a" opacity=".5"/>
+    </svg>
+  </div>
+</div>
+<div class="content-right">
+  <div class="section-title">Overview</div>
+  <div class="stats-row">
+    <div><div class="stat-num">12</div><div class="stat-label">Sessions</div></div>
+    <div><div class="stat-num">347</div><div class="stat-label">Reels</div></div>
+    <div><div class="stat-num">89</div><div class="stat-label">Likes</div></div>
+    <div><div class="stat-num">84<span style="font-size:24px;color:#8a7e6f"> min</span></div><div class="stat-label">Watch Time</div></div>
+  </div>
+  <div class="section-title">Fleet</div>
+  <div class="devices-section">
+    <div class="device-pill"><div class="device-dot"></div><span class="device-name">POCO C71 #1</span><span class="device-meta">Android 14 · Online</span></div>
+    <div class="device-pill"><div class="device-dot"></div><span class="device-name">POCO C71 #2</span><span class="device-meta">Android 14 · Online</span></div>
+  </div>
+  <div class="section-title">Recent Activity</div>
+  <div class="timeline">
+    <div class="timeline-item"><div><span class="timeline-user">@clipper1</span><span class="timeline-time">hace 2h</span></div><div class="timeline-stats">32 reels · 8 likes · 3 saves</div></div>
+    <div class="timeline-item"><div><span class="timeline-user">@clipper2</span><span class="timeline-time">hace 5h</span></div><div class="timeline-stats">45 reels · 12 likes · 5 saves</div></div>
+    <div class="timeline-item"><div><span class="timeline-user">@clipper3</span><span class="timeline-time">ayer</span></div><div class="timeline-stats">28 reels · 6 likes · 2 saves</div></div>
+  </div>
+</div>
+</body>
+</html>

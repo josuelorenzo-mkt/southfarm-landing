@@ -17,9 +17,7 @@ const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'southfarm-secret-change-in-production';
 
 // Middleware
-app.use(cors({
-  origin: ['https://southfarm.tech', 'https://www.southfarm.tech', 'http://localhost:3000', 'http://localhost:3001'],
-}));
+app.use(cors());
 app.use(express.json());
 
 // DB
@@ -127,18 +125,101 @@ app.post('/api/tasks/run', auth, (req: any, res) => {
   const { task_type, device_id, params } = req.body;
   if (!task_type) return res.status(400).json({ error: 'task_type required' });
   const r = db.prepare('INSERT INTO task_runs (user_id, device_id, task_type, params) VALUES (?, ?, ?, ?)')
-    .run(req.user.userId, device_id || null, task_type, params ? JSON.stringify(params) : null);
+    .run(req.user.userId, device_id || null, task_type, typeof params === 'string' ? params : (params ? JSON.stringify(params) : null));
   res.status(201).json({ task_run: { id: r.lastInsertRowid, task_type, status: 'pending' } });
 });
 
 app.get('/api/tasks/runs', auth, (req: any, res) => {
-  const runs = db.prepare('SELECT * FROM task_runs WHERE user_id = ? ORDER BY created_at DESC').all(req.user.userId);
+  const status = req.query.status as string | undefined;
+  const limit = parseInt(req.query.limit as string) || 100;
+  let runs;
+  if (status) {
+    runs = db.prepare('SELECT * FROM task_runs WHERE user_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?').all(req.user.userId, status, limit);
+  } else {
+    runs = db.prepare('SELECT * FROM task_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?').all(req.user.userId, limit);
+  }
   res.json({ runs });
 });
 
 app.get('/api/tasks/runs/:id', auth, (req: any, res) => {
   const run = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId);
   run ? res.json({ run }) : res.status(404).json({ error: 'Run not found' });
+});
+
+app.patch('/api/tasks/runs/:id', auth, (req: any, res) => {
+  const { status, result } = req.body;
+  const r = db.prepare('SELECT * FROM task_runs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.userId) as any;
+  if (!r) return res.status(404).json({ error: 'Run not found' });
+  const startedAt = status === 'running' ? new Date().toISOString() : r.started_at;
+  const completedAt = status === 'completed' || status === 'error' ? new Date().toISOString() : r.completed_at;
+  db.prepare('UPDATE task_runs SET status = ?, result = ?, started_at = ?, completed_at = ? WHERE id = ?')
+    .run(status || r.status, result ? JSON.stringify(result) : r.result, startedAt, completedAt, req.params.id);
+  res.json({ ok: true });
+});
+
+// ─── IG Accounts (per device) ───
+app.post('/api/ig-accounts', auth, (req: any, res) => {
+  const { device_id, usernames } = req.body;
+  if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
+  // Find numeric device ID from string device_id
+  let numericDeviceId = device_id;
+  if (typeof device_id === 'string') {
+    const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ?').get(req.user.userId, device_id) as any;
+    numericDeviceId = device ? device.id : null;
+  }
+  if (!numericDeviceId) return res.status(404).json({ error: 'Device not found' });
+  // Replace all accounts for this user+device
+  db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(req.user.userId, numericDeviceId);
+  const insert = db.prepare('INSERT INTO ig_accounts (user_id, device_id, username) VALUES (?, ?, ?)');
+  const insertMany = db.transaction((items: string[]) => {
+    for (const u of items) insert.run(req.user.userId, numericDeviceId, u);
+  });
+  insertMany(usernames);
+  res.status(201).json({ ok: true, count: usernames.length });
+});
+
+app.get('/api/ig-accounts', auth, (req: any, res) => {
+  const deviceId = req.query.device_id as string;
+  let accounts;
+  if (deviceId) {
+    accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? AND device_id = ? ORDER BY username').all(req.user.userId, deviceId);
+  } else {
+    accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? ORDER BY username').all(req.user.userId);
+  }
+  res.json({ accounts });
+});
+
+// ─── Warmup Sessions (from app) ───
+app.post('/api/warmup-sessions', auth, (req: any, res) => {
+  const { account, duration_minutes, reels_viewed, likes, saves, elapsed_sec, status, timestamp } = req.body;
+  if (!account) return res.status(400).json({ error: 'account required' });
+  const r = db.prepare(`
+    INSERT INTO task_runs (user_id, task_type, status, params, result, created_at, completed_at)
+    VALUES (?, 'warmup_ig', ?, ?, ?, ?, ?)
+  `).run(
+    req.user.userId,
+    status || 'completed',
+    JSON.stringify({ account, duration_minutes }),
+    JSON.stringify({ reels_viewed, likes, saves, elapsed_sec }),
+    timestamp || new Date().toISOString(),
+    new Date().toISOString()
+  );
+  res.status(201).json({ ok: true, id: r.lastInsertRowid });
+});
+
+app.get('/api/warmup-sessions', auth, (req: any, res) => {
+  const runs = db.prepare(`
+    SELECT * FROM task_runs 
+    WHERE user_id = ? AND task_type = 'warmup_ig' 
+    ORDER BY created_at DESC LIMIT 100
+  `).all(req.user.userId);
+  res.json({ sessions: runs.map((r: any) => ({
+    id: r.id,
+    ...JSON.parse(r.params || '{}'),
+    ...JSON.parse(r.result || '{}'),
+    status: r.status,
+    timestamp: r.created_at,
+  }))});
 });
 
 // Health

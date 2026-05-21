@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SouthFarm — Cosecha</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Plus Jakarta Sans',sans-serif;min-height:100vh;background:#faf6f1;display:flex}
+.sidebar{width:220px;background:#2c2417;padding:32px 24px;display:flex;flex-direction:column;position:fixed;height:100vh}
+.sidebar .logo{font-family:'Fraunces',serif;font-size:22px;color:#d4a24e;font-weight:700}
+.sidebar .logo span{color:#e8ddd0;font-weight:400}
+.sidebar nav{margin-top:40px;display:flex;flex-direction:column;gap:4px}
+.sidebar nav a{color:#a89880;text-decoration:none;font-size:13px;font-weight:600;padding:10px 16px;border-radius:10px;transition:all .2s}
+.sidebar nav a:hover,.sidebar nav a.active{background:rgba(212,162,78,.15);color:#d4a24e}
+.main{margin-left:220px;flex:1;padding:40px 48px;position:relative}
+.badge{position:fixed;top:20px;right:20px;background:#c4694a;color:#fff;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:600;z-index:100}
+.page-title{font-family:'Fraunces',serif;font-size:32px;color:#2c2417;margin-bottom:40px}
+.fan{position:relative;height:160px;margin-bottom:20px}
+.fan-card{position:absolute;background:#fff;border-radius:16px;padding:20px 28px;box-shadow:0 4px 20px rgba(44,36,23,.08);border:1px solid rgba(44,36,23,.06);width:160px}
+.fan-card:nth-child(1){left:0;top:10px;transform:rotate(-2deg)}
+.fan-card:nth-child(2){left:170px;top:5px;transform:rotate(1deg)}
+.fan-card:nth-child(3){left:340px;top:15px;transform:rotate(-1.5deg)}
+.fan-card:nth-child(4){left:510px;top:0px;transform:rotate(2deg)}
+.fan-num{font-family:'Fraunces',serif;font-size:36px;font-weight:900;line-height:1}
+.fan-label{font-size:11px;color:#8a7e6f;text-transform:uppercase;letter-spacing:1.5px;margin-top:2px;font-weight:600}
+.c1 .fan-num{color:#c4694a} .c2 .fan-num{color:#5b7c5a} .c3 .fan-num{color:#d4a24e} .c4 .fan-num{color:#7a9a6d}
+.fleet-card{background:#fff;border-radius:16px;padding:24px 28px;box-shadow:0 4px 20px rgba(44,36,23,.08);border:1px solid rgba(44,36,23,.06);margin-top:-20px;margin-left:20px;margin-right:-10px;position:relative;z-index:2}
+.fleet-title{font-family:'Fraunces',serif;font-size:16px;color:#2c2417;margin-bottom:12px;font-weight:600}
+.fleet-devices{display:flex;gap:12px}
+.fleet-device{background:linear-gradient(135deg,#faf6f1,#f0ebe3);border-radius:12px;padding:14px 18px;flex:1}
+.fd-name{font-weight:700;font-size:14px;color:#2c2417}
+.fd-meta{font-size:12px;color:#8a7e6f;margin-top:2px}
+.fd-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#7a9a6d;margin-right:6px}
+.activity-section{margin-top:32px}
+.act-title{font-family:'Fraunces',serif;font-size:16px;color:#2c2417;margin-bottom:16px;font-weight:600}
+.act-item{background:#fff;border-radius:14px;padding:16px 20px;box-shadow:0 2px 12px rgba(44,36,23,.06);border:1px solid rgba(44,36,23,.05);margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
+.act-item:nth-child(odd){margin-left:20px}.act-item:nth-child(even){margin-left:50px}
+.act-user{font-weight:700;font-size:14px;color:#2c2417}
+.act-time{font-size:11px;color:#8a7e6f;margin-top:2px}
+.act-stats{font-size:13px;color:#6b6054;font-weight:500}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 3: Cosecha</div>
+<div class="sidebar">
+  <div class="logo">South<span>Farm</span></div>
+  <nav>
+    <a href="#" class="active">Dashboard</a><a href="#">Fleet</a><a href="#">Sessions</a><a href="#">Analytics</a><a href="#">Settings</a>
+  </nav>
+</div>
+<div class="main">
+  <div class="page-title">Dashboard</div>
+  <div class="fan">
+    <div class="fan-card c1"><div class="fan-num">12</div><div class="fan-label">Sessions</div></div>
+    <div class="fan-card c2"><div class="fan-num">347</div><div class="fan-label">Reels</div></div>
+    <div class="fan-card c3"><div class="fan-num">89</div><div class="fan-label">Likes</div></div>
+    <div class="fan-card c4"><div class="fan-num">84</div><div class="fan-label">Min</div></div>
+  </div>
+  <div class="fleet-card">
+    <div class="fleet-title">Fleet</div>
+    <div class="fleet-devices">
+      <div class="fleet-device"><span class="fd-dot"></span><div class="fd-name">POCO C71 #1</div><div class="fd-meta">Android 14 · Online</div></div>
+      <div class="fleet-device"><span class="fd-dot"></span><div class="fd-name">POCO C71 #2</div><div class="fd-meta">Android 14 · Online</div></div>
+    </div>
+  </div>
+  <div class="activity-section">
+    <div class="act-title">Recent Activity</div>
+    <div class="act-item"><div><div class="act-user">@clipper1</div><div class="act-time">hace 2h</div></div><div class="act-stats">32 reels · 8 likes · 3 saves</div></div>
+    <div class="act-item"><div><div class="act-user">@clipper2</div><div class="act-time">hace 5h</div></div><div class="act-stats">45 reels · 12 likes · 5 saves</div></div>
+    <div class="act-item"><div><div class="act-user">@clipper3</div><div class="act-time">ayer</div></div><div class="act-stats">28 reels · 6 likes · 2 saves</div></div>
+  </div>
+</div>
+</body>
+</html>

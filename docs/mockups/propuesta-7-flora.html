@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1280">
+<title>SouthFarm — Propuesta 7: Flora</title>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&family=Playfair+Display:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#f5f2f0;color:#2a2118;font-family:'Nunito',sans-serif;min-height:100vh}
+.badge{position:fixed;top:16px;right:16px;background:#4a7c59;color:#fff;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;z-index:100}
+header{padding:20px 32px;display:flex;align-items:center;justify-content:space-between}
+header h1{font-family:'Playfair Display',serif;font-size:26px;color:#4a7c59}
+header h1 span{color:#a89090}
+.tabs{display:flex;justify-content:center;gap:8px;padding:0 32px 20px;border-bottom:1px solid #e8e0d8;margin-bottom:24px}
+.tabs a{padding:8px 20px;border-radius:20px;text-decoration:none;font-size:13px;font-weight:600;color:#2a2118;opacity:.5}
+.tabs a.active{background:#4a7c59;color:#fff;opacity:1}
+.tabs a:hover{opacity:.8}
+.grid{padding:0 32px 32px;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-rows:min-content;gap:16px;max-width:1280px;margin:0 auto}
+.card{background:#fff;border-radius:16px;padding:20px;border:1px solid #e8e0d8}
+.card.tall{grid-row:span 2}
+.card.wide{grid-column:span 2}
+.card h3{font-family:'Playfair Display',serif;font-size:15px;margin-bottom:8px;color:#4a7c59}
+.big-num{font-family:'Playfair Display',serif;font-size:40px;color:#4a7c59;line-height:1}
+.big-label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;opacity:.4;margin-top:4px}
+.device-card{display:flex;flex-direction:column;gap:8px}
+.device-card .plant{width:100%;height:40px;display:flex;align-items:flex-end;justify-content:center;gap:4px}
+.device-card .leaf{width:12px;background:#4a7c59;border-radius:50% 0;opacity:.6}
+.device-card .leaf:nth-child(1){height:24px;transform:rotate(-15deg)}.device-card .leaf:nth-child(2){height:32px;opacity:.8}.device-card .leaf:nth-child(3){height:28px;transform:rotate(15deg)}
+.device-card .dname{font-weight:700;font-size:14px}.device-card .dmeta{font-size:11px;opacity:.4}
+.device-card .dst{font-size:12px;color:#4a7c59;font-weight:600}
+.act-item{padding:10px 0;border-bottom:1px solid #f0ece4;display:flex;gap:8px;align-items:flex-start}
+.act-item:last-child{border:none}
+.act-item .av{width:24px;height:24px;border-radius:50%;background:#e8f0e9;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#4a7c59;flex-shrink:0}
+.act-item .txt{font-size:12px;line-height:1.4}.act-item .txt strong{color:#4a7c59}
+.act-item .tm{font-size:10px;opacity:.3}
+.stat-row{display:flex;gap:8px;flex-wrap:wrap}
+.stat-pill{background:#f5f2f0;border-radius:12px;padding:8px 14px;text-align:center;flex:1;min-width:80px}
+.stat-pill .n{font-family:'Playfair Display',serif;font-size:22px;color:#4a7c59}
+.stat-pill .l{font-size:9px;text-transform:uppercase;letter-spacing:1px;opacity:.4}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 7: Flora</div>
+<header>
+  <h1>South<span>Farm</span></h1>
+  <span style="font-size:13px;opacity:.4">May 21, 2026</span>
+</header>
+<div class="tabs">
+  <a href="#" class="active">Dashboard</a>
+  <a href="#">Devices</a>
+  <a href="#">Sessions</a>
+  <a href="#">Settings</a>
+</div>
+<div class="grid">
+  <!-- Stats -->
+  <div class="card">
+    <div class="big-num">12</div>
+    <div class="big-label">Sessions</div>
+  </div>
+  <div class="card tall">
+    <div class="big-num">347</div>
+    <div class="big-label">Reels Viewed</div>
+    <div style="margin-top:auto;padding-top:16px">
+      <div class="stat-row">
+        <div class="stat-pill"><div class="n">89</div><div class="l">Likes</div></div>
+        <div class="stat-pill"><div class="n">84</div><div class="l">Min</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div style="text-align:center;font-size:12px;opacity:.4;margin-bottom:8px">Fleet Health</div>
+    <div style="text-align:center">
+      <svg width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="20" fill="none" stroke="#e8e0d8" stroke-width="4"/><circle cx="24" cy="24" r="20" fill="none" stroke="#4a7c59" stroke-width="4" stroke-dasharray="126" stroke-dashoffset="0" stroke-linecap="round" transform="rotate(-90 24 24)"/></svg>
+      <div style="font-weight:700;color:#4a7c59;margin-top:4px">2/2 Online</div>
+    </div>
+  </div>
+  <!-- Devices -->
+  <div class="card wide">
+    <h3>Devices</h3>
+    <div style="display:flex;gap:16px">
+      <div class="device-card" style="flex:1;padding:12px;background:#f9f7f5;border-radius:12px">
+        <div class="plant"><div class="leaf"></div><div class="leaf"></div><div class="leaf"></div></div>
+        <div class="dname">POCO C71</div>
+        <div class="dmeta">192.168.0.6</div>
+        <div class="dst">Active</div>
+      </div>
+      <div class="device-card" style="flex:1;padding:12px;background:#f9f7f5;border-radius:12px">
+        <div class="plant"><div class="leaf"></div><div class="leaf"></div><div class="leaf"></div></div>
+        <div class="dname">POCO C71 #2</div>
+        <div class="dmeta">192.168.0.7</div>
+        <div class="dst">Active</div>
+      </div>
+    </div>
+  </div>
+  <!-- Activity -->
+  <div class="card tall">
+    <h3>Activity</h3>
+    <div class="act-item"><div class="av">C1</div><div><div class="txt"><strong>@clipper1</strong> warmup done — 42 reels, 15 likes</div><div class="tm">2m ago</div></div></div>
+    <div class="act-item"><div class="av">C2</div><div><div class="txt"><strong>@clipper2</strong> posting 3 videos</div><div class="tm">8m ago</div></div></div>
+    <div class="act-item"><div class="av">C3</div><div><div class="txt"><strong>@clipper3</strong> account verified</div><div class="tm">23m ago</div></div></div>
+  </div>
+</div>
+</body>
+</html>
