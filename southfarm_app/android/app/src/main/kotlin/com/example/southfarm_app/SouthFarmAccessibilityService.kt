@@ -19,7 +19,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "SouthFarmA11y"
-        private const val API_BASE = "https://physiology-combination-have-julie.trycloudflare.com"
+        private const val API_BASE = "https://api.southfarm.tech/api"
         var isRunning = false
             private set
         var currentStatus: String = "idle"
@@ -196,7 +196,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Poll: token=${if (token != null) token.take(20) + "..." else "NULL"}")
                 if (token == null) return@Thread
 
-                val url = URL("$API_BASE/api/tasks/runs?status=pending&limit=1")
+                val url = URL("$API_BASE/tasks/runs?status=pending&limit=1")
                 val conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.setRequestProperty("Authorization", "Bearer $token")
@@ -288,7 +288,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
     private fun updateTaskStatus(taskId: Int, status: String, token: String, metrics: String?) {
         try {
-            val url = URL("$API_BASE/api/tasks/runs/$taskId")
+            val url = URL("$API_BASE/tasks/runs/$taskId")
             val conn = url.openConnection() as HttpURLConnection
             conn.requestMethod = "PATCH"
             conn.setRequestProperty("Content-Type", "application/json")
@@ -579,7 +579,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
      * Returns true if the correct account is active, false if failed.
      */
     private fun ensureCorrectAccount(targetUsername: String): Boolean {
-        debugLog("ensureCorrectAccount: target=$targetUsername")
+        val cleanTarget = targetUsername.trimStart('@')
+        debugLog("ensureCorrectAccount: target=$targetUsername clean=$cleanTarget")
 
         // Step 1: Go to Profile tab
         val root = rootInActiveWindow ?: run {
@@ -605,23 +606,23 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         debugLog("ensureCorrectAccount: current=$currentUsername, target=$targetUsername")
 
         // Step 3: If already correct, we're done
-        if (currentUsername.equals(targetUsername, ignoreCase = true)) {
+        if (currentUsername.equals(cleanTarget, ignoreCase = true)) {
             debugLog("ensureCorrectAccount: already on correct account")
             return true
         }
 
         // Step 4: Open the account switcher by tapping the username header
-        debugLog("ensureCorrectAccount: switching from $currentUsername to $targetUsername")
+        debugLog("ensureCorrectAccount: switching from $currentUsername to $cleanTarget")
         tapAt(170f, 120f)
         Thread.sleep(2500)
 
         // Step 5: Find and tap the target account in the switcher
         val switcherRoot = rootInActiveWindow ?: return false
-        val switched = tapAccountInSwitcher(switcherRoot, targetUsername)
+        val switched = tapAccountInSwitcher(switcherRoot, cleanTarget)
         switcherRoot.recycle()
 
         if (!switched) {
-            debugLog("ensureCorrectAccount: could not find $targetUsername in switcher")
+            debugLog("ensureCorrectAccount: could not find $cleanTarget in switcher")
             return false
         }
 
@@ -633,7 +634,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         val verifyUsername = readProfileUsername(verifyRoot)
         verifyRoot.recycle()
 
-        val success = verifyUsername.equals(targetUsername, ignoreCase = true)
+        val success = verifyUsername.equals(cleanTarget, ignoreCase = true)
         debugLog("ensureCorrectAccount: verification after switch = $verifyUsername, success=$success")
         return success
     }
@@ -1247,8 +1248,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 if (username.matches(Regex("[a-z0-9._]+")) && username.any { it.isLetter() } &&
                     ignorePatterns.none { it.matches(username) }) {
                     val isActive = node.isSelected
-                    accounts.add("@$username")
-                    debugLog("  Found account: @$username active=$isActive")
+                    accounts.add(username)
+                    debugLog("  Found account: $username active=$isActive")
                     return // Don't recurse into this node's children
                 }
             }

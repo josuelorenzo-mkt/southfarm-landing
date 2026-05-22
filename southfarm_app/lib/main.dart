@@ -725,10 +725,10 @@ class _WarmupScreenState extends State<WarmupScreen> {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('last_account') ?? '';
     final accountsJson = prefs.getString('detected_accounts') ?? '[]';
-    final accounts = (jsonDecode(accountsJson) as List).cast<String>();
+    final accounts = (jsonDecode(accountsJson) as List).cast<String>().map((a) => a.replaceFirst(RegExp(r'^@'), '')).toList();
     if (mounted) {
       setState(() {
-        _selectedAccount = saved;
+        _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
         _savedAccounts = accounts;
       });
     }
@@ -963,6 +963,36 @@ class _WarmupScreenState extends State<WarmupScreen> {
     print('[SouthFarm] $msg');
   }
 
+  void _showAccountPicker() {
+    if (_savedAccounts.isEmpty) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: sfCard,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: sfBorder, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 16),
+            ..._savedAccounts.map((acc) => ListTile(
+              leading: Icon(Icons.person, color: acc == _selectedAccount ? sfGreen : sfTextSecondary),
+              title: Text('@$acc', style: TextStyle(color: acc == _selectedAccount ? sfGreen : sfTextPrimary, fontWeight: acc == _selectedAccount ? FontWeight.bold : FontWeight.normal)),
+              trailing: acc == _selectedAccount ? Icon(Icons.check, color: sfGreen) : null,
+              onTap: () {
+                setState(() => _selectedAccount = acc);
+                SharedPreferences.getInstance().then((p) => p.setString('last_account', acc));
+                Navigator.pop(ctx);
+              },
+            )),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final metrics = _parseMetrics();
@@ -1064,4 +1094,291 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     label: const Text('Detener Warmup'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.redAccent,
-                      side: const BorderSide(color:
+                      side: const BorderSide(color: Colors.redAccent),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Map<String, dynamic> _parseMetrics() {
+    try {
+      return jsonDecode(_metrics) as Map<String, dynamic>;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Widget _MetricItem({required String value, required String label}) {
+    return Column(
+      children: [
+        Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
+        const SizedBox(height: 4),
+        Text(label, style: const TextStyle(fontSize: 12, color: sfTextSecondary)),
+      ],
+    );
+  }
+}
+
+
+// ─── Accounts Screen ─────────────────────────────────
+class AccountsScreen extends StatefulWidget {
+  const AccountsScreen({super.key});
+
+  @override
+  State<AccountsScreen> createState() => _AccountsScreenState();
+}
+
+class _AccountsScreenState extends State<AccountsScreen> {
+  List<String> _accounts = [];
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadAccounts();
+  }
+
+  Future<void> _loadAccounts() async {
+    setState(() => _loading = true);
+    try {
+      final accounts = await WarmupApi.detectAccounts();
+      if (mounted) setState(() => _accounts = accounts);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('detected_accounts', jsonEncode(accounts));
+    } catch (e) {
+      debugLog('Error detecting accounts: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void debugLog(String msg) {
+    print('[SouthFarm] $msg');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: sfBg,
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 16),
+            Text('Cuentas', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
+            const SizedBox(height: 4),
+            Text('Cuentas de Instagram detectadas', style: const TextStyle(fontSize: 14, color: sfTextSecondary)),
+            const SizedBox(height: 20),
+            if (_loading)
+              const Center(child: CircularProgressIndicator(color: sfGreen))
+            else if (_accounts.isEmpty)
+              Center(
+                child: Column(
+                  children: [
+                    Icon(Icons.person_outline, size: 48, color: sfTextSecondary),
+                    const SizedBox(height: 12),
+                    Text('No se encontraron cuentas', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: _loadAccounts,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Escanear'),
+                      style: ElevatedButton.styleFrom(backgroundColor: sfGreen, foregroundColor: Colors.black),
+                    ),
+                  ],
+                ),
+              )
+            else
+              ..._accounts.map((acc) => Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(color: sfCard, borderRadius: BorderRadius.circular(12), border: Border.all(color: sfBorder)),
+                child: Row(
+                  children: [
+                    CircleAvatar(radius: 20, backgroundColor: sfGreen.withValues(alpha: 0.2), child: Icon(Icons.person, color: sfGreen)),
+                    const SizedBox(width: 12),
+                    Expanded(child: Text('@$acc', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: sfTextPrimary))),
+                    Icon(Icons.check_circle, color: sfGreen, size: 20),
+                  ],
+                ),
+              )),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── History Screen ──────────────────────────────────
+class HistoryScreen extends StatefulWidget {
+  const HistoryScreen({super.key});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  List<Map<String, dynamic>> _sessions = [];
+  bool _loading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSessions();
+  }
+
+  void debugLog(String msg) {
+    print('[SouthFarm] $msg');
+  }
+
+  Future<void> _loadSessions() async {
+    setState(() => _loading = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
+      final List<dynamic> decoded = jsonDecode(sessionsJson);
+      if (mounted) setState(() => _sessions = decoded.cast<Map<String, dynamic>>().reversed.toList());
+    } catch (e) {
+      debugLog('Error loading sessions: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _syncToBackend() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      if (token == null) return;
+      final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
+      final List<dynamic> sessions = jsonDecode(sessionsJson);
+      for (final s in sessions) {
+        if (s['synced'] == true) continue;
+        final res = await http.post(
+          Uri.parse('$API_BASE/warmup-sessions'),
+          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+          body: jsonEncode({
+            'account': s['account'],
+            'duration_minutes': s['duration_minutes'],
+            'reels_viewed': s['reels_viewed'] ?? 0,
+            'likes': s['likes'] ?? 0,
+            'saves': s['saves'] ?? 0,
+            'elapsed_sec': s['elapsed_sec'] ?? 0,
+            'status': s['status'] ?? 'completed',
+            'timestamp': s['timestamp'],
+          }),
+        );
+        if (res.statusCode == 201) {
+          s['synced'] = true;
+          await prefs.setString('warmup_sessions', jsonEncode(sessions));
+          debugLog('Session synced to backend');
+        } else {
+          debugLog('Sync failed: ${res.statusCode} ${res.body}');
+        }
+      }
+      _loadSessions();
+    } catch (e) {
+      debugLog('Sync error (will retry later): $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: sfBg,
+      body: RefreshIndicator(
+        color: sfGreen,
+        onRefresh: () async { await _loadSessions(); await _syncToBackend(); },
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Historial', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
+                  IconButton(
+                    onPressed: _syncToBackend,
+                    icon: Icon(Icons.cloud_upload_outlined, color: sfTextSecondary),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text('${_sessions.length} sesiones', style: const TextStyle(fontSize: 14, color: sfTextSecondary)),
+              const SizedBox(height: 20),
+              if (_loading)
+                const Center(child: CircularProgressIndicator(color: sfGreen))
+              else if (_sessions.isEmpty)
+                Center(
+                  child: Column(
+                    children: [
+                      Icon(Icons.history, size: 48, color: sfTextSecondary),
+                      const SizedBox(height: 12),
+                      Text('Sin sesiones aún', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
+                    ],
+                  ),
+                )
+              else
+                ..._sessions.map((s) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: sfCard, borderRadius: BorderRadius.circular(12), border: Border.all(color: sfBorder)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text('@${s['account'] ?? '?'}', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: sfGreen)),
+                          Text(_formatTime(s['timestamp']), style: const TextStyle(fontSize: 12, color: sfTextSecondary)),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _metric('${s['reels_viewed'] ?? 0}', 'Reels', sfGreen),
+                          _metric('${s['likes'] ?? 0}', 'Likes', const Color(0xFFf472b6)),
+                          _metric('${s['saves'] ?? 0}', 'Saves', const Color(0xFFfbbf24)),
+                          _metric('${s['duration_minutes'] ?? '?'}min', 'Duración', sfTextSecondary),
+                        ],
+                      ),
+                    ],
+                  ),
+                )),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _metric(String value, String label, Color color) {
+    return Column(
+      children: [
+        Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: color)),
+        const SizedBox(height: 2),
+        Text(label, style: const TextStyle(fontSize: 11, color: sfTextSecondary)),
+      ],
+    );
+  }
+
+  String _formatTime(String? iso) {
+    if (iso == null) return '';
+    try {
+      final dt = DateTime.parse(iso);
+      return '${dt.day}/${dt.month} ${dt.hour}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return '';
+    }
+  }
+}
