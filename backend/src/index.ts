@@ -56,6 +56,21 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (device_id) REFERENCES devices(id)
   );
+
+  CREATE TABLE IF NOT EXISTS warmup_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    account TEXT,
+    duration_minutes INTEGER DEFAULT 2,
+    reels_viewed INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    saves INTEGER DEFAULT 0,
+    elapsed_sec INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'completed',
+    timestamp TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
 `);
 
 // Auth middleware
@@ -124,8 +139,13 @@ app.get('/api/tasks', (_req, res) => {
 app.post('/api/tasks/run', auth, (req: any, res) => {
   const { task_type, device_id, params } = req.body;
   if (!task_type) return res.status(400).json({ error: 'task_type required' });
+  // Normalize account in params: strip leading @
+  let normalizedParams = params;
+  if (params && typeof params === 'object' && params.account) {
+    normalizedParams = { ...params, account: params.account.replace(/^@+/, '') };
+  }
   const r = db.prepare('INSERT INTO task_runs (user_id, device_id, task_type, params, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(req.user.userId, device_id || null, task_type, typeof params === 'string' ? params : (params ? JSON.stringify(params) : null), 'pending', new Date().toISOString());
+    .run(req.user.userId, device_id || null, task_type, typeof normalizedParams === 'string' ? normalizedParams : (normalizedParams ? JSON.stringify(normalizedParams) : null), 'pending', new Date().toISOString());
   res.status(201).json({ task_run: { id: r.lastInsertRowid, task_type, status: 'pending' } });
 });
 
@@ -231,8 +251,10 @@ app.get('/api/ig-accounts', auth, (req: any, res) => {
 
 // ─── Warmup Sessions (from app) ───
 app.post('/api/warmup-sessions', auth, (req: any, res) => {
-  const { account, duration_minutes, reels_viewed, likes, saves, elapsed_sec, status, timestamp } = req.body;
+  const { duration_minutes, reels_viewed, likes, saves, elapsed_sec, status, timestamp } = req.body;
+  let account = req.body.account;
   if (!account) return res.status(400).json({ error: 'account required' });
+  account = account.replace(/^@+/, ''); // normalize: strip leading @
   const r = db.prepare(`
     INSERT INTO task_runs (user_id, task_type, status, params, result, created_at, completed_at)
     VALUES (?, 'warmup_ig', ?, ?, ?, ?, ?)
@@ -251,15 +273,23 @@ app.get('/api/warmup-sessions', auth, (req: any, res) => {
   const runs = db.prepare(`
     SELECT * FROM task_runs 
     WHERE user_id = ? AND task_type = 'warmup_ig' 
-    ORDER BY created_at DESC LIMIT 100
+    ORDER BY id DESC LIMIT 100
   `).all(req.user.userId);
-  res.json({ sessions: runs.map((r: any) => ({
-    id: r.id,
-    ...JSON.parse(r.params || '{}'),
-    ...JSON.parse(r.result || '{}'),
-    status: r.status,
-    timestamp: r.created_at,
-  }))});
+  res.json({ sessions: runs.map((r: any) => {
+    const params = JSON.parse(r.params || '{}');
+    const result = JSON.parse(r.result || '{}');
+    // Normalize account: strip leading @ for consistent storage
+    if (params.account && params.account.startsWith('@')) {
+      params.account = params.account.replace(/^@+/, '');
+    }
+    return {
+      id: r.id,
+      ...params,
+      ...result,
+      status: r.status,
+      timestamp: r.created_at,
+    };
+  })});
 });
 
 // Health
