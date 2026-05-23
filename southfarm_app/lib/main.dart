@@ -108,6 +108,10 @@ class WarmupApi {
     return result ?? '{}';
   }
 
+  static Future<void> ackFinished() async {
+    try { await _channel.invokeMethod<bool>('ackFinished'); } catch (_) {}
+  }
+
   static Future<bool> isServiceRunning() async {
     final result = await _channel.invokeMethod<bool>('isServiceRunning');
     return result ?? false;
@@ -706,13 +710,17 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Timer? _backendPollTimer;
   String _lastRemoteStatus = '';
   bool _finishShown = false;
+  bool _isLocalWarmup = false;
+  bool _warmupSaved = false;
+  int? _activeRemoteTaskId;
+  Timer? _remotePollTimer;
   List<String> _savedAccounts = [];
 
   @override
   void initState() {
     super.initState();
     _loadSavedAccount();
-    _pollStatus();
+    _startRemotePolling();
   }
 
   @override
@@ -747,6 +755,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
   void dispose() {
     _pollTimer?.cancel();
     _backendPollTimer?.cancel();
+    _remotePollTimer?.cancel();
     super.dispose();
   }
 
@@ -765,10 +774,59 @@ class _WarmupScreenState extends State<WarmupScreen> {
         if (status == 'finished' && !_finishShown) {
           _pollTimer?.cancel();
           _finishShown = true;
-          _saveWarmupSession(metrics);
+          WarmupApi.ackFinished();
+          if (!_warmupSaved) {
+            _warmupSaved = true;
+            _saveWarmupSession(metrics);
+          }
+          setState(() { _isRunning = false; _isLocalWarmup = false; });
           _showCompletionDialog(metrics);
         }
       }
+    });
+  }
+
+  void _startRemotePolling() {
+    _remotePollTimer?.cancel();
+    String _prevRemoteStatus = 'idle';
+    _remotePollTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (_isLocalWarmup) return;
+      try {
+        final status = await WarmupApi.getStatus();
+        // Only react to transition: (warming_up/opening/navigating/switching) -> finished
+        final wasRunning = _prevRemoteStatus == 'warming_up' || _prevRemoteStatus == 'opening_instagram' || _prevRemoteStatus == 'navigating_to_reels' || _prevRemoteStatus == 'switching_account';
+        _prevRemoteStatus = status;
+        if (status == 'finished' && wasRunning && !_finishShown) {
+          _finishShown = true;
+          WarmupApi.ackFinished();
+          final metrics = await WarmupApi.getMetrics();
+          final prefs = await SharedPreferences.getInstance();
+          final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
+          final sessions = (jsonDecode(sessionsJson) as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+          final parsed = jsonDecode(metrics) as Map<String, dynamic>;
+          final session = {
+            'id': 'remote_${DateTime.now().millisecondsSinceEpoch}',
+            'account': parsed['account'] ?? 'remote',
+            'duration_minutes': parsed['duration_minutes'] ?? 2,
+            'reels_viewed': parsed['reels_viewed'] ?? 0,
+            'likes': parsed['likes'] ?? 0,
+            'saves': parsed['saves'] ?? 0,
+            'elapsed_sec': parsed['elapsed_sec'] ?? 0,
+            'timestamp': DateTime.now().toIso8601String(),
+            'synced': false,
+          };
+          sessions.insert(0, session);
+          await prefs.setString('warmup_sessions', jsonEncode(sessions));
+          if (!_warmupSaved) {
+            _warmupSaved = true;
+            await _saveWarmupSession(metrics);
+          }
+          if (mounted) {
+            _showCompletionDialog(metrics);
+            setState(() { _isRunning = false; _isLocalWarmup = false; });
+          }
+        }
+      } catch (_) {}
     });
   }
 
@@ -783,7 +841,13 @@ class _WarmupScreenState extends State<WarmupScreen> {
     await WarmupApi.startOverlay();
     await WarmupApi.startWarmup(_selectedAccount, _selectedDuration);
 
-    setState(() { _isRunning = true; _finishShown = false; });
+    setState(() {
+      _isRunning = true;
+      _isLocalWarmup = true;
+      _finishShown = false;
+      _warmupSaved = false;
+      _activeRemoteTaskId = null;
+    });
     _pollStatus();
     _pollBackendCommands();
   }
@@ -808,6 +872,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
         if (!data['active']) return;
 
         final task = data['task'];
+        _activeRemoteTaskId = task['id'];
+        _isLocalWarmup = false;
         final remoteStatus = task['status'] as String? ?? '';
 
         // Only react to status changes
@@ -834,7 +900,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
   }
 
   void _showCompletionDialog(String metrics) {
-    final m = _parseMetrics();
+    final m = jsonDecode(metrics) as Map<String, dynamic>;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -893,12 +959,12 @@ class _WarmupScreenState extends State<WarmupScreen> {
     if (_finishShown == false && _isRunning) {
       _saveWarmupSession(_metrics, stoppedEarly: true);
     }
-    setState(() => _isRunning = false);
+    setState(() { _isRunning = false; _isLocalWarmup = false; });
   }
 
   Future<void> _saveWarmupSession(String metricsJson, {bool stoppedEarly = false}) async {
     try {
-      final m = _parseMetrics();
+      final m = jsonDecode(metricsJson) as Map<String, dynamic>;
       final prefs = await SharedPreferences.getInstance();
 
       final session = {
@@ -915,13 +981,47 @@ class _WarmupScreenState extends State<WarmupScreen> {
       };
 
       final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
-      final sessions = (jsonDecode(sessionsJson) as List).cast<Map<String, dynamic>>();
+      final List<dynamic> decoded = jsonDecode(sessionsJson);
+      final sessions = decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       sessions.insert(0, session);
       if (sessions.length > 100) sessions.removeRange(100, sessions.length);
 
       await prefs.setString('warmup_sessions', jsonEncode(sessions));
       debugLog('Session saved: ${session['account']} | ${session['reels_viewed']} reels | ${session['likes']} likes');
-      _syncSessionToBackend(session, sessions, prefs);
+
+      final token = prefs.getString('auth_token');
+      if (token == null) return;
+
+      if (!_isLocalWarmup && _activeRemoteTaskId != null) {
+        await http.patch(
+          Uri.parse('$API_BASE/tasks/runs/${_activeRemoteTaskId}'),
+          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+          body: jsonEncode({
+            'status': 'completed',
+            'result': {
+              'reels_viewed': session['reels_viewed'],
+              'likes': session['likes'],
+              'saves': session['saves'],
+              'elapsed_sec': session['elapsed_sec'],
+            }
+          }),
+        );
+      } else {
+        await http.post(
+          Uri.parse('$API_BASE/warmup-sessions'),
+          headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+          body: jsonEncode({
+            'account': session['account'],
+            'duration_minutes': session['duration_minutes'],
+            'reels_viewed': session['reels_viewed'],
+            'likes': session['likes'],
+            'saves': session['saves'],
+            'elapsed_sec': session['elapsed_sec'],
+            'status': session['status'],
+            'timestamp': session['timestamp'],
+          }),
+        );
+      }
     } catch (e) {
       debugLog('Error saving session: $e');
     }
@@ -1140,7 +1240,20 @@ class _AccountsScreenState extends State<AccountsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadAccounts();
+    _loadSavedAccounts();
+  }
+
+  Future<void> _loadSavedAccounts() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString('detected_accounts');
+      if (saved != null) {
+        final List<dynamic> decoded = jsonDecode(saved);
+        if (mounted) setState(() => _accounts = decoded.cast<String>());
+      }
+    } catch (e) {
+      debugLog('Error loading saved accounts: $e');
+    }
   }
 
   Future<void> _loadAccounts() async {
@@ -1175,6 +1288,17 @@ class _AccountsScreenState extends State<AccountsScreen> {
             const SizedBox(height: 4),
             Text('Cuentas de Instagram detectadas', style: const TextStyle(fontSize: 14, color: sfTextSecondary)),
             const SizedBox(height: 20),
+            // Always-visible scan button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _loadAccounts,
+                icon: const Icon(Icons.search),
+                label: const Text('Escanear cuentas'),
+                style: ElevatedButton.styleFrom(backgroundColor: sfGreen, foregroundColor: Colors.black),
+              ),
+            ),
+            const SizedBox(height: 16),
             if (_loading)
               const Center(child: CircularProgressIndicator(color: sfGreen))
             else if (_accounts.isEmpty)
@@ -1233,6 +1357,17 @@ class _HistoryScreenState extends State<HistoryScreen> {
     _loadSessions();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Reload when screen becomes visible
+    _loadSessions();
+  }
+
+  void reload() {
+    _loadSessions();
+  }
+
   void debugLog(String msg) {
     print('[SouthFarm] $msg');
   }
@@ -1243,7 +1378,35 @@ class _HistoryScreenState extends State<HistoryScreen> {
       final prefs = await SharedPreferences.getInstance();
       final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
       final List<dynamic> decoded = jsonDecode(sessionsJson);
-      if (mounted) setState(() => _sessions = decoded.cast<Map<String, dynamic>>().reversed.toList());
+
+      List<Map<String, dynamic>> local = decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+
+      // Fetch backend sessions
+      List<Map<String, dynamic>> backend = [];
+      final token = prefs.getString('auth_token');
+      if (token != null) {
+        final res = await http.get(
+          Uri.parse('$API_BASE/warmup-sessions'),
+          headers: {'Authorization': 'Bearer $token'},
+        );
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          backend = (data['sessions'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+        }
+      }
+
+      // Merge + dedupe by id or timestamp fallback
+      final Map<String, Map<String, dynamic>> map = {};
+      for (final s in [...backend, ...local]) {
+        final key = (s['id'] ?? s['timestamp'] ?? '').toString();
+        if (key.isEmpty) continue;
+        map[key] = s;
+      }
+
+      final merged = map.values.toList();
+      merged.sort((a, b) => (b['timestamp'] ?? '').compareTo(a['timestamp'] ?? ''));
+
+      if (mounted) setState(() => _sessions = merged);
     } catch (e) {
       debugLog('Error loading sessions: $e');
     } finally {
@@ -1375,7 +1538,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   String _formatTime(String? iso) {
     if (iso == null) return '';
     try {
-      final dt = DateTime.parse(iso);
+      final dt = DateTime.parse(iso).toLocal();
       return '${dt.day}/${dt.month} ${dt.hour}:${dt.minute.toString().padLeft(2, '0')}';
     } catch (_) {
       return '';
