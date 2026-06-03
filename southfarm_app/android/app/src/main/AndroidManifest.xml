@@ -41,9 +41,24 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- SouthFarm Loading Overlay Activity -->
+        <activity
+            android:name=".LoadingOverlayActivity"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:exported="false" />
+
         <!-- SouthFarm Overlay Service -->
         <service
             android:name=".SouthFarmOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- SouthFarm Loading Overlay Service -->
+        <service
+            android:name=".SouthFarmLoadingService"
             android:exported="false"
             android:foregroundServiceType="specialUse" />
 

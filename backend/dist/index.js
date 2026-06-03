@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
+import https from 'https';
 import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -50,7 +51,35 @@ db.exec(`
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (device_id) REFERENCES devices(id)
   );
+
+  CREATE TABLE IF NOT EXISTS warmup_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    account TEXT,
+    duration_minutes INTEGER DEFAULT 2,
+    reels_viewed INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
+    saves INTEGER DEFAULT 0,
+    elapsed_sec INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'completed',
+    timestamp TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS ig_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id INTEGER,
+    username TEXT NOT NULL,
+    profile_pic_url TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    UNIQUE(user_id, device_id, username)
+  );
 `);
+;
 // Auth middleware
 function auth(req, res, next) {
     const header = req.headers.authorization;
@@ -120,8 +149,13 @@ app.post('/api/tasks/run', auth, (req, res) => {
     const { task_type, device_id, params } = req.body;
     if (!task_type)
         return res.status(400).json({ error: 'task_type required' });
+    // Normalize account in params: strip leading @
+    let normalizedParams = params;
+    if (params && typeof params === 'object' && params.account) {
+        normalizedParams = { ...params, account: params.account.replace(/^@+/, '') };
+    }
     const r = db.prepare('INSERT INTO task_runs (user_id, device_id, task_type, params, status, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(req.user.userId, device_id || null, task_type, typeof params === 'string' ? params : (params ? JSON.stringify(params) : null), 'pending', new Date().toISOString());
+        .run(req.user.userId, device_id || null, task_type, typeof normalizedParams === 'string' ? normalizedParams : (normalizedParams ? JSON.stringify(normalizedParams) : null), 'pending', new Date().toISOString());
     res.status(201).json({ task_run: { id: r.lastInsertRowid, task_type, status: 'pending' } });
 });
 app.get('/api/tasks/runs', auth, (req, res) => {
@@ -195,7 +229,24 @@ app.patch('/api/tasks/runs/:id', auth, (req, res) => {
     res.json({ ok: true });
 });
 // ─── IG Accounts (per device) ───
-app.post('/api/ig-accounts', auth, (req, res) => {
+// ─── Scrape IG profile pic ───
+function fetchProfilePicUrl(username) {
+    return new Promise((resolve) => {
+        const url = `https://www.instagram.com/${username}/`;
+        const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
+            let html = '';
+            res.on('data', (chunk) => { html += chunk.toString(); });
+            res.on('end', () => {
+                const match = html.match(/og:image[^>]*content="([^"]+)"/);
+                const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
+                resolve(picUrl);
+            });
+        });
+        req.setTimeout(8000, () => { req.destroy(); resolve(''); });
+        req.on('error', () => resolve(''));
+    });
+}
+app.post('/api/ig-accounts', auth, async (req, res) => {
     const { device_id, usernames } = req.body;
     if (!usernames || !Array.isArray(usernames))
         return res.status(400).json({ error: 'usernames array required' });
@@ -209,12 +260,16 @@ app.post('/api/ig-accounts', auth, (req, res) => {
         return res.status(404).json({ error: 'Device not found' });
     // Replace all accounts for this user+device
     db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(req.user.userId, numericDeviceId);
-    const insert = db.prepare('INSERT INTO ig_accounts (user_id, device_id, username) VALUES (?, ?, ?)');
-    const insertMany = db.transaction((items) => {
-        for (const u of items)
-            insert.run(req.user.userId, numericDeviceId, u);
-    });
-    insertMany(usernames);
+    const insert = db.prepare('INSERT OR IGNORE INTO ig_accounts (user_id, device_id, username, profile_pic_url) VALUES (?, ?, ?, ?)');
+    // Scrape profile pics and insert
+    for (const u of usernames) {
+        let picUrl = '';
+        try {
+            picUrl = await fetchProfilePicUrl(u);
+        }
+        catch (_) { }
+        insert.run(req.user.userId, numericDeviceId, u, picUrl);
+    }
     res.status(201).json({ ok: true, count: usernames.length });
 });
 app.get('/api/ig-accounts', auth, (req, res) => {
@@ -230,9 +285,11 @@ app.get('/api/ig-accounts', auth, (req, res) => {
 });
 // ─── Warmup Sessions (from app) ───
 app.post('/api/warmup-sessions', auth, (req, res) => {
-    const { account, duration_minutes, reels_viewed, likes, saves, elapsed_sec, status, timestamp } = req.body;
+    const { duration_minutes, reels_viewed, likes, saves, elapsed_sec, status, timestamp } = req.body;
+    let account = req.body.account;
     if (!account)
         return res.status(400).json({ error: 'account required' });
+    account = account.replace(/^@+/, ''); // normalize: strip leading @
     const r = db.prepare(`
     INSERT INTO task_runs (user_id, task_type, status, params, result, created_at, completed_at)
     VALUES (?, 'warmup_ig', ?, ?, ?, ?, ?)
@@ -243,15 +300,23 @@ app.get('/api/warmup-sessions', auth, (req, res) => {
     const runs = db.prepare(`
     SELECT * FROM task_runs 
     WHERE user_id = ? AND task_type = 'warmup_ig' 
-    ORDER BY created_at DESC LIMIT 100
+    ORDER BY id DESC LIMIT 100
   `).all(req.user.userId);
-    res.json({ sessions: runs.map((r) => ({
-            id: r.id,
-            ...JSON.parse(r.params || '{}'),
-            ...JSON.parse(r.result || '{}'),
-            status: r.status,
-            timestamp: r.created_at,
-        })) });
+    res.json({ sessions: runs.map((r) => {
+            const params = JSON.parse(r.params || '{}');
+            const result = JSON.parse(r.result || '{}');
+            // Normalize account: strip leading @ for consistent storage
+            if (params.account && params.account.startsWith('@')) {
+                params.account = params.account.replace(/^@+/, '');
+            }
+            return {
+                id: r.id,
+                ...params,
+                ...result,
+                status: r.status,
+                timestamp: r.created_at,
+            };
+        }) });
 });
 // Health
 app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));

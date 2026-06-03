@@ -23,7 +23,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         var isRunning = false
             private set
         var currentStatus: String = "idle"
-            private set
+            internal set
         var warmupMetrics: String = "{}"
             private set
         var detectedAccounts: String = "[]"
@@ -325,6 +325,15 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         isWarmupRunning = true
         currentStatus = "starting"
+
+        // Start loading overlay (Service-based — can draw over other apps)
+        try {
+            val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
+            startForegroundService(loadingIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not start loading overlay: ${e.message}")
+        }
+
         warmupThread = Thread {
             try {
                 runWarmupLoop(username, durationMinutes)
@@ -342,6 +351,12 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                     stopService(overlayIntent)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error stopping overlay: ${e.message}")
+                }
+                // Stop loading overlay if still showing
+                try {
+                    SouthFarmLoadingService.dismissLoading()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping loading overlay: ${e.message}")
                 }
                 returnToSouthFarm()
             }
@@ -371,6 +386,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
     // ─── Main Warmup Loop (based on v6.py do_reels_session) ───
 
+    private fun updateLoadingText(text: String) {
+        SouthFarmLoadingService.showLoading(text)
+    }
+
     private fun runWarmupLoop(username: String, durationMinutes: Int) {
         val durationSec = durationMinutes * 60L
         resetMetrics()
@@ -379,9 +398,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 1: Open Instagram
         currentStatus = "opening_instagram"
+        updateLoadingText("Abriendo Instagram...")
         if (!openInstagram()) {
             Log.e(TAG, "ERROR: could not open Instagram")
             currentStatus = "error: could_not_open_instagram"
+            updateLoadingText("Error al abrir Instagram")
+            Thread.sleep(2000)
+            SouthFarmLoadingService.dismissLoading()
             return
         }
         Thread.sleep(2500)
@@ -389,9 +412,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 2: Verify and switch to correct account
         currentStatus = "switching_account"
+        updateLoadingText("Cambiando a @$username...")
         if (!ensureCorrectAccount(username)) {
             Log.e(TAG, "ERROR: could not switch to account $username")
             currentStatus = "error: could_not_switch_to_$username"
+            updateLoadingText("Error al cambiar cuenta")
+            Thread.sleep(2000)
+            SouthFarmLoadingService.dismissLoading()
             return
         }
         Thread.sleep(1000)
@@ -399,9 +426,14 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 3: Navigate to Reels
         currentStatus = "navigating_to_reels"
+        updateLoadingText("Navegando a Reels...")
         navigateToReels()
         Thread.sleep(1000)
         Log.e(TAG, "Navigated to reels, starting main loop...")
+
+        // Step 4: Dismiss loading overlay — warmup starts now
+        currentStatus = "warming_up"
+        SouthFarmLoadingService.dismissLoading()
 
         // Step 4: Main loop
         val startTime = System.currentTimeMillis()

@@ -19,6 +19,7 @@ import android.widget.LinearLayout
 import android.widget.Button
 import android.widget.TextView
 import kotlin.math.sin
+import android.graphics.BitmapFactory
 
 class SouthFarmOverlayService : Service() {
 
@@ -31,6 +32,15 @@ class SouthFarmOverlayService : Service() {
 
         fun setPaused(paused: Boolean) {
             isPaused = paused
+        }
+
+        // Loading overlay state
+        fun showLoading(text: String) {
+            SouthFarmLoadingService.showLoading(text)
+        }
+
+        fun dismissLoading() {
+            SouthFarmLoadingService.dismissLoading()
         }
     }
 
@@ -115,12 +125,18 @@ class SouthFarmOverlayService : Service() {
         // Popup card
         val card = LinearLayout(this)
         card.orientation = LinearLayout.VERTICAL
-        card.setPadding(48, 40, 48, 40)
-        card.setBackgroundColor(0xFF1a1a1a.toInt())
+        card.setPadding(40, 36, 40, 36)
         card.gravity = Gravity.CENTER
 
+        // Rounded card background
+        val cardBg = android.graphics.drawable.GradientDrawable()
+        cardBg.setColor(0xFF1a1a1a.toInt())
+        cardBg.cornerRadius = 28f
+        cardBg.setStroke(1, 0xFF333333.toInt())
+        card.background = cardBg
+
         val cardParams = FrameLayout.LayoutParams(
-            (screenWidth * 0.75).toInt(),
+            (screenWidth * 0.78).toInt(),
             FrameLayout.LayoutParams.WRAP_CONTENT
         )
         cardParams.gravity = Gravity.CENTER
@@ -148,49 +164,32 @@ class SouthFarmOverlayService : Service() {
         val btnRow = LinearLayout(this)
         btnRow.orientation = LinearLayout.HORIZONTAL
         btnRow.gravity = Gravity.CENTER
+        val btnLayoutParam = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
 
-        // Continue button
-        val continueBtn = createButton("Continuar", 0xFF34d399.toInt(), Color.BLACK) {
-            hideControlPopup()
-            if (isPaused) {
-                isPaused = false
-                SouthFarmAccessibilityService.resumeWarmupStatic()
-            }
-        }
-        btnRow.addView(continueBtn)
-
-        // Pause/Resume button
+        // Pause/Resume button (left)
         val pauseBtn = if (isPaused) {
-            createButton("Reanudar", 0xFF3b82f6.toInt(), Color.WHITE) {
+            createButton("▶ Reanudar", 0xFF3b82f6.toInt(), Color.WHITE) {
                 isPaused = false
                 SouthFarmAccessibilityService.resumeWarmupStatic()
                 hideControlPopup()
             }
         } else {
-            createButton("Pausar", 0xFFf97316.toInt(), Color.WHITE) {
+            createButton("⏸ Pausar", 0xFFf97316.toInt(), Color.WHITE) {
                 isPaused = true
                 SouthFarmAccessibilityService.pauseWarmupStatic()
                 hideControlPopup()
             }
         }
-        val pauseParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-        pauseParams.setMargins(12, 0, 0, 0)
-        pauseBtn.layoutParams = pauseParams
+        pauseBtn.layoutParams = btnLayoutParam
         btnRow.addView(pauseBtn)
 
-        // Stop button
-        val stopBtn = createButton("Detener", 0xFFef4444.toInt(), Color.WHITE) {
+        // Stop button (right)
+        val stopBtn = createButton("⏹ Detener", 0xFFef4444.toInt(), Color.WHITE) {
             SouthFarmAccessibilityService.stopWarmupStatic()
             hideControlPopup()
             stopSelf()
         }
-        val stopParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
+        val stopParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         stopParams.setMargins(12, 0, 0, 0)
         stopBtn.layoutParams = stopParams
         btnRow.addView(stopBtn)
@@ -224,10 +223,18 @@ class SouthFarmOverlayService : Service() {
         return Button(this).apply {
             this.text = text
             setTextColor(textColor)
-            setBackgroundColor(bgColor.toInt())
-            textSize = 14f
-            setPadding(24, 12, 24, 12)
+            textSize = 13f
+            setPadding(20, 10, 20, 10)
+            isAllCaps = false
             setOnClickListener { onClick() }
+            // Rounded background
+            val shape = android.graphics.drawable.GradientDrawable()
+            shape.setColor(bgColor.toInt())
+            shape.cornerRadius = 28f
+            background = shape
+            // Minimum width for consistent sizing
+            minWidth = 0
+            minimumWidth = 0
         }
     }
 
@@ -275,11 +282,16 @@ class ControlButtonView(context: android.content.Context) : View(context) {
         color = 0xDD1a1a1a.toInt()
         style = Paint.Style.FILL
     }
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF34d399.toInt()
         style = Paint.Style.STROKE
-        strokeWidth = 4f
-        strokeCap = Paint.Cap.ROUND
+        strokeWidth = 3f
+    }
+    private val logoBitmap: Bitmap
+
+    init {
+        // Load the PNG from drawable resources
+        logoBitmap = BitmapFactory.decodeResource(context.resources, R.drawable.sprout_logo)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -290,15 +302,16 @@ class ControlButtonView(context: android.content.Context) : View(context) {
 
         // Dark circle background
         canvas.drawCircle(cx, cy, r, circlePaint)
+        // Green border
+        canvas.drawCircle(cx, cy, r, borderPaint)
 
-        // Small SouthFarm icon (play-like triangle)
-        val s = r * 0.5f
-        val path = Path()
-        path.moveTo(cx - s * 0.4f, cy - s)
-        path.lineTo(cx + s * 0.7f, cy)
-        path.lineTo(cx - s * 0.4f, cy + s)
-        path.close()
-        canvas.drawPath(path, iconPaint)
+        // Draw the bitmap logo centered and scaled
+        val scale = r * 2 / logoBitmap.width.toFloat() * 0.7f // scale to fit inside the circle
+        canvas.save()
+        canvas.translate(cx - logoBitmap.width * scale / 2, cy - logoBitmap.height * scale / 2)
+        canvas.scale(scale, scale)
+        canvas.drawBitmap(logoBitmap, 0f, 0f, null)
+        canvas.restore()
     }
 }
 

@@ -47,6 +47,17 @@ class SouthFarmApp extends StatelessWidget {
   }
 }
 
+// ─── Instagram Logo Widget ───
+class InstagramLogo extends StatelessWidget {
+  final double size;
+  const InstagramLogo({super.key, this.size = 20});
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset('assets/ig_logo.png', width: size, height: size);
+  }
+}
+
 // ─── SouthFarm Logo Widget ───
 class SouthFarmLogo extends StatelessWidget {
   final double fontSize;
@@ -147,11 +158,50 @@ class WarmupApi {
     return result ?? false;
   }
 
-  static Future<List<String>> detectAccounts() async {
+  static Future<String> detectAccounts() async {
     final result = await _channel.invokeMethod<String>('detectAccounts');
-    if (result == null || result == '[]') return [];
-    final list = jsonDecode(result) as List;
-    return list.cast<String>();
+    return result ?? '[]';
+  }
+
+  // ─── Backend API helpers ───
+  static Future<String?> getToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token');
+  }
+
+  static Future<String> getDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('device_id') ?? prefs.getString('stable_device_id') ?? 'unknown';
+  }
+
+  static Future<void> syncAccountsToBackend(List<String> usernames) async {
+    final token = await getToken();
+    final deviceId = await getDeviceId();
+    if (token == null) return;
+    try {
+      await http.post(
+        Uri.parse('$API_BASE/ig-accounts'),
+        headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
+        body: jsonEncode({'device_id': deviceId, 'usernames': usernames}),
+      );
+    } catch (_) {}
+  }
+
+  static Future<List<Map<String, dynamic>>> getAccountsFromBackend() async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await http.get(
+        Uri.parse('$API_BASE/ig-accounts'),
+        headers: {'Authorization': 'Bearer $token'},
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final accounts = (data['accounts'] as List).cast<Map<String, dynamic>>();
+        return accounts;
+      }
+    } catch (_) {}
+    return [];
   }
 }
 
@@ -714,7 +764,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
   bool _warmupSaved = false;
   int? _activeRemoteTaskId;
   Timer? _remotePollTimer;
-  List<String> _savedAccounts = [];
+  List<Map<String, dynamic>> _savedAccounts = [];
 
   @override
   void initState() {
@@ -732,8 +782,24 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Future<void> _loadSavedAccount() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString('last_account') ?? '';
+    // Try backend first
+    try {
+      final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      if (backendAccounts.isNotEmpty && mounted) {
+        setState(() {
+          _savedAccounts = backendAccounts;
+          _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+        });
+        return;
+      }
+    } catch (_) {}
+    // Fallback to local
     final accountsJson = prefs.getString('detected_accounts') ?? '[]';
-    final accounts = (jsonDecode(accountsJson) as List).cast<String>().map((a) => a.replaceFirst(RegExp(r'^@'), '')).toList();
+    final decoded = jsonDecode(accountsJson) as List;
+    final accounts = decoded.map((a) {
+      if (a is Map) return {'username': (a['username'] ?? '').toString().replaceFirst(RegExp(r'^@'), ''), 'profile_pic_url': a['profile_pic_url'] ?? ''};
+      return {'username': a.toString().replaceFirst(RegExp(r'^@'), ''), 'profile_pic_url': ''};
+    }).where((a) => (a['username'] as String).isNotEmpty).toList();
     if (mounted) {
       setState(() {
         _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
@@ -743,10 +809,23 @@ class _WarmupScreenState extends State<WarmupScreen> {
   }
 
   Future<void> _loadSavedAccounts() async {
+    // Try backend first
+    try {
+      final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      if (backendAccounts.isNotEmpty && mounted) {
+        setState(() => _savedAccounts = backendAccounts);
+        return;
+      }
+    } catch (_) {}
+    // Fallback to local
     final prefs = await SharedPreferences.getInstance();
     final accountsJson = prefs.getString('detected_accounts') ?? '[]';
-    final accounts = (jsonDecode(accountsJson) as List).cast<String>();
-    if (mounted && accounts.length != _savedAccounts.length) {
+    final decoded = jsonDecode(accountsJson) as List;
+    final accounts = decoded.map((a) {
+      if (a is Map) return {'username': (a['username'] ?? '').toString().replaceFirst(RegExp(r'^@'), ''), 'profile_pic_url': a['profile_pic_url'] ?? ''};
+      return {'username': a.toString().replaceFirst(RegExp(r'^@'), ''), 'profile_pic_url': ''};
+    }).where((a) => (a['username'] as String).isNotEmpty).toList();
+    if (mounted) {
       setState(() => _savedAccounts = accounts);
     }
   }
@@ -1076,16 +1155,26 @@ class _WarmupScreenState extends State<WarmupScreen> {
             const SizedBox(height: 12),
             Container(width: 40, height: 4, decoration: BoxDecoration(color: sfBorder, borderRadius: BorderRadius.circular(2))),
             const SizedBox(height: 16),
-            ..._savedAccounts.map((acc) => ListTile(
-              leading: Icon(Icons.person, color: acc == _selectedAccount ? sfGreen : sfTextSecondary),
-              title: Text('@$acc', style: TextStyle(color: acc == _selectedAccount ? sfGreen : sfTextPrimary, fontWeight: acc == _selectedAccount ? FontWeight.bold : FontWeight.normal)),
-              trailing: acc == _selectedAccount ? Icon(Icons.check, color: sfGreen) : null,
-              onTap: () {
-                setState(() => _selectedAccount = acc);
-                SharedPreferences.getInstance().then((p) => p.setString('last_account', acc));
-                Navigator.pop(ctx);
-              },
-            )),
+            ..._savedAccounts.map((acc) {
+              final username = (acc['username'] ?? '') as String;
+              final picUrl = (acc['profile_pic_url'] ?? '') as String;
+              final selected = username == _selectedAccount;
+              return ListTile(
+                leading: picUrl.isNotEmpty
+                    ? CircleAvatar(radius: 18, backgroundImage: NetworkImage(picUrl), backgroundColor: sfGreen.withValues(alpha: 0.2))
+                    : CircleAvatar(radius: 18, backgroundColor: sfGreen.withValues(alpha: 0.2), child: Icon(Icons.person, color: sfGreen, size: 18)),
+                title: Text('@$username', style: TextStyle(color: selected ? sfGreen : sfTextPrimary, fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+                trailing: Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: InstagramLogo(size: 22),
+                ),
+                onTap: () {
+                  setState(() => _selectedAccount = username);
+                  SharedPreferences.getInstance().then((p) => p.setString('last_account', username));
+                  Navigator.pop(ctx);
+                },
+              );
+            }),
             const SizedBox(height: 16),
           ],
         ),
@@ -1116,13 +1205,26 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.person, color: sfGreen),
+                    _selectedAccount.isNotEmpty
+                        ? Builder(builder: (_) {
+                            final acc = _savedAccounts.cast<Map<String, dynamic>>().firstWhere(
+                              (a) => (a['username'] ?? '') == _selectedAccount,
+                              orElse: () => <String, dynamic>{},
+                            );
+                            final picUrl = (acc['profile_pic_url'] ?? '') as String;
+                            return picUrl.isNotEmpty
+                                ? CircleAvatar(radius: 14, backgroundImage: NetworkImage(picUrl))
+                                : const Icon(Icons.person, color: sfGreen, size: 20);
+                          })
+                        : const Icon(Icons.person, color: sfGreen, size: 20),
                     const SizedBox(width: 12),
                     Text(
                       _selectedAccount.isEmpty ? 'Seleccionar cuenta...' : '@$_selectedAccount',
                       style: TextStyle(color: _selectedAccount.isEmpty ? sfTextSecondary : sfTextPrimary, fontSize: 16),
                     ),
                     const Spacer(),
+                    InstagramLogo(size: 20),
+                    const SizedBox(width: 8),
                     const Icon(Icons.chevron_right, color: sfTextSecondary),
                   ],
                 ),
@@ -1234,7 +1336,7 @@ class AccountsScreen extends StatefulWidget {
 }
 
 class _AccountsScreenState extends State<AccountsScreen> {
-  List<String> _accounts = [];
+  List<Map<String, dynamic>> _accounts = [];
   bool _loading = false;
 
   @override
@@ -1244,12 +1346,23 @@ class _AccountsScreenState extends State<AccountsScreen> {
   }
 
   Future<void> _loadSavedAccounts() async {
+    // Try backend first, fallback to local
+    try {
+      final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      if (backendAccounts.isNotEmpty && mounted) {
+        setState(() => _accounts = backendAccounts);
+        return;
+      }
+    } catch (_) {}
     try {
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getString('detected_accounts');
       if (saved != null) {
         final List<dynamic> decoded = jsonDecode(saved);
-        if (mounted) setState(() => _accounts = decoded.cast<String>());
+        if (mounted) setState(() => _accounts = decoded.map((a) {
+          if (a is Map<String, dynamic>) return a;
+          return {'username': a.toString(), 'profile_pic_url': ''};
+        }).toList());
       }
     } catch (e) {
       debugLog('Error loading saved accounts: $e');
@@ -1259,10 +1372,32 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Future<void> _loadAccounts() async {
     setState(() => _loading = true);
     try {
-      final accounts = await WarmupApi.detectAccounts();
-      if (mounted) setState(() => _accounts = accounts);
+      final rawJson = await WarmupApi.detectAccounts();
+      final List<dynamic> decoded = jsonDecode(rawJson);
+      final usernames = decoded.map((a) {
+        if (a is Map) return (a['username'] ?? '').toString();
+        return a.toString();
+      }).where((a) => a.isNotEmpty).toList();
+
+      // Sync to backend (this triggers profile pic scraping)
+      await WarmupApi.syncAccountsToBackend(usernames);
+
+      // Load from backend (now with profile pics)
+      final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      if (backendAccounts.isNotEmpty && mounted) {
+        setState(() => _accounts = backendAccounts);
+      } else {
+        // Fallback: local data
+        final accounts = decoded.map((a) {
+          if (a is Map<String, dynamic>) return a;
+          return {'username': a.toString(), 'profile_pic_url': ''};
+        }).toList();
+        if (mounted) setState(() => _accounts = accounts);
+      }
+
+      // Also save locally as backup
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('detected_accounts', jsonEncode(accounts));
+      await prefs.setString('detected_accounts', jsonEncode(_accounts));
     } catch (e) {
       debugLog('Error detecting accounts: $e');
     } finally {
@@ -1319,19 +1454,29 @@ class _AccountsScreenState extends State<AccountsScreen> {
                 ),
               )
             else
-              ..._accounts.map((acc) => Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(color: sfCard, borderRadius: BorderRadius.circular(12), border: Border.all(color: sfBorder)),
-                child: Row(
-                  children: [
-                    CircleAvatar(radius: 20, backgroundColor: sfGreen.withValues(alpha: 0.2), child: Icon(Icons.person, color: sfGreen)),
-                    const SizedBox(width: 12),
-                    Expanded(child: Text('@$acc', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: sfTextPrimary))),
-                    Icon(Icons.check_circle, color: sfGreen, size: 20),
-                  ],
-                ),
-              )),
+              ..._accounts.map((acc) {
+                final username = acc['username'] ?? acc.toString();
+                final picUrl = acc['profile_pic_url'] ?? '';
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: sfCard, borderRadius: BorderRadius.circular(12), border: Border.all(color: sfBorder)),
+                  child: Row(
+                    children: [
+                      picUrl.isNotEmpty
+                          ? CircleAvatar(
+                              radius: 20,
+                              backgroundColor: sfGreen.withValues(alpha: 0.2),
+                              backgroundImage: NetworkImage(picUrl),
+                            )
+                          : CircleAvatar(radius: 20, backgroundColor: sfGreen.withValues(alpha: 0.2), child: Icon(Icons.person, color: sfGreen)),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text('@$username', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: sfTextPrimary))),
+                      InstagramLogo(size: 20),
+                    ],
+                  ),
+                );
+              }),
           ],
         ),
       ),

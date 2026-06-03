@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
+import https from 'https';
 import jwt from 'jsonwebtoken';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -71,7 +72,19 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
-`);
+
+  CREATE TABLE IF NOT EXISTS ig_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    device_id INTEGER,
+    username TEXT NOT NULL,
+    profile_pic_url TEXT DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    UNIQUE(user_id, device_id, username)
+  );
+`);;
 
 // Auth middleware
 function auth(req: any, res: any, next: any) {
@@ -218,7 +231,25 @@ app.patch('/api/tasks/runs/:id', auth, (req: any, res) => {
 });
 
 // ─── IG Accounts (per device) ───
-app.post('/api/ig-accounts', auth, (req: any, res) => {
+// ─── Scrape IG profile pic ───
+function fetchProfilePicUrl(username: string): Promise<string> {
+  return new Promise((resolve) => {
+    const url = `https://www.instagram.com/${username}/`;
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
+      let html = '';
+      res.on('data', (chunk: Buffer) => { html += chunk.toString(); });
+      res.on('end', () => {
+        const match = html.match(/og:image[^>]*content="([^"]+)"/);
+        const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
+        resolve(picUrl);
+      });
+    });
+    req.setTimeout(8000, () => { req.destroy(); resolve(''); });
+    req.on('error', () => resolve(''));
+  });
+}
+
+app.post('/api/ig-accounts', auth, async (req: any, res) => {
   const { device_id, usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
   // Find numeric device ID from string device_id
@@ -230,11 +261,13 @@ app.post('/api/ig-accounts', auth, (req: any, res) => {
   if (!numericDeviceId) return res.status(404).json({ error: 'Device not found' });
   // Replace all accounts for this user+device
   db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(req.user.userId, numericDeviceId);
-  const insert = db.prepare('INSERT INTO ig_accounts (user_id, device_id, username) VALUES (?, ?, ?)');
-  const insertMany = db.transaction((items: string[]) => {
-    for (const u of items) insert.run(req.user.userId, numericDeviceId, u);
-  });
-  insertMany(usernames);
+  const insert = db.prepare('INSERT OR IGNORE INTO ig_accounts (user_id, device_id, username, profile_pic_url) VALUES (?, ?, ?, ?)');
+  // Scrape profile pics and insert
+  for (const u of usernames) {
+    let picUrl = '';
+    try { picUrl = await fetchProfilePicUrl(u); } catch (_) {}
+    insert.run(req.user.userId, numericDeviceId, u, picUrl);
+  }
   res.status(201).json({ ok: true, count: usernames.length });
 });
 

@@ -42,6 +42,12 @@ class MainActivity : FlutterActivity() {
                 "getMetrics" -> {
                     result.success(SouthFarmAccessibilityService.warmupMetrics)
                 }
+                "ackFinished" -> {
+                    if (SouthFarmAccessibilityService.currentStatus == "finished") {
+                        SouthFarmAccessibilityService.currentStatus = "idle"
+                    }
+                    result.success(true)
+                }
                 "isServiceRunning" -> {
                     result.success(SouthFarmAccessibilityService.isRunning)
                 }
