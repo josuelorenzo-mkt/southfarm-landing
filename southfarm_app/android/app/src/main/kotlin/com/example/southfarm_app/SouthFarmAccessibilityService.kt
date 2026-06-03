@@ -1274,52 +1274,37 @@ class SouthFarmAccessibilityService : AccessibilityService() {
      * Known non-account items: "Add Instagram account", "Add Facebook profile", "Go to Accounts Center"
      */
     private fun extractAccountsFromSwitcher(root: AccessibilityNodeInfo, accounts: MutableList<String>) {
-        val switcherIgnoreDescs = setOf(
-            "Add Instagram account", "Agregar cuenta de Instagram",
-            "Add Facebook profile", "Agregar perfil de Facebook",
-            "Go to Accounts Center", "Ir al Centro de cuentas",
-            "Your Facebook profile", "Tu perfil de Facebook"
-        )
-
-        // Also ignore content-descs that match these non-username patterns
-        val ignorePatterns = listOf(
-            Regex("(?i)(\\d+)?\\s*(posts|followers|following|publicaciones|seguidores|seguidos)"),
-            Regex("(?i)\\d+\\s*chats"),
-            Regex("(?i)Your profile"),
-            Regex("(?i)Seen story"),
-            Regex("(?i)Add to story"),
-            Regex("(?i)Edit profile"),
-            Regex("(?i)Share profile"),
-            Regex("(?i)Professional dashboard")
-        )
-
-        findSwitcherAccounts(root, accounts, switcherIgnoreDescs, ignorePatterns)
+        // Based on UI dump analysis, real accounts in the switcher have:
+        // - class = ViewGroup (not Button)
+        // - clickable = true
+        // - content-desc = "username" (active, selected=true) OR "username, N chats" (others)
+        // - Children: ImageView + View(text=username) + ImageView/View(text="N chats")
+        // Non-account items are Buttons: "Add Instagram account", "Go to Accounts Center"
+        findSwitcherAccountsStrict(root, accounts)
     }
 
-    private fun findSwitcherAccounts(
+    private fun findSwitcherAccountsStrict(
         node: AccessibilityNodeInfo,
-        accounts: MutableList<String>,
-        ignoreDescs: Set<String>,
-        ignorePatterns: List<Regex>
+        accounts: MutableList<String>
     ) {
         val desc = node.contentDescription?.toString()?.trim() ?: ""
+        val className = node.className?.toString() ?: ""
 
-        // Check if this is an account item:
-        // - clickable ViewGroup
-        // - has contentDescription that is NOT in ignore list
-        // - contentDescription looks like a username (not a button label)
-        if (node.isClickable && desc.isNotEmpty() && desc !in ignoreDescs) {
-            // The content-desc for accounts is either "username" or "username, N chats"
-            // Extract the username part (before comma if present)
-            val username = desc.split(",")[0].trim()
-            if (username.isNotEmpty() && username.length >= 3 && username.length <= 30) {
-                // Verify it looks like a username (lowercase, dots, underscores, numbers)
-                // Must contain at least one letter to exclude pure numbers like "18"
-                if (username.matches(Regex("[a-z0-9._]+")) && username.any { it.isLetter() } &&
-                    ignorePatterns.none { it.matches(username) }) {
-                    val isActive = node.isSelected
+        // Only consider clickable ViewGroups (not Buttons, not ImageViews, etc.)
+        if (node.isClickable && className.endsWith("ViewGroup") && desc.isNotEmpty()) {
+            // Active account: content-desc = "username" + selected=true
+            // Other accounts: content-desc = "username, N chats"
+            val hasChats = desc.contains(",") && desc.lowercase().contains("chats")
+            val isActive = node.isSelected
+
+            if (hasChats || isActive) {
+                // Extract username (part before comma)
+                val username = desc.split(",")[0].trim()
+                if (username.length in 3..30 &&
+                    username.matches(Regex("[a-z0-9._]+")) &&
+                    username.any { it.isLetter() }) {
                     accounts.add(username)
-                    debugLog("  Found account: $username active=$isActive")
+                    debugLog("  Found REAL account: $username active=$isActive desc=\"$desc\"")
                     return // Don't recurse into this node's children
                 }
             }
@@ -1327,7 +1312,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            findSwitcherAccounts(child, accounts, ignoreDescs, ignorePatterns)
+            findSwitcherAccountsStrict(child, accounts)
         }
     }
 
