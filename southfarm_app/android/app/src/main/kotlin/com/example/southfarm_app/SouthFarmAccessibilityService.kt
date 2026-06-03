@@ -398,7 +398,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 1: Open Instagram
         currentStatus = "opening_instagram"
-        updateLoadingText("Abriendo Instagram...")
+        updateLoadingText("Preparando warmup...")
         if (!openInstagram()) {
             Log.e(TAG, "ERROR: could not open Instagram")
             currentStatus = "error: could_not_open_instagram"
@@ -412,7 +412,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 2: Verify and switch to correct account
         currentStatus = "switching_account"
-        updateLoadingText("Cambiando a @$username...")
+        updateLoadingText("Configurando cuenta...")
         if (!ensureCorrectAccount(username)) {
             Log.e(TAG, "ERROR: could not switch to account $username")
             currentStatus = "error: could_not_switch_to_$username"
@@ -426,7 +426,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 3: Navigate to Reels
         currentStatus = "navigating_to_reels"
-        updateLoadingText("Navegando a Reels...")
+        updateLoadingText("Lanzando warmup...")
         navigateToReels()
         Thread.sleep(1000)
         Log.e(TAG, "Navigated to reels, starting main loop...")
@@ -434,6 +434,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // Step 4: Dismiss loading overlay — warmup starts now
         currentStatus = "warming_up"
         SouthFarmLoadingService.dismissLoading()
+        // Transition overlay from loading mode (black/green/white) to running mode (waves + bubble)
+        SouthFarmOverlayService.transitionToRunning()
 
         // Step 4: Main loop
         val startTime = System.currentTimeMillis()
@@ -1148,6 +1150,25 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         try {
             debugLog("=== ACCOUNT SCAN v3 START ===")
 
+            // Start overlay (same as warmup loading)
+            try {
+                val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
+                startService(overlayIntent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting overlay for scan: ${e.message}")
+            }
+            Thread.sleep(500) // Wait for overlay to appear
+
+            // Start loading screen
+            try {
+                SouthFarmLoadingService.setInitialText("Escaneando aplicación...")
+                val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
+                startForegroundService(loadingIntent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting loading for scan: ${e.message}")
+            }
+            Thread.sleep(800) // Wait for loading screen to show + step 1 delay
+
             // Step 1: Open Instagram
             debugLog("Step 1: Opening Instagram...")
             openInstagram()
@@ -1202,6 +1223,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             // Step 4: Read the account switcher popup
             debugLog("Step 4: Reading switcher popup...")
+            SouthFarmLoadingService.showLoading("Detectando perfiles...")
+            Thread.sleep(1000) // Let user see the text
             val switcherRoot = rootInActiveWindow ?: run {
                 debugLog("Switcher root null")
                 returnToSouthFarm()
@@ -1221,10 +1244,25 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("ACCOUNT SCAN RESULT: ${accounts.size} accounts -> $accounts")
             switcherRoot.recycle()
 
+            // Step 6: Saving
+            if (accounts.isNotEmpty()) {
+                SouthFarmLoadingService.showLoading("Guardando información...")
+                Thread.sleep(1200) // Let user see completion
+            }
+
         } catch (e: Exception) {
             debugLog("SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting accounts: ${e.message}", e)
         }
+
+        // Stop loading + overlay
+        try {
+            SouthFarmLoadingService.dismissLoading()
+        } catch (_: Exception) {}
+        try {
+            val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
+            stopService(overlayIntent)
+        } catch (_: Exception) {}
 
         returnToSouthFarm()
         return accounts.distinct()

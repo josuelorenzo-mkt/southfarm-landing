@@ -21,6 +21,19 @@ import android.widget.TextView
 import kotlin.math.sin
 import android.graphics.BitmapFactory
 
+/**
+ * SouthFarmOverlayService — Manages the overlay layers during warmup and scan.
+ *
+ * OVERLAY STAGES:
+ *   [Loading Overlay] — Black/green/white/black2 layers + bubble. Used during:
+ *     - Warmup: account selection phase (before reaching Reels)
+ *     - Scan: account detection phase
+ *   [Running Overlay] — Wave borders + bubble. Used during:
+ *     - Warmup: Reels scrolling phase
+ *
+ * TRANSITION: Loading → Running happens via transitionToRunning()
+ * Called by SouthFarmAccessibilityService after navigateToReels()
+ */
 class SouthFarmOverlayService : Service() {
 
     companion object {
@@ -42,10 +55,22 @@ class SouthFarmOverlayService : Service() {
         fun dismissLoading() {
             SouthFarmLoadingService.dismissLoading()
         }
+
+        // Transition from loading overlays (black/green/white/black2) to running mode (waves + bubble)
+        fun transitionToRunning() {
+            val svc = _instance ?: return
+            svc.doTransitionToRunning()
+        }
+
+        private var _instance: SouthFarmOverlayService? = null
     }
 
     private var windowManager: WindowManager? = null
     private var waveView: WaveBorderView? = null
+    private var blackOverlay: View? = null
+    private var greenOverlay: View? = null
+    private var whiteOverlay: View? = null
+    private var blackOverlay2: View? = null
     private var controlButton: View? = null
     private var popupView: View? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -54,6 +79,7 @@ class SouthFarmOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        _instance = this
         createNotificationChannel()
         val notification = Notification.Builder(this, "southfarm_overlay")
             .setContentTitle("SouthFarm")
@@ -64,6 +90,11 @@ class SouthFarmOverlayService : Service() {
         showOverlay()
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // [Loading Overlay] — Full screen color layers + floating bubble
+    // Used during warmup (account selection) and scan (account detection)
+    // Layers: Instagram → Black → Green → White → Black2 → Bubble
+    // ═══════════════════════════════════════════════════════════════
     private fun showOverlay() {
         if (isShowing) return
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -72,8 +103,23 @@ class SouthFarmOverlayService : Service() {
         val screenHeight = resources.displayMetrics.heightPixels
         val borderWidth = 20
 
-        // Wave borders — NOT touchable, purely visual
-        val waveParams = WindowManager.LayoutParams(
+        // [DISABLED] Wave borders — kept for future re-activation
+        // val waveParams = WindowManager.LayoutParams(
+        //     screenWidth, screenHeight,
+        //     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        //     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+        //             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        //             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+        //             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        //     PixelFormat.TRANSLUCENT
+        // )
+        // waveParams.gravity = Gravity.TOP or Gravity.START
+        // val wave = WaveBorderView(this, screenWidth, screenHeight, borderWidth)
+        // waveView = wave
+        // windowManager?.addView(wave, waveParams)
+
+        // Black overlay — covers entire screen, NOT touchable
+        val blackParams = WindowManager.LayoutParams(
             screenWidth, screenHeight,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -82,11 +128,67 @@ class SouthFarmOverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         )
-        waveParams.gravity = Gravity.TOP or Gravity.START
+        blackParams.gravity = Gravity.TOP or Gravity.START
 
-        val wave = WaveBorderView(this, screenWidth, screenHeight, borderWidth)
-        waveView = wave
-        windowManager?.addView(wave, waveParams)
+        val black = View(this)
+        black.setBackgroundColor(Color.BLACK)
+        black.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        blackOverlay = black
+        windowManager?.addView(black, blackParams)
+
+        // Green overlay — above black, below white
+        val greenParams = WindowManager.LayoutParams(
+            screenWidth, screenHeight,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        )
+        greenParams.gravity = Gravity.TOP or Gravity.START
+
+        val green = View(this)
+        green.setBackgroundColor(0xFF34d399.toInt())
+        green.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        greenOverlay = green
+        windowManager?.addView(green, greenParams)
+
+        // White overlay — above green, below bubble, fully opaque
+        val whiteParams = WindowManager.LayoutParams(
+            screenWidth, screenHeight,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.OPAQUE
+        )
+        whiteParams.gravity = Gravity.TOP or Gravity.START
+
+        val white = View(this)
+        white.setBackgroundColor(Color.WHITE)
+        white.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        whiteOverlay = white
+        windowManager?.addView(white, whiteParams)
+
+        // Second black overlay — above white, below bubble
+        val black2Params = WindowManager.LayoutParams(
+            screenWidth, screenHeight,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.OPAQUE
+        )
+        black2Params.gravity = Gravity.TOP or Gravity.START
+
+        val black2 = View(this)
+        black2.setBackgroundColor(Color.BLACK)
+        black2.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        blackOverlay2 = black2
+        windowManager?.addView(black2, black2Params)
 
         // Small floating control button — IS touchable
         val btnSize = 120
@@ -104,8 +206,18 @@ class SouthFarmOverlayService : Service() {
         controlButton = btn
         windowManager?.addView(btn, btnParams)
 
+        // Ensure bubble stays on top — re-add after all overlays settle
+        handler.postDelayed({
+            try {
+                controlButton?.let { b ->
+                    windowManager?.removeView(b)
+                    windowManager?.addView(b, btnParams)
+                }
+            } catch (_: Exception) {}
+        }, 500)
+
         isShowing = true
-        startAnimation(wave)
+        // startAnimation(wave) // disabled with waves
     }
 
     private fun showControlPopup() {
@@ -251,15 +363,79 @@ class SouthFarmOverlayService : Service() {
         }, 16)
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // [Loading → Running Transition]
+    // Removes Loading Overlay layers, activates Running Overlay (waves + bubble)
+    // Called by A11y Service after reaching Reels
+    // ═══════════════════════════════════════════════════════════════
+    private fun doTransitionToRunning() {
+        handler.post {
+            // Remove loading overlays (black, green, white, black2)
+            try { blackOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+            try { greenOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+            try { whiteOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+            try { blackOverlay2?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+            blackOverlay = null
+            greenOverlay = null
+            whiteOverlay = null
+            blackOverlay2 = null
+
+            // Activate wave borders
+            val screenWidth = resources.displayMetrics.widthPixels
+            val screenHeight = resources.displayMetrics.heightPixels
+            val borderWidth = 20
+
+            val waveParams = WindowManager.LayoutParams(
+                screenWidth, screenHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            waveParams.gravity = Gravity.TOP or Gravity.START
+
+            val wave = WaveBorderView(this, screenWidth, screenHeight, borderWidth)
+            waveView = wave
+            windowManager?.addView(wave, waveParams)
+            startAnimation(wave)
+
+            // Re-add control button on top of waves
+            controlButton?.let { btn ->
+                try { windowManager?.removeView(btn) } catch (_: Exception) {}
+                val btnSize = 120
+                val btnParams = WindowManager.LayoutParams(
+                    btnSize, btnSize,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                    PixelFormat.TRANSLUCENT
+                )
+                btnParams.gravity = Gravity.TOP or Gravity.END
+                btnParams.y = 60
+                windowManager?.addView(btn, btnParams)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        _instance = null
         running = false
         isPaused = false
         handler.removeCallbacksAndMessages(null)
         hideControlPopup()
         try { waveView?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        try { blackOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        try { greenOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        try { whiteOverlay?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
+        try { blackOverlay2?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         try { controlButton?.let { windowManager?.removeView(it) } } catch (_: Exception) {}
         waveView = null
+        blackOverlay = null
+        // greenOverlay removed
+        whiteOverlay = null
+        blackOverlay2 = null
         controlButton = null
         isShowing = false
     }
