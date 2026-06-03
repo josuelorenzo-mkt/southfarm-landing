@@ -788,7 +788,15 @@ class _WarmupScreenState extends State<WarmupScreen> {
       if (backendAccounts.isNotEmpty && mounted) {
         setState(() {
           _savedAccounts = backendAccounts;
-          _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+          // Keep selected account only if it still exists
+          if (_selectedAccount.isNotEmpty && !backendAccounts.any((a) => (a['username'] ?? '') == _selectedAccount)) {
+            _selectedAccount = backendAccounts.first['username'] ?? '';
+          } else if (_selectedAccount.isEmpty) {
+            _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+            if (!backendAccounts.any((a) => (a['username'] ?? '') == _selectedAccount)) {
+              _selectedAccount = backendAccounts.first['username'] ?? '';
+            }
+          }
         });
         return;
       }
@@ -860,6 +868,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
           }
           setState(() { _isRunning = false; _isLocalWarmup = false; });
           _showCompletionDialog(metrics);
+          // Refresh accounts after warmup completes
+          _loadSavedAccount();
         }
       }
     });
@@ -1142,7 +1152,18 @@ class _WarmupScreenState extends State<WarmupScreen> {
     print('[SouthFarm] $msg');
   }
 
-  void _showAccountPicker() {
+  void _showAccountPicker() async {
+    // Always fetch fresh accounts from backend before showing picker
+    try {
+      final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      if (backendAccounts.isNotEmpty && mounted) {
+        setState(() => _savedAccounts = backendAccounts);
+        // If selected account no longer exists, deselect
+        if (_selectedAccount.isNotEmpty && !backendAccounts.any((a) => (a['username'] ?? '') == _selectedAccount)) {
+          setState(() => _selectedAccount = '');
+        }
+      }
+    } catch (_) {}
     if (_savedAccounts.isEmpty) return;
     showModalBottomSheet(
       context: context,
