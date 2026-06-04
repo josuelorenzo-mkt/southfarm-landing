@@ -398,7 +398,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 1: Open Instagram
         currentStatus = "opening_instagram"
-        updateLoadingText("Preparando warmup...")
+        updateLoadingText("Preparing warmup...")
         if (!openInstagram()) {
             Log.e(TAG, "ERROR: could not open Instagram")
             currentStatus = "error: could_not_open_instagram"
@@ -412,7 +412,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 2: Verify and switch to correct account
         currentStatus = "switching_account"
-        updateLoadingText("Configurando cuenta...")
+        updateLoadingText("Setting up account...")
         if (!ensureCorrectAccount(username)) {
             Log.e(TAG, "ERROR: could not switch to account $username")
             currentStatus = "error: could_not_switch_to_$username"
@@ -1161,7 +1161,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             // Start loading screen
             try {
-                SouthFarmLoadingService.setInitialText("Escaneando aplicación...")
+                SouthFarmLoadingService.setInitialText("Scanning app...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
                 startForegroundService(loadingIntent)
             } catch (e: Exception) {
@@ -1228,7 +1228,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             // Step 4: Read the account switcher popup
             debugLog("Step 4: Reading switcher popup...")
-            SouthFarmLoadingService.showLoading("Detectando perfiles...")
+            SouthFarmLoadingService.showLoading("Detecting profiles...")
             Thread.sleep(1000) // Let user see the text
             val switcherRoot = rootInActiveWindow ?: run {
                 debugLog("Switcher root null")
@@ -1251,7 +1251,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             // Step 6: Saving
             if (accounts.isNotEmpty()) {
-                SouthFarmLoadingService.showLoading("Guardando información...")
+                SouthFarmLoadingService.showLoading("Saving info...")
                 Thread.sleep(2000) // Let user see completion (bar animates to 100%)
             }
 

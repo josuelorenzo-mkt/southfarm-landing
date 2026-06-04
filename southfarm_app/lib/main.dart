@@ -272,7 +272,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
             children: [
               const SouthFarmLogo(fontSize: 40, leafIcon: Icons.local_florist),
               const SizedBox(height: 12),
-              const Text('Automatizacion movil', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
+              const Text('Mobile automation', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
             ],
           ),
         ),
@@ -292,10 +292,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   int _step = 0;
 
   final List<_OBStep> _steps = [
-    _OBStep(Icons.local_florist, 'Bienvenido a SouthFarm', 'Automatiza tareas en tu celular.\nWarmups, publicaciones y mas.'),
-    _OBStep(Icons.security, 'Activar Accesibilidad', 'SouthFarm necesita permiso de accesibilidad\npara simular toques en la pantalla.'),
-    _OBStep(Icons.layers, 'Activar Overlay', 'Veras una capa protectora cuando\nSouthFarm este trabajando.'),
-    _OBStep(Icons.check_circle, 'Todo listo!', 'Configura tus tareas y empeza.\nsouthfarm.tech'),
+    _OBStep(Icons.local_florist, 'Welcome to SouthFarm', 'Automate tasks on your phone.\nWarmups, posts, and more.'),
+    _OBStep(Icons.security, 'Enable Accessibility', 'SouthFarm needs accessibility permission\nto simulate screen taps.'),
+    _OBStep(Icons.layers, 'Enable Overlay', 'You will see a protective layer when\nSouthFarm is working.'),
+    _OBStep(Icons.check_circle, 'All set!', 'Set up your tasks and get started.\nsouthfarm.tech'),
   ];
 
   void _next() async {
@@ -349,7 +349,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               if (_step == 1 || _step == 2) ...[
                 const SizedBox(height: 24),
                 Text(
-                  _step == 1 ? 'Toca el boton y activa SouthFarm en Accesibilidad' : 'Toca el boton y permiti SouthFarm sobre otras apps',
+                  _step == 1 ? 'Tap the button and enable SouthFarm in Accessibility' : 'Tap the button and allow SouthFarm over other apps',
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: sfAmber, fontSize: 14),
                 ),
@@ -377,7 +377,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-                  child: Text(_step < _steps.length - 1 ? 'Activar' : 'Comenzar'),
+                  child: Text(_step < _steps.length - 1 ? 'Enable' : 'Get Started'),
                 ),
               ),
               const SizedBox(height: 16),
@@ -549,7 +549,7 @@ class _AuthScreenState extends State<AuthScreen> {
     final name = _nameCtrl.text.trim();
 
     if (email.isEmpty || pass.isEmpty || (!_isLogin && name.isEmpty)) {
-      setState(() { _error = 'Completa todos los campos'; _loading = false; });
+      setState(() { _error = 'Please fill in all fields'; _loading = false; });
       return;
     }
 
@@ -565,7 +565,7 @@ class _AuthScreenState extends State<AuthScreen> {
       AuthService.registerDevice();
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const MainScreen()));
     } else {
-      setState(() { _error = _isLogin ? 'Email o contrasena incorrectos' : 'Error al crear cuenta. Ya existe?'; _loading = false; });
+      setState(() { _error = _isLogin ? 'Incorrect email or password' : 'Error creating account. Already exists?'; _loading = false; });
     }
   }
 
@@ -587,22 +587,22 @@ class _AuthScreenState extends State<AuthScreen> {
                 decoration: BoxDecoration(color: sfCard, borderRadius: BorderRadius.circular(12)),
                 child: Row(
                   children: [
-                    Expanded(child: _tabBtn('Iniciar Sesion', _isLogin, () => setState(() => _isLogin = true))),
-                    Expanded(child: _tabBtn('Crear Cuenta', !_isLogin, () => setState(() => _isLogin = false))),
+                    Expanded(child: _tabBtn('Log In', _isLogin, () => setState(() => _isLogin = true))),
+                    Expanded(child: _tabBtn('Sign Up', !_isLogin, () => setState(() => _isLogin = false))),
                   ],
                 ),
               ),
               const SizedBox(height: 24),
 
               if (!_isLogin) ...[
-                TextField(controller: _nameCtrl, style: const TextStyle(color: sfTextPrimary), decoration: const InputDecoration(hintText: 'Nombre', hintStyle: TextStyle(color: sfTextSecondary))),
+                TextField(controller: _nameCtrl, style: const TextStyle(color: sfTextPrimary), decoration: const InputDecoration(hintText: 'Name', hintStyle: TextStyle(color: sfTextSecondary))),
                 const SizedBox(height: 12),
               ],
 
               TextField(controller: _emailCtrl, keyboardType: TextInputType.emailAddress, style: const TextStyle(color: sfTextPrimary), decoration: const InputDecoration(hintText: 'Email', hintStyle: TextStyle(color: sfTextSecondary))),
               const SizedBox(height: 12),
 
-              TextField(controller: _passCtrl, obscureText: true, style: const TextStyle(color: sfTextPrimary), decoration: const InputDecoration(hintText: 'Contrasena', hintStyle: TextStyle(color: sfTextSecondary))),
+              TextField(controller: _passCtrl, obscureText: true, style: const TextStyle(color: sfTextPrimary), decoration: const InputDecoration(hintText: 'Password', hintStyle: TextStyle(color: sfTextSecondary))),
               const SizedBox(height: 24),
 
               if (_error != null) ...[
@@ -618,7 +618,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   style: ElevatedButton.styleFrom(backgroundColor: sfGreen, foregroundColor: Colors.black, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
                   child: _loading
                       ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                      : Text(_isLogin ? 'Iniciar Sesion' : 'Crear Cuenta', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      : Text(_isLogin ? 'Log In' : 'Sign Up', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ),
             ],
@@ -669,10 +669,10 @@ class _MainScreenState extends State<MainScreen> {
       builder: (ctx) => AlertDialog(
         backgroundColor: sfCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Cerrar sesion', style: TextStyle(color: sfTextPrimary, fontSize: 18)),
-        content: Text('Queres cerrar sesion, $_userName?', style: const TextStyle(color: sfTextSecondary)),
+        title: const Text('Log out', style: TextStyle(color: sfTextPrimary, fontSize: 18)),
+        content: Text('Do you want to log out, $_userName?', style: const TextStyle(color: sfTextSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar', style: TextStyle(color: sfTextSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: sfTextSecondary))),
           TextButton(
             onPressed: () async {
               Navigator.pop(ctx);
@@ -681,7 +681,7 @@ class _MainScreenState extends State<MainScreen> {
                 Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen()));
               }
             },
-            child: const Text('Cerrar sesion', style: TextStyle(color: Colors.redAccent)),
+            child: const Text('Log out', style: TextStyle(color: Colors.redAccent)),
           ),
         ],
       ),
@@ -748,8 +748,8 @@ class _MainScreenState extends State<MainScreen> {
         },
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.play_circle), label: 'Warmup'),
-          BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'Cuentas'),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'Historial'),
+          BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'Accounts'),
+          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
         ],
       ),
     );
@@ -935,7 +935,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Future<void> _startWarmup() async {
     if (_selectedAccount.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Selecciona una cuenta primero')),
+        const SnackBar(content: Text('Select an account first')),
       );
       return;
     }
@@ -1013,7 +1013,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
           children: [
             Icon(Icons.check_circle, color: sfGreen, size: 28),
             SizedBox(width: 12),
-            Text('Warmup finalizado', style: TextStyle(color: sfTextPrimary, fontSize: 20)),
+            Text('Warmup complete', style: TextStyle(color: sfTextPrimary, fontSize: 20)),
           ],
         ),
         content: Column(
@@ -1047,7 +1047,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              child: const Text('Listo', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              child: const Text('Done', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
             ),
           ),
         ],
@@ -1226,7 +1226,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Cuenta de Instagram', style: TextStyle(color: sfTextSecondary, fontSize: 14)),
+            Text('Instagram Account', style: TextStyle(color: sfTextSecondary, fontSize: 14)),
             const SizedBox(height: 8),
             GestureDetector(
               onTap: () => _showAccountPicker(),
@@ -1253,7 +1253,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                         : const Icon(Icons.person, color: sfGreen, size: 20),
                     const SizedBox(width: 12),
                     Text(
-                      _selectedAccount.isEmpty ? 'Seleccionar cuenta...' : '@$_selectedAccount',
+                      _selectedAccount.isEmpty ? 'Select account...' : '@$_selectedAccount',
                       style: TextStyle(color: _selectedAccount.isEmpty ? sfTextSecondary : sfTextPrimary, fontSize: 16),
                     ),
                     const Spacer(),
@@ -1266,7 +1266,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
             ),
             const SizedBox(height: 24),
 
-            Text('Duracion', style: TextStyle(color: sfTextSecondary, fontSize: 14)),
+            Text('Duration', style: TextStyle(color: sfTextSecondary, fontSize: 14)),
             const SizedBox(height: 8),
             Row(
               children: [2, 5, 10, 20].map((d) => Expanded(
@@ -1314,8 +1314,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     : Icons.play_arrow,
                 ),
                 label: Text(
-                  _status == 'paused' ? 'Reanudar Warmup' :
-                  _isRunning ? 'Pausar Warmup' : 'Iniciar Warmup',
+                  _status == 'paused' ? 'Resume Warmup' :
+                  _isRunning ? 'Pause Warmup' : 'Start Warmup',
                 ),
               ),
             ),
@@ -1327,7 +1327,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   child: OutlinedButton.icon(
                     onPressed: _stopWarmup,
                     icon: const Icon(Icons.stop_circle),
-                    label: const Text('Detener Warmup'),
+                    label: const Text('Stop Warmup'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.redAccent,
                       side: const BorderSide(color: Colors.redAccent),
@@ -1453,9 +1453,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const SizedBox(height: 16),
-            Text('Cuentas', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
+            Text('Accounts', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
             const SizedBox(height: 4),
-            Text('Cuentas de Instagram detectadas', style: const TextStyle(fontSize: 14, color: sfTextSecondary)),
+            Text('Detected Instagram accounts', style: const TextStyle(fontSize: 14, color: sfTextSecondary)),
             const SizedBox(height: 20),
             // Always-visible scan button
             SizedBox(
@@ -1463,7 +1463,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
               child: ElevatedButton.icon(
                 onPressed: _loadAccounts,
                 icon: const Icon(Icons.search),
-                label: const Text('Escanear cuentas'),
+                label: const Text('Scan accounts'),
                 style: ElevatedButton.styleFrom(backgroundColor: sfGreen, foregroundColor: Colors.black),
               ),
             ),
@@ -1476,12 +1476,12 @@ class _AccountsScreenState extends State<AccountsScreen> {
                   children: [
                     Icon(Icons.person_outline, size: 48, color: sfTextSecondary),
                     const SizedBox(height: 12),
-                    Text('No se encontraron cuentas', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
+                    Text('No accounts found', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
                       onPressed: _loadAccounts,
                       icon: const Icon(Icons.refresh),
-                      label: const Text('Escanear'),
+                      label: const Text('Scan'),
                       style: ElevatedButton.styleFrom(backgroundColor: sfGreen, foregroundColor: Colors.black),
                     ),
                   ],
@@ -1647,7 +1647,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text('Historial', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
+                  Text('History', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: sfTextPrimary)),
                   IconButton(
                     onPressed: _syncToBackend,
                     icon: Icon(Icons.cloud_upload_outlined, color: sfTextSecondary),
@@ -1665,7 +1665,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     children: [
                       Icon(Icons.history, size: 48, color: sfTextSecondary),
                       const SizedBox(height: 12),
-                      Text('Sin sesiones aún', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
+                      Text('No sessions yet', style: TextStyle(color: sfTextSecondary, fontSize: 16)),
                     ],
                   ),
                 )
@@ -1691,7 +1691,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           _metric('${s['reels_viewed'] ?? 0}', 'Reels', sfGreen),
                           _metric('${s['likes'] ?? 0}', 'Likes', const Color(0xFFf472b6)),
                           _metric('${s['saves'] ?? 0}', 'Saves', const Color(0xFFfbbf24)),
-                          _metric('${s['duration_minutes'] ?? '?'}min', 'Duración', sfTextSecondary),
+                          _metric('${s['duration_minutes'] ?? '?'}min', 'Duration', sfTextSecondary),
                         ],
                       ),
                     ],
