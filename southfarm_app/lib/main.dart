@@ -170,6 +170,18 @@ class WarmupApi {
   }
 
   static Future<String> getDeviceId() async {
+    // Always use the real ANDROID_ID from the device, never from cached prefs
+    try {
+      final info = await MethodChannel('com.example.southfarm_app/warmup').invokeMethod<Map>('getDeviceInfo');
+      if (info != null && info['device_id'] != null) {
+        final realId = info['device_id']! as String;
+        // Keep prefs in sync
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('device_id', realId);
+        return realId;
+      }
+    } catch (_) {}
+    // Fallback to prefs only if MethodChannel fails
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('device_id') ?? prefs.getString('stable_device_id') ?? 'unknown';
   }
