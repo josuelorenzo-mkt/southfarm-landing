@@ -284,9 +284,12 @@ app.get('/api/ig-accounts', auth, (req, res) => {
     const deviceStrId = req.query.device_id;
     let accounts;
     if (deviceStrId) {
-        // Resolve string device_id to numeric id (same as POST)
-        const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, deviceStrId);
-        const numericId = device ? device.id : null;
+        // Try as numeric device id first (from webapp), then as string device_id (from app)
+        let numericId = parseInt(deviceStrId, 10);
+        if (isNaN(numericId)) {
+            const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, deviceStrId);
+            numericId = device ? device.id : null;
+        }
         if (numericId) {
             accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? AND device_id = ? ORDER BY username').all(req.user.userId, numericId);
         }
