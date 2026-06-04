@@ -1406,22 +1406,29 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Future<void> _loadAccounts() async {
     setState(() => _loading = true);
     try {
+      debugLog('SCAN: Starting account detection...');
+      // Ensure device is registered before scanning
+      await AuthService.registerDevice();
       final rawJson = await WarmupApi.detectAccounts();
+      debugLog('SCAN: detectAccounts returned: $rawJson');
       final List<dynamic> decoded = jsonDecode(rawJson);
+      debugLog('SCAN: decoded count: ${decoded.length}');
       final usernames = decoded.map((a) {
         if (a is Map) return (a['username'] ?? '').toString();
         return a.toString();
       }).where((a) => a.isNotEmpty).toList();
+      debugLog('SCAN: usernames to sync: $usernames');
 
       // Sync to backend (this triggers profile pic scraping)
       await WarmupApi.syncAccountsToBackend(usernames);
 
       // Load from backend (now with profile pics)
       final backendAccounts = await WarmupApi.getAccountsFromBackend();
+      debugLog('SCAN: backend returned ${backendAccounts.length} accounts');
       if (backendAccounts.isNotEmpty && mounted) {
         setState(() => _accounts = backendAccounts);
       } else {
-        // Fallback: local data
+        debugLog('SCAN: backend empty, using fallback local data');
         final accounts = decoded.map((a) {
           if (a is Map<String, dynamic>) return a;
           return {'username': a.toString(), 'profile_pic_url': ''};
@@ -1433,7 +1440,24 @@ class _AccountsScreenState extends State<AccountsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('detected_accounts', jsonEncode(_accounts));
     } catch (e) {
-      debugLog('Error detecting accounts: $e');
+      debugLog('SCAN ERROR: $e');
+      // On error, try loading from local cache or backend
+      try {
+        final backendAccounts = await WarmupApi.getAccountsFromBackend();
+        if (backendAccounts.isNotEmpty && mounted) {
+          debugLog('SCAN ERROR: loaded ${backendAccounts.length} accounts from backend as fallback');
+          setState(() => _accounts = backendAccounts);
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          final cached = prefs.getString('detected_accounts');
+          if (cached != null && mounted) {
+            debugLog('SCAN ERROR: loaded accounts from local cache as fallback');
+            setState(() => _accounts = (jsonDecode(cached) as List).cast<Map<String, dynamic>>());
+          }
+        }
+      } catch (e2) {
+        debugLog('SCAN ERROR fallback also failed: $e2');
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }

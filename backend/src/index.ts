@@ -260,12 +260,18 @@ app.post('/api/ig-accounts', auth, async (req: any, res) => {
   const { device_id, usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
   // Find numeric device ID from string device_id (use latest if duplicates)
-  let numericDeviceId = device_id;
+  let numericDeviceId: any = null;
   if (typeof device_id === 'string') {
     const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, device_id) as any;
     numericDeviceId = device ? device.id : null;
+    // Auto-create device if not found (app may have been reinstalled)
+    if (!numericDeviceId) {
+      const r = db.prepare('INSERT INTO devices (user_id, device_id, device_name, android_version) VALUES (?, ?, ?, ?)').run(req.user.userId, device_id, 'Auto-registered', null);
+      numericDeviceId = r.lastInsertRowid;
+      console.log(`Auto-created device ${device_id} (id=${numericDeviceId}) for user ${req.user.userId}`);
+    }
   }
-  if (!numericDeviceId) return res.status(404).json({ error: 'Device not found' });
+  if (!numericDeviceId) return res.status(400).json({ error: 'device_id required' });
   // Replace all accounts for this user+device
   db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(req.user.userId, numericDeviceId);
   const insert = db.prepare('INSERT OR IGNORE INTO ig_accounts (user_id, device_id, username, profile_pic_url) VALUES (?, ?, ?, ?)');
