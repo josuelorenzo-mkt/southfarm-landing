@@ -1167,7 +1167,12 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting loading for scan: ${e.message}")
             }
-            Thread.sleep(800) // Wait for loading screen to show + step 1 delay
+            // Wait for LoadingService instance to be ready
+            for (i in 0..20) {
+                if (SouthFarmLoadingService.isRunning) break
+                Thread.sleep(100)
+            }
+            Thread.sleep(600) // Extra wait for step 1 delay (500ms)
 
             // Step 1: Open Instagram
             debugLog("Step 1: Opening Instagram...")
@@ -1247,7 +1252,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             // Step 6: Saving
             if (accounts.isNotEmpty()) {
                 SouthFarmLoadingService.showLoading("Guardando información...")
-                Thread.sleep(1200) // Let user see completion
+                Thread.sleep(2000) // Let user see completion (bar animates to 100%)
             }
 
         } catch (e: Exception) {
@@ -1255,16 +1260,20 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Error detecting accounts: ${e.message}", e)
         }
 
-        // Stop loading + overlay
+        // Return to SouthFarm first, then dismiss overlay after a delay
+        returnToSouthFarm()
+        Thread.sleep(500) // Let SouthFarm appear behind the loading overlay
+
+        // Stop loading + overlay (user sees the completed 3 bubbles on top of SouthFarm)
         try {
             SouthFarmLoadingService.dismissLoading()
         } catch (_: Exception) {}
+        Thread.sleep(300) // Brief pause before removing overlay layers
         try {
             val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
             stopService(overlayIntent)
         } catch (_: Exception) {}
 
-        returnToSouthFarm()
         return accounts.distinct()
     }
 

@@ -125,9 +125,16 @@ app.get('/api/auth/me', auth, (req: any, res) => {
 app.post('/api/devices/register', auth, (req: any, res) => {
   const { device_id, device_name, android_version } = req.body;
   if (!device_id) return res.status(400).json({ error: 'device_id required' });
-  const r = db.prepare('INSERT INTO devices (user_id, device_id, device_name, android_version) VALUES (?, ?, ?, ?)')
-    .run(req.user.userId, device_id, device_name || null, android_version || null);
-  res.status(201).json({ device: { id: r.lastInsertRowid, device_id, device_name, android_version } });
+  // UPSERT: update name/version if device already exists for this user
+  const existing = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, device_id) as any;
+  if (existing) {
+    db.prepare('UPDATE devices SET device_name = ?, android_version = ? WHERE id = ?').run(device_name || null, android_version || null, existing.id);
+    res.json({ device: { id: existing.id, device_id, device_name, android_version } });
+  } else {
+    const r = db.prepare('INSERT INTO devices (user_id, device_id, device_name, android_version) VALUES (?, ?, ?, ?)')
+      .run(req.user.userId, device_id, device_name || null, android_version || null);
+    res.status(201).json({ device: { id: r.lastInsertRowid, device_id, device_name, android_version } });
+  }
 });
 
 app.get('/api/devices', auth, (req: any, res) => {
@@ -252,10 +259,10 @@ function fetchProfilePicUrl(username: string): Promise<string> {
 app.post('/api/ig-accounts', auth, async (req: any, res) => {
   const { device_id, usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
-  // Find numeric device ID from string device_id
+  // Find numeric device ID from string device_id (use latest if duplicates)
   let numericDeviceId = device_id;
   if (typeof device_id === 'string') {
-    const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ?').get(req.user.userId, device_id) as any;
+    const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, device_id) as any;
     numericDeviceId = device ? device.id : null;
   }
   if (!numericDeviceId) return res.status(404).json({ error: 'Device not found' });
@@ -272,10 +279,17 @@ app.post('/api/ig-accounts', auth, async (req: any, res) => {
 });
 
 app.get('/api/ig-accounts', auth, (req: any, res) => {
-  const deviceId = req.query.device_id as string;
-  let accounts;
-  if (deviceId) {
-    accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? AND device_id = ? ORDER BY username').all(req.user.userId, deviceId);
+  const deviceStrId = req.query.device_id as string;
+  let accounts: any[];
+  if (deviceStrId) {
+    // Resolve string device_id to numeric id (same as POST)
+    const device = db.prepare('SELECT id FROM devices WHERE user_id = ? AND device_id = ? ORDER BY id DESC LIMIT 1').get(req.user.userId, deviceStrId) as any;
+    const numericId = device ? device.id : null;
+    if (numericId) {
+      accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? AND device_id = ? ORDER BY username').all(req.user.userId, numericId);
+    } else {
+      accounts = [];
+    }
   } else {
     accounts = db.prepare('SELECT * FROM ig_accounts WHERE user_id = ? ORDER BY username').all(req.user.userId);
   }

@@ -177,30 +177,43 @@ class WarmupApi {
   static Future<void> syncAccountsToBackend(List<String> usernames) async {
     final token = await getToken();
     final deviceId = await getDeviceId();
-    if (token == null) return;
+    if (token == null) { print('[SouthFarm] syncAccounts: no token'); return; }
     try {
-      await http.post(
+      final res = await http.post(
         Uri.parse('$API_BASE/ig-accounts'),
         headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
         body: jsonEncode({'device_id': deviceId, 'usernames': usernames}),
       );
-    } catch (_) {}
+      if (res.statusCode != 201) {
+        print('[SouthFarm] syncAccounts FAILED: ${res.statusCode} ${res.body}');
+      } else {
+        print('[SouthFarm] syncAccounts OK: ${usernames.length} accounts synced for device $deviceId');
+      }
+    } catch (e) {
+      print('[SouthFarm] syncAccounts ERROR: $e');
+    }
   }
 
   static Future<List<Map<String, dynamic>>> getAccountsFromBackend() async {
     final token = await getToken();
+    final deviceId = await getDeviceId();
     if (token == null) return [];
     try {
       final res = await http.get(
-        Uri.parse('$API_BASE/ig-accounts'),
+        Uri.parse('$API_BASE/ig-accounts?device_id=$deviceId'),
         headers: {'Authorization': 'Bearer $token'},
       );
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         final accounts = (data['accounts'] as List).cast<Map<String, dynamic>>();
+        print('[SouthFarm] getAccounts: ${accounts.length} accounts for device $deviceId');
         return accounts;
+      } else {
+        print('[SouthFarm] getAccounts FAILED: ${res.statusCode}');
       }
-    } catch (_) {}
+    } catch (e) {
+      print('[SouthFarm] getAccounts ERROR: $e');
+    }
     return [];
   }
 }
