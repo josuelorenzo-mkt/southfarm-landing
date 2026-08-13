@@ -98,6 +98,19 @@ class GuardedPublisher:
         self._baseline = {value for node in nodes for value in (node.get("content-desc"), node.get("text")) if value}
         self._prepared = True
 
+    @staticmethod
+    def _tile_signature(node: dict[str, str]) -> tuple[str, str, str]:
+        return (node.get("resource-id", ""), node.get("content-desc", ""), node.get("bounds", ""))
+
+    def _capture_gallery_baseline(self, nodes: list[dict[str, str]], predicate: Callable[[dict[str, str]], bool]) -> None:
+        self._gallery_baseline = {self._tile_signature(node) for node in nodes if predicate(node)}
+
+    def _new_gallery_tile(self, nodes: list[dict[str, str]], predicate: Callable[[dict[str, str]], bool]) -> dict[str, str]:
+        candidates = [node for node in nodes if predicate(node) and self._tile_signature(node) not in getattr(self, "_gallery_baseline", set())]
+        if len(candidates) != 1: raise PublisherError("MEDIA_AMBIGUOUS", "Gallery must contain exactly one new verified video tile")
+        self._chosen_tile = self._tile_signature(candidates[0])
+        return candidates[0]
+
     def _require_prepared(self) -> None:
         if not self._prepared:
             raise PublisherError("FLOW_NOT_PREPARED", "Publication must begin from the verified account profile and baseline")

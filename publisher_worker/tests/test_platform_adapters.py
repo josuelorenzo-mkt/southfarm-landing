@@ -13,11 +13,12 @@ from southfarm_publisher.platforms.youtube import YouTubeShortPublisher
 
 class Device:
     def __init__(self, package, dumps):
-        self.package, self.dumps, self.taps, self.typed = package, list(dumps), [], []
+        self.package, self.dumps, self.taps, self.typed, self.swipes = package, list(dumps), [], [], []
     def foreground_package(self): return self.package
     def dump_ui(self): return self.dumps.pop(0) if self.dumps else []
     def tap_bounds(self, bounds, delay_seconds=0): self.taps.append(bounds)
     def text(self, value): self.typed.append(value)
+    def swipe(self, *args): self.swipes.append(args)
     def command(self, *args, **kwargs): return ""
 
 
@@ -163,10 +164,11 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
         expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], [node(text="Delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
         TikTokPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
-        self.assertEqual(len(device.taps), 4)
+        self.assertEqual(len(device.taps), 3)
+        self.assertEqual(len(device.swipes), 1)
 
     def test_cleanup_collision_or_extra_identity_never_taps_delete_target(self):
         expected, baseline = "safe reel", {"older reel", "expected.account"}
@@ -182,7 +184,7 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)
         self.assertEqual(raised.exception.code, "UI_TIMEOUT")
-        self.assertEqual(len(device.taps), 3, "confirmation is never tapped when its fresh dialog is absent")
+        self.assertEqual(len(device.taps), 1, "the exact menu id is absent, so no delete action is tapped")
 
     def test_caption_contract_blocks_eleven_words_before_youtube_ui(self):
         too_many = job("youtube", "one two three four five six seven eight nine ten eleven")
@@ -239,7 +241,10 @@ class PlatformAdapterTests(unittest.TestCase):
         field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
         details = [node(text="Next")]
         final = [node(text="About Reels"), node(text="Share", **{"resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"})]
-        device = Device("com.instagram.android", [profile, create, gallery, editor, privacy, caption, field_empty, field_one, field_two, details, final, final])
+        # Prepare records the old gallery before transfer, returns to Profile, then publish
+        # reopens it and sees the one newly scanned tile.
+        old_gallery = [node(**{"content-desc": "Video thumbnail created yesterday 0:25"})]
+        device = Device("com.instagram.android", [profile, create, old_gallery, profile, profile, create, gallery, editor, privacy, caption, field_empty, field_one, field_two, details, final, final])
         events = []
         publisher = InstagramPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)
@@ -260,7 +265,8 @@ class PlatformAdapterTests(unittest.TestCase):
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
         field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
         details = [node(text="Add description..."), node(text="Public"), node(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})]
-        device = Device("com.zhiliaoapp.musically", [profile, upload, gallery, next_one, editor, field, field_empty, field_one, field_two, details, details])
+        old_gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "old-tile"})]
+        device = Device("com.zhiliaoapp.musically", [profile, upload, old_gallery, profile, profile, upload, gallery, next_one, editor, field, field_empty, field_one, field_two, details, details])
         events = []
         publisher = TikTokPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)

@@ -62,6 +62,11 @@ class SafeAdb:
         return values
     def tap_bounds(self, bounds: tuple[int, int, int, int], delay_seconds: float = 0.2) -> None:
         x1,y1,x2,y2 = bounds; self.command("shell", "input", "tap", str((x1+x2)//2), str((y1+y2)//2)); time.sleep(max(0.0, min(delay_seconds, 2.0)))
+    def back(self) -> None: self.command("shell", "input", "keyevent", "4")
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
+        if not all(isinstance(value, int) and 0 <= value <= 10000 for value in (x1, y1, x2, y2)) or not 50 <= duration_ms <= 2000:
+            raise ValueError("swipe coordinates are invalid")
+        self.command("shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration_ms))
     def text(self, value: str) -> None:
         if not value or any(char in value for char in "\x00\n\r;&|`$<>()\\\"") or not re.fullmatch(r"[\w .,!?'#@%:+\-]+", value, re.UNICODE): raise ValueError("text contains unsafe characters")
         self.command("shell", "input", "text", value.replace(" ", "%s"))

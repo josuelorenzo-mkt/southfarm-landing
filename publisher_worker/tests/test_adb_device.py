@@ -37,6 +37,8 @@ class AdbDeviceTests(unittest.TestCase):
         adb.tap_bounds((1, 2, 30, 40), delay_seconds=0)
         self.assertEqual(fake.calls[-1][0], ["adb-test", "-s", "serial-1", "shell", "input", "tap", "15", "21"])
         self.assertFalse(fake.calls[-1][1]["shell"])
+        adb.back(); self.assertEqual(fake.calls[-1][0], ["adb-test", "-s", "serial-1", "shell", "input", "keyevent", "4"])
+        adb.swipe(900, 900, 100, 900, 300); self.assertEqual(fake.calls[-1][0], ["adb-test", "-s", "serial-1", "shell", "input", "swipe", "900", "900", "100", "900", "300"])
 
     def test_dump_and_screenshot_use_bounded_argv_commands(self):
         class DeviceRun(FakeRun):
