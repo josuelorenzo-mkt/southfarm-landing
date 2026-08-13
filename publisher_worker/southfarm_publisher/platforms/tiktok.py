@@ -24,21 +24,19 @@ class TikTokPublisher(GuardedPublisher):
         return cx1 <= (px1 + px2) // 2 <= cx2 and cy1 <= (py1 + py2) // 2 <= cy2
 
     def _capture_profile_tiles(self, nodes: list[dict[str, str]]) -> None:
-        self._profile_tiles = {self._tile_signature(node) for node in nodes if self._is_profile_cover(node)}
+        self._profile_tiles = [self._tile_signature(node) for node in nodes if self._is_profile_cover(node)]
 
     def _verified_new_profile_tile(self, nodes: list[dict[str, str]]) -> dict[str, str]:
         covers = [node for node in nodes if self._is_profile_cover(node)]
-        baseline = getattr(self, "_profile_tiles", set())
-        current = {self._tile_signature(node) for node in covers}
-        if not baseline.issubset(current):
-            raise PublisherError("VERIFICATION_NO_DELTA", "TikTok baseline tiles are missing", retryable=True, final_action_uncertain=True)
-        candidates = [node for node in covers if self._tile_signature(node) not in baseline]
-        if len(candidates) != 1 or not covers or candidates[0] is not covers[0]:
+        baseline = getattr(self, "_profile_tiles", [])
+        current = [self._tile_signature(node) for node in covers]
+        if len(current) != len(baseline) + 1 or current[1:] != baseline:
             raise PublisherError("VERIFICATION_NO_DELTA", "TikTok first profile tile must be exactly one new cover", retryable=True, final_action_uncertain=True)
-        counts = [node for node in nodes if node.get("resource-id") == "com.zhiliaoapp.musically:id/tv_play_count" and self._count_belongs_to_cover(candidates[0], node)]
+        candidate = covers[0]
+        counts = [node for node in nodes if node.get("resource-id") == "com.zhiliaoapp.musically:id/tv_play_count" and self._count_belongs_to_cover(candidate, node)]
         if len(counts) != 1 or counts[0].get("text") != "0":
             raise PublisherError("VERIFICATION_VIEW_COUNT", "New TikTok cover must have exactly zero visible plays", retryable=True, final_action_uncertain=True)
-        return candidates[0]
+        return candidate
 
     def _navigate_profile(self, device: Any) -> list[dict[str, str]]:
         nodes = self._nodes(device)

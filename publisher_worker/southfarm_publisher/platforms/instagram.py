@@ -50,7 +50,7 @@ class InstagramPublisher(GuardedPublisher):
     def prepare(self, job: Any, device: Any) -> None:
         self._launch(device); nodes = self._navigate_profile(device)
         self._capture_baseline(nodes)
-        self._profile_tiles = {self._tile_signature(node) for node in nodes if "reel" in node.get("content-desc", "").casefold()}
+        self._profile_tiles = [self._tile_signature(node) for node in nodes if "reel" in node.get("content-desc", "").casefold()]
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create New", required=False)
         if create is None: raise PublisherError("CREATE_CONTROL", "Instagram exact Create New control is absent")
         reel = self.tap_and_wait(device, create, error="REEL_SELECTOR", content_desc="Create new reel")
@@ -91,9 +91,11 @@ class InstagramPublisher(GuardedPublisher):
 
     def verify(self, job: Any, device: Any) -> str:
         nodes = self._navigate_profile(device)
-        candidates = [node for node in nodes if "reel" in node.get("content-desc", "").casefold() and self._tile_signature(node) not in self._profile_tiles]
-        if len(candidates) != 1: raise PublisherError("VERIFICATION_NO_DELTA", "Instagram profile must show exactly one new reel tile", retryable=True, final_action_uncertain=True)
-        return candidates[0].get("content-desc") or candidates[0].get("text") or "instagram-reel"
+        tiles = [node for node in nodes if "reel" in node.get("content-desc", "").casefold()]
+        current = [self._tile_signature(node) for node in tiles]
+        if len(current) != len(self._profile_tiles) + 1 or current[1:] != self._profile_tiles:
+            raise PublisherError("VERIFICATION_NO_DELTA", "Instagram first profile tile must be exactly one new reel with baseline order preserved", retryable=True, final_action_uncertain=True)
+        return tiles[0].get("content-desc") or tiles[0].get("text") or "instagram-reel"
 
     def cleanup(self, job: Any, device: Any) -> None:
         return None

@@ -160,7 +160,7 @@ class PlatformAdapterTests(unittest.TestCase):
         device = Device("com.google.android.youtube", [
             [node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,100][700,200]"}), node(**{"content-desc": "older post - play Short"})],
             [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
-            [node(**{"resource-id": "com.google.android.youtube:id/delete"}), node(text="Confirm delete")],
+            [node(**{"resource-id": "com.google.android.youtube:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")],
             [node(text="expected.account"), node(**{"content-desc": "older post - play Short"})],
         ])
         YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
@@ -169,7 +169,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
         expected, baseline = "safe reel", {"older reel", "expected.account"}
         device = Device("com.instagram.android", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
         InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
@@ -177,7 +177,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
         expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
         TikTokPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 3)
@@ -286,6 +286,57 @@ class PlatformAdapterTests(unittest.TestCase):
             publisher.tap_and_wait(device, screen[0], error="UPLOAD_SELECTOR", text="Upload")
         self.assertEqual(raised.exception.code, "UI_TIMEOUT")
         self.assertEqual(len(device.taps), 1)
+
+    def test_tap_and_wait_rejects_preexisting_target_when_only_toast_changes(self):
+        before = [node(text="Create"), node(text="Upload")]
+        after_toast = [node(text="Create"), node(text="Upload"), node(text="Network available")]
+        device = Device("com.zhiliaoapp.musically", [before, after_toast])
+        publisher = TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None)
+        with self.assertRaises(PublisherError) as raised:
+            publisher.tap_and_wait(device, before[0], error="UPLOAD_SELECTOR", text="Upload")
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+
+    def test_gallery_baseline_preserves_duplicate_multiplicity_and_order(self):
+        publisher = TikTokPublisher(expected_account="expected.account")
+        old = node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "same cover"})
+        publisher._capture_gallery_baseline([old, old], publisher._is_video_tile)
+        new = node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "new cover"})
+        self.assertEqual(publisher._new_gallery_tile([new, old, old], publisher._is_video_tile), new)
+        with self.assertRaises(PublisherError) as missing:
+            publisher._new_gallery_tile([new, old], publisher._is_video_tile)
+        self.assertEqual(missing.exception.code, "MEDIA_BASELINE_MISSING")
+        with self.assertRaises(PublisherError) as reordered:
+            publisher._new_gallery_tile([old, new, old], publisher._is_video_tile)
+        self.assertEqual(reordered.exception.code, "MEDIA_BASELINE_ORDER_CHANGED")
+
+    def test_tiktok_profile_delta_preserves_duplicate_baseline_order_below_new_first(self):
+        publisher = TikTokPublisher(expected_account="expected.account")
+        old = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "same cover", "bounds": "[0,100][200,300]"})
+        publisher._capture_profile_tiles([old, old])
+        new = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "new cover", "bounds": "[0,100][200,300]"})
+        zero = node(**{"resource-id": "com.zhiliaoapp.musically:id/tv_play_count", "text": "0", "bounds": "[0,280][80,300]"})
+        shifted_old_a = {**old, "bounds": "[0,300][200,500]"}
+        shifted_old_b = {**old, "bounds": "[0,500][200,700]"}
+        self.assertEqual(publisher._verified_new_profile_tile([new, zero, shifted_old_a, shifted_old_b]), new)
+        with self.assertRaises(PublisherError) as removed:
+            publisher._verified_new_profile_tile([new, zero, shifted_old_a])
+        self.assertEqual(removed.exception.code, "VERIFICATION_NO_DELTA")
+
+    def test_instagram_profile_delta_rejects_duplicate_removal_or_reorder(self):
+        publisher = InstagramPublisher(expected_account="expected.account")
+        old = node(**{"content-desc": "old reel"})
+        publisher._profile_tiles = [publisher._tile_signature(old), publisher._tile_signature(old)]
+        new = node(**{"content-desc": "new reel"})
+        account = node(text="expected.account")
+        profile = node(text="Profile")
+        valid = Device("com.instagram.android", [[profile], [account, new, old, old]])
+        self.assertEqual(publisher.verify(job("instagram"), valid), "new reel")
+        for tiles in ([new, old], [new, old, node(**{"content-desc": "different reel"})], [old, new, old]):
+            with self.subTest(tiles=[item.get("content-desc") for item in tiles]):
+                device = Device("com.instagram.android", [[profile], [account, *tiles]])
+                with self.assertRaises(PublisherError) as raised:
+                    publisher.verify(job("instagram"), device)
+                self.assertEqual(raised.exception.code, "VERIFICATION_NO_DELTA")
 
     def test_instagram_duration_is_read_from_associated_label_not_thumbnail_description(self):
         publisher = InstagramPublisher(expected_account="expected.account")
