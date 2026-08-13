@@ -56,6 +56,8 @@ if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = (Get-Command pyth
 $PythonPath = FullPath $PythonPath
 Assert-Path $PythonPath "Python executable"; Assert-Path $AdbPath "ADB executable"; Assert-Path $FfprobeSourcePath "ffprobe executable"; Assert-Path $NodePath "Node executable"; Assert-Path $DatabasePath "SouthFarm database"
 if (!(Test-Path -LiteralPath (Join-Path $BackendPath "node_modules\better-sqlite3") -PathType Container)) { throw "Backend better-sqlite3 runtime not found: $BackendPath" }
+$nodeMajor = (& $NodePath -p "process.versions.node.split('.')[0]" 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $nodeMajor -ne "22") { throw "Publisher installer requires the SouthFarm portable Node 22 runtime." }
 if (!(Test-Path -LiteralPath (Join-Path $WorkerPath "southfarm_publisher\runner.py"))) { throw "Publisher worker module not found: $WorkerPath" }
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent(); $requested = New-Object Security.Principal.NTAccount($RunAsUser); $requestedSid = $requested.Translate([Security.Principal.SecurityIdentifier]).Value
 if ($requestedSid -ne $currentIdentity.User.Value) { throw "Run this script while signed in as RunAsUser; validation from an administrator's different profile is rejected." }

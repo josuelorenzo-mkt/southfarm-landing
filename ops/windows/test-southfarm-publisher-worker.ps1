@@ -17,6 +17,24 @@ function Assert-WorkerCondition([bool]$Condition, [string]$Message) {
 function Has-AllowSid($Acl, [string]$Sid) {
   return [bool]($Acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $Sid -and $_.AccessControlType -eq "Allow" })
 }
+function Get-ExplicitAllowMask($Acl, [string]$Sid) {
+  $mask = [Security.AccessControl.FileSystemRights]0
+  foreach ($rule in $Acl.Access | Where-Object { !$_.IsInherited -and $_.AccessControlType -eq "Allow" -and $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $Sid }) { $mask = $mask -bor $rule.FileSystemRights }
+  return $mask
+}
+function Assert-ExactPublisherToolAcl([string]$Path, [string]$RunAsSid, [string]$SystemSid, [string]$AdminsSid) {
+  $toolAcl = Get-Acl -LiteralPath $Path
+  Assert-PublisherToolAclObject $toolAcl $Path $RunAsSid $SystemSid $AdminsSid
+}
+function Assert-PublisherToolAclObject($toolAcl, [string]$Path, [string]$RunAsSid, [string]$SystemSid, [string]$AdminsSid) {
+  Assert-WorkerCondition $toolAcl.AreAccessRulesProtected "Publisher tool inherits broad ACLs: $Path"
+  $runMask = Get-ExplicitAllowMask $toolAcl $RunAsSid
+  $requiredRead = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+  $forbiddenWrite = [Security.AccessControl.FileSystemRights]::WriteData -bor [Security.AccessControl.FileSystemRights]::CreateFiles -bor [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::CreateDirectories -bor [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor [Security.AccessControl.FileSystemRights]::WriteAttributes -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+  Assert-WorkerCondition (($runMask -band $requiredRead) -eq $requiredRead) "Publisher worker lacks explicit read/execute on tool: $Path"
+  Assert-WorkerCondition (($runMask -band $forbiddenWrite) -eq 0) "Publisher worker can modify or replace tool: $Path"
+  foreach ($sid in @($SystemSid, $AdminsSid)) { Assert-WorkerCondition ((Get-ExplicitAllowMask $toolAcl $sid) -band [Security.AccessControl.FileSystemRights]::FullControl) "Publisher tool does not grant explicit FullControl to protected owner: $Path" }
+}
 
 $temporaryRoot = $null
 if ($CreateTemporaryFixture) {
@@ -33,14 +51,19 @@ if ($CreateTemporaryFixture) {
   $acl = New-Object System.Security.AccessControl.FileSecurity; $acl.SetAccessRuleProtection($true, $false)
   foreach ($sid in @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
   Set-Acl -LiteralPath $ConfigPath -AclObject $acl
-  foreach ($directory in @($mediaRoot, $evidenceRoot, $logRoot, $toolRoot)) {
+  foreach ($directory in @($mediaRoot, $evidenceRoot, $logRoot)) {
     $directoryAcl = New-Object System.Security.AccessControl.DirectorySecurity; $directoryAcl.SetAccessRuleProtection($true, $false)
     $directorySids = @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
     foreach ($sid in $directorySids) { $directoryAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))) }
     Set-Acl -LiteralPath $directory -AclObject $directoryAcl
   }
+  $toolDirectoryAcl = New-Object System.Security.AccessControl.DirectorySecurity; $toolDirectoryAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @("S-1-5-18", "S-1-5-32-544")) { $toolDirectoryAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))) }
+  $toolDirectoryAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($fixtureSid)), "ReadAndExecute", "ContainerInherit,ObjectInherit", "None", "Allow")))
+  Set-Acl -LiteralPath $toolRoot -AclObject $toolDirectoryAcl
   $toolFileAcl = New-Object System.Security.AccessControl.FileSecurity; $toolFileAcl.SetAccessRuleProtection($true, $false)
-  foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $fixtureSid)) { $toolFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  foreach ($sid in @("S-1-5-18", "S-1-5-32-544")) { $toolFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  $toolFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($fixtureSid)), "ReadAndExecute", "Allow")))
   Set-Acl -LiteralPath $fixtureFfprobe -AclObject $toolFileAcl
   $fakeAdb = Join-Path $temporaryRoot "fake-adb.cmd"
   [IO.File]::WriteAllText($fakeAdb, "@echo off`r`nif `%3==get-state (echo device) else (echo 0123456789abcdef)`r`nexit /b 0`r`n")
@@ -50,7 +73,9 @@ if ($CreateTemporaryFixture) {
   [IO.File]::WriteAllText($backendConfig, '{"jwt_secret":"fixture-only"}')
   $installer = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "install-southfarm-publisher-worker.ps1"
   $backendPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\backend"))
-  $nodePath = (Get-Command node.exe -ErrorAction Stop).Source; $fixtureDatabase = Join-Path $temporaryRoot "southfarm.db"
+  $nodePath = Join-Path $env:LOCALAPPDATA "SouthFarm\node-v22.23.1-win-x64\node.exe"; $fixtureDatabase = Join-Path $temporaryRoot "southfarm.db"
+  Assert-WorkerCondition (Test-Path -LiteralPath $nodePath -PathType Leaf) "Portable SouthFarm Node 22 is required for the fixture"
+  Assert-WorkerCondition ((& $nodePath -p "process.versions.node.split('.')[0]").Trim() -eq "22") "Fixture Node major version must be 22"
   $createDeviceDb = 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,lifecycle_status TEXT)");d.prepare("INSERT INTO devices VALUES(?,?,?)").run(1,"0123456789abcdef","active");d.close()'
   Push-Location -LiteralPath $backendPath
   try { & $nodePath -e $createDeviceDb $fixtureDatabase }
@@ -129,12 +154,9 @@ foreach ($directory in @([string]$config.media_root, [string]$config.evidence_ro
 }
 $toolFile = [IO.Path]::GetFullPath([string]$config.ffprobe_path); $toolDirectory = Split-Path -Parent $toolFile
 foreach ($toolTarget in @($toolDirectory, $toolFile)) {
+  Assert-ExactPublisherToolAcl $toolTarget $runAsSid $systemSid $adminsSid
   $toolAcl = Get-Acl -LiteralPath $toolTarget
-  Assert-WorkerCondition ($toolAcl.AreAccessRulesProtected) "Publisher tool inherits broad ACLs: $toolTarget"
   foreach ($ordinarySid in $ordinarySids) { Assert-WorkerCondition (-not (Has-AllowSid $toolAcl $ordinarySid)) "Ordinary users can replace publisher tools: $toolTarget" }
-  Assert-WorkerCondition (Has-AllowSid $toolAcl $systemSid) "Publisher tool does not grant SYSTEM: $toolTarget"
-  Assert-WorkerCondition (Has-AllowSid $toolAcl $adminsSid) "Publisher tool does not grant Administrators: $toolTarget"
-  Assert-WorkerCondition (Has-AllowSid $toolAcl $runAsSid) "Publisher worker cannot execute ffprobe: $toolTarget"
 }
 
 if (!$SkipTaskLookup) {
@@ -182,8 +204,20 @@ if ($temporaryRoot) {
   try { & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Configured ADB serial no longer matches the expected Android ID." }
   Assert-WorkerCondition $failedAsExpected "Supervisor accepted a different live Android identity"
   [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
+
+  $badToolAcl = New-Object System.Security.AccessControl.FileSecurity; $badToolAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $fixtureSid)) { $badToolAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  $failedAsExpected = $false
+  try { Assert-PublisherToolAclObject $badToolAcl $toolFile $fixtureSid "S-1-5-18" "S-1-5-32-544" } catch { $failedAsExpected = $_.Exception.Message -like "Publisher worker can modify or replace tool:*" }
+  Assert-WorkerCondition $failedAsExpected "Verifier accepted worker FullControl over ffprobe"
 }
 
 # Deliberately never print the configuration object: it contains the worker token.
 try { [pscustomobject]@{ status = "ok"; config_path = $ConfigPath; task_checked = (-not $SkipTaskLookup); health_checked = (-not $SkipHealthProbe) } | ConvertTo-Json -Compress }
-finally { if ($temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force } }
+finally {
+  if ($temporaryRoot) {
+    if (Test-Path -LiteralPath $toolFile) { & (Join-Path $env:WINDIR "System32\icacls.exe") $toolFile /grant:r "${env:USERNAME}:(F)" | Out-Null }
+    if (Test-Path -LiteralPath $toolRoot) { & (Join-Path $env:WINDIR "System32\icacls.exe") $toolRoot /grant:r "${env:USERNAME}:(OI)(CI)(F)" | Out-Null }
+    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+  }
+}
