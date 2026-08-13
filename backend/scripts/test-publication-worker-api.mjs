@@ -48,6 +48,8 @@ try {
   const claim = claimA.body.claimed ? claimA.body : claimB.body; const job = claim.job;
   assert.match(claim.claim_token, /^[0-9a-f-]{36}$/i); assert.notEqual(claim.claim_token, token);
   assert.deepEqual(Object.keys(job.media).sort(), ['file_extension', 'id', 'mime_type', 'sha256', 'size_bytes']);
+  assert.deepEqual(job.account, { id: accountId, username: 'worker-test-channel', display_name: 'worker-test-channel', platform: 'youtube' });
+  assert.deepEqual(job.device, { id: deviceId, device_id: 'worker-test-android' });
   assert.equal(job.media.id, job.media_id);
   assert.equal(job.media.sha256, job.media.sha256.toLowerCase());
   assert.equal(typeof job.media.size_bytes, 'number');

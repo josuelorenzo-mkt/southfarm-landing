@@ -31,7 +31,9 @@ export type PublicationFinishMetadata = { result?: string | null; errorCode?: st
 export type CreatePublicationJobInput = ValidatedPublicationInput & { workspaceId: number; deviceId: number; socialAccountId: number; scheduledFor: string };
 export type PublicationJobView = Record<string, unknown> & { id: number; status: PublicationStatus; final_action_at: string | null };
 export type PublicationMediaClaimView = { id: number; size_bytes: number; sha256: string; mime_type: string; file_extension: string };
-export type ClaimedPublicationJob = PublicationJobView & { media: PublicationMediaClaimView };
+export type PublicationAccountClaimView = { id: number; username: string; display_name: string; platform: 'instagram' | 'tiktok' | 'youtube' };
+export type PublicationDeviceClaimView = { id: number; device_id: string };
+export type ClaimedPublicationJob = PublicationJobView & { media: PublicationMediaClaimView; account: PublicationAccountClaimView; device: PublicationDeviceClaimView };
 type PublicationRow = Record<string, unknown> & { id: number; device_id: number; social_account_id: number; status: PublicationStatus; claimed_by: string | null; final_action_at: string | null };
 
 function isoAfter(now: string, seconds: number): string { return new Date(new Date(now).getTime() + seconds * 1000).toISOString(); }
@@ -43,6 +45,15 @@ function safeClaimMedia(row: unknown): PublicationMediaClaimView | null {
   const extensions: Record<string, string> = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm' };
   if (extensions[media.mime_type] !== media.file_extension) return null;
   return { id: media.id as number, size_bytes: media.size_bytes as number, sha256: media.sha256, mime_type: media.mime_type, file_extension: media.file_extension };
+}
+function safeClaimSnapshot(value: unknown, platform: unknown, socialAccountId: unknown, deviceId: unknown): { account: PublicationAccountClaimView; device: PublicationDeviceClaimView } | null {
+  try {
+    const row = value as Record<string, unknown>;
+    const account = JSON.parse(String(row.account_snapshot || '')) as Record<string, unknown>;
+    const device = JSON.parse(String(row.device_snapshot || '')) as Record<string, unknown>;
+    if (!Number.isInteger(account.id) || account.id !== socialAccountId || typeof account.username !== 'string' || !account.username.trim() || typeof account.display_name !== 'string' || !account.display_name.trim() || account.platform !== platform || !['instagram', 'tiktok', 'youtube'].includes(String(account.platform)) || !Number.isInteger(device.id) || device.id !== deviceId || typeof device.device_id !== 'string' || !device.device_id.trim()) return null;
+    return { account: account as PublicationAccountClaimView, device: device as PublicationDeviceClaimView };
+  } catch { return null; }
 }
 
 export function validatePublicationInput(input: { caption: unknown; platform: unknown }): ValidatedPublicationInput {
@@ -82,7 +93,7 @@ export class PublicationStore {
   }
   createJob(input: CreatePublicationJobInput, actor: PublicationActor): PublicationJobView {
     const valid = validatePublicationInput(input); requireIso(input.scheduledFor, 'scheduledFor'); const createdAt = new Date().toISOString();
-    return this.transaction(() => { const result = this.db.prepare(`INSERT INTO publication_jobs (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_by_type, created_by_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?)`).run(input.workspaceId, input.deviceId, input.socialAccountId, valid.platform, valid.caption, valid.wordCount, input.scheduledFor, actor.type, actor.id, createdAt, createdAt); const row = this.row(Number(result.lastInsertRowid)); this.event(row.id, null, 'queued', actor, createdAt); return publicationJobView(row, this.db); });
+    return this.transaction(() => { const account = this.db.prepare("SELECT id, username, COALESCE(NULLIF(display_name, ''), username) AS display_name, platform FROM social_accounts WHERE id = ? AND device_id = ? AND platform = ?").get(input.socialAccountId, input.deviceId, valid.platform) as Record<string, unknown> | undefined; const device = this.db.prepare('SELECT id, device_id FROM devices WHERE id = ? AND workspace_id = ?').get(input.deviceId, input.workspaceId) as Record<string, unknown> | undefined; if (!account || !device || !Number.isInteger(account.id) || typeof account.username !== 'string' || typeof account.display_name !== 'string' || typeof device.device_id !== 'string') throw new Error('Publication account or device snapshot is unavailable'); const result = this.db.prepare(`INSERT INTO publication_jobs (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?)`).run(input.workspaceId, input.deviceId, input.socialAccountId, valid.platform, valid.caption, valid.wordCount, input.scheduledFor, actor.type, actor.id, JSON.stringify(account), JSON.stringify(device), createdAt, createdAt); const row = this.row(Number(result.lastInsertRowid)); this.event(row.id, null, 'queued', actor, createdAt); return publicationJobView(row, this.db); });
   }
   listJobs(workspaceId?: number): PublicationJobView[] { const rows = workspaceId === undefined ? this.db.prepare('SELECT * FROM publication_jobs ORDER BY scheduled_for, id').all() : this.db.prepare('SELECT * FROM publication_jobs WHERE workspace_id = ? ORDER BY scheduled_for, id').all(workspaceId); return (rows as PublicationRow[]).map((row) => publicationJobView(row, this.db)); }
   getJob(id: number): PublicationJobView { return publicationJobView(this.row(id), this.db); }
@@ -103,12 +114,14 @@ export class PublicationStore {
         this.event(invalid.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
         return { claimed: false, job: null };
       }
-      const candidate = this.db.prepare(`SELECT job.*, media.id AS claim_media_id, media.size_bytes AS claim_media_size_bytes, LOWER(media.sha256) AS claim_media_sha256, media.mime_type AS claim_media_mime_type, media.file_extension AS claim_media_file_extension FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args) as (PublicationRow & Record<string, unknown>) | undefined;
+      const candidate = this.db.prepare(`SELECT job.*, media.id AS claim_media_id, media.size_bytes AS claim_media_size_bytes, LOWER(media.sha256) AS claim_media_sha256, media.mime_type AS claim_media_mime_type, media.file_extension AS claim_media_file_extension, account.id AS live_account_id, account.username AS live_account_username, COALESCE(NULLIF(account.display_name, ''), account.username) AS live_account_display_name, account.platform AS live_account_platform, device.device_id AS live_device_id FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' JOIN social_accounts account ON account.id = job.social_account_id AND account.device_id = job.device_id JOIN devices device ON device.id = job.device_id AND device.workspace_id = job.workspace_id WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args) as (PublicationRow & Record<string, unknown>) | undefined;
       if (!candidate) return { claimed: false, job: null };
       const media = safeClaimMedia({ id: candidate.claim_media_id, size_bytes: candidate.claim_media_size_bytes, sha256: candidate.claim_media_sha256, mime_type: candidate.claim_media_mime_type, file_extension: candidate.claim_media_file_extension });
-      if (!media) {
+      const snapshots = safeClaimSnapshot(candidate, candidate.platform, candidate.social_account_id, candidate.device_id);
+      const liveMatchesSnapshot = snapshots && candidate.live_account_id === snapshots.account.id && candidate.live_account_username === snapshots.account.username && candidate.live_account_display_name === snapshots.account.display_name && candidate.live_account_platform === snapshots.account.platform && candidate.live_device_id === snapshots.device.device_id;
+      if (!media || !snapshots || !liveMatchesSnapshot) {
         const reason = 'MEDIA_UNAVAILABLE';
-        this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, 'Publication media metadata is invalid', now, now, candidate.id);
+        this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, !media ? 'Publication media metadata is invalid' : 'Publication account or device snapshot no longer matches live state', now, now, candidate.id);
         this.event(candidate.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
         return { claimed: false, job: null };
       }
@@ -117,7 +130,7 @@ export class PublicationStore {
       if (claimed.changes !== 1) throw new Error('Publication job is no longer claimable');
       this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now);
       this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now);
-      return { claimed: true, job: { ...this.getJob(candidate.id), media } as ClaimedPublicationJob };
+      return { claimed: true, job: { ...this.getJob(candidate.id), media, ...snapshots } as ClaimedPublicationJob };
     });
   }
   heartbeat(id: number, worker: PublicationWorker, now: string): PublicationJobView { return this.transaction(() => { const row = this.row(id); this.requireLiveWorkerLock(row, worker, now); const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const lockUpdate = this.db.prepare('UPDATE device_automation_locks SET expires_at = ?, updated_at = ? WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(expiresAt, now, row.device_id, id, worker.id, now); if (lockUpdate.changes !== 1) throw new Error('Worker does not hold a live device automation lock'); const jobUpdate = this.db.prepare('UPDATE publication_jobs SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND claimed_by = ? AND claim_token = ? AND lease_expires_at > ?').run(expiresAt, now, now, id, worker.id, worker.claimToken, now); if (jobUpdate.changes !== 1) throw new Error('Worker no longer owns publication job'); return this.getJob(id); }); }

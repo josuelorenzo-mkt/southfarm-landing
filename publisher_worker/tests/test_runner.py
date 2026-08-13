@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from southfarm_publisher.models import ClaimedJob, JobCancelled, PublicationJob
 from southfarm_publisher.runner import PublicationRunner, _config
+from southfarm_publisher.platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
 
 
 class FakeApi:
@@ -34,6 +35,31 @@ class FakeDevice:
     def scan_media(self, remote): self.calls.append(("scan", remote))
     def remove(self, remote): self.calls.append(("remove", remote))
 
+class ScriptDevice(FakeDevice):
+    def __init__(self, package, dumps): super().__init__(); self.package, self.dumps, self.typed = package, list(dumps), []
+    def foreground_package(self): return self.package
+    def dump_ui(self): return self.dumps.pop(0) if self.dumps else []
+    def tap_bounds(self, bounds, delay_seconds=0): self.calls.append(("tap", bounds))
+    def text(self, value): self.typed.append(value)
+    def command(self, *args, **kwargs): return ""
+
+def ui(**values):
+    values.setdefault("bounds", "[10,20][110,80]"); values.setdefault("clickable", "true"); values.setdefault("enabled", "true")
+    return values
+
+def platform_dumps(platform):
+    account = "expected.account"; remote = "publication-7-3.mp4"
+    if platform == "instagram": return [
+        [ui(text=account), ui(**{"content-desc": "Create New"})], [ui(**{"content-desc": "Create new reel"})], [ui(**{"content-desc": remote})], [ui(**{"resource-id": "com.instagram.android:id/clips_right_action_button"})], [ui(text="Continue"), ui(text="Downloads privacy")], [ui(text="Write a caption and add hashtags...")], [ui(**{"class": "android.widget.EditText", "text": "safe"})], [ui(**{"class": "android.widget.EditText", "text": "safe test"})], [ui(text="Next")], [ui(text="About Reels"), ui(text="Share", **{"resource-id": "com.instagram.android:id/clips_nux_sheet_share_button", "bounds": "[600,1400][700,1500]"})], [ui(text="expected.account"), ui(**{"content-desc": "safe test reel"})]]
+    if platform == "tiktok": return [
+        [ui(text=account), ui(text="Create")], [ui(text="Upload")], [ui(**{"resource-id": "com.zhiliaoapp.musically:id/ica"})], [ui(text="Next (1)")], [ui(text="Next")], [ui(text="Add description...", **{"resource-id": "com.zhiliaoapp.musically:id/h00"})], [ui(**{"class": "android.widget.EditText", "text": "safe"})], [ui(**{"class": "android.widget.EditText", "text": "safe test"})], [ui(text="Add description..."), ui(text="Public"), ui(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})], [ui(text="Add description..."), ui(text="Public"), ui(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})], [ui(text=account), ui(**{"content-desc": "safe test 0"})]]
+    return [
+        [ui(text=account), ui(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})], [ui(**{"resource-id": "com.google.android.youtube:id/reel_camera_gallery_button_delegate"})], [ui(**{"resource-id": "com.google.android.youtube:id/thumb_image_view", "content-desc": remote})], [ui(text="Next", **{"resource-id": "com.google.android.youtube:id/multi_select_next_button"})], [ui(text="Done", **{"resource-id": "com.google.android.youtube:id/creation_next_button"})], [ui(text="Next", **{"resource-id": "com.google.android.youtube:id/shorts_post_bottom_button"})], [ui(text="Caption your Short", **{"class": "android.widget.EditText"})], [ui(**{"class": "android.widget.EditText", "text": "safe"})], [ui(**{"class": "android.widget.EditText", "text": "safe test"})], [ui(text="Caption your Short"), ui(text="Public"), ui(text="Upload Short", **{"resource-id": "com.google.android.youtube:id/upload_bottom_button"})], [ui(text="Caption your Short"), ui(text="Public"), ui(text="Upload Short", **{"resource-id": "com.google.android.youtube:id/upload_bottom_button"})], [ui(text="You")], [ui(**{"content-desc": "View channel"})], [ui(**{"content-desc": "safe test, No views - play Short"})]]
+
+class ScriptRegistry:
+    def __init__(self, device): self.device = device
+    def open(self, device_id): return self.device
+
 
 class Adapter:
     def __init__(self, fail_after_final=False): self.fail_after_final = fail_after_final; self.cleaned = False
@@ -43,6 +69,13 @@ class Adapter:
         if self.fail_after_final: raise RuntimeError("unknown outcome")
     def verify(self, job, device): return "post-id"
     def cleanup(self, job, device): self.cleaned = True
+
+class FlowAdapter(Adapter):
+    def __init__(self, platform): super().__init__(); self.platform = platform
+    def prepare(self, job, device): pass
+    def publish(self, job, device, checkpoint):
+        checkpoint("selecting_media", 25); checkpoint("editing", 45); checkpoint("captioning", 65); checkpoint("ready_to_publish", 80); checkpoint("publishing", 90, final_action=True)
+    def verify(self, job, device): return f"{self.platform}-verified-post"
 
 class ResponseLossApi(FakeApi):
     def checkpoint(self, job_id, token, step, progress, final_action=False, evidence=None):
@@ -166,6 +199,43 @@ class RunnerTests(unittest.TestCase):
         def sleep(seconds): waits.append(seconds); stop.calls += 1
         runner.run_forever(5, stop=stop, sleep=sleep, random_value=lambda: 0.5)
         self.assertEqual(waits, [16.0])
+
+    def test_runner_completes_each_social_platform_with_full_adapter_contract(self):
+        for platform in ("instagram", "tiktok", "youtube"):
+            with self.subTest(platform=platform):
+                claimed = self.job()
+                claimed = PublicationJob(id=claimed.id, device_id=claimed.device_id, media_id=claimed.media_id, platform=platform, caption=claimed.caption, media=claimed.media)
+                api = FakeApi(claimed); adapter = FlowAdapter(platform)
+                PublicationRunner(api, FakeRegistry(), {platform: adapter}, heartbeat_interval=999).run_once(5)
+                self.assertIn(("finish", "completed"), api.calls)
+                self.assertEqual([call[1] for call in api.calls if call[0] == "checkpoint"], ["preparing", "transferring", "selecting_media", "editing", "captioning", "ready_to_publish", "publishing", "verifying"])
+
+    def test_runner_completes_with_each_real_platform_adapter(self):
+        table = {"instagram": (InstagramPublisher, "com.instagram.android"), "tiktok": (TikTokPublisher, "com.zhiliaoapp.musically"), "youtube": (YouTubeShortPublisher, "com.google.android.youtube")}
+        for platform, (cls, package) in table.items():
+            with self.subTest(platform=platform):
+                base = self.job(); claimed = PublicationJob(base.id, base.device_id, base.media_id, platform, base.caption, base.media)
+                api = FakeApi(claimed); device = ScriptDevice(package, platform_dumps(platform))
+                PublicationRunner(api, ScriptRegistry(device), {platform: cls(expected_account="expected.account")}, heartbeat_interval=999).run_once(5)
+                self.assertIn(("finish", "completed"), api.calls)
+                self.assertEqual([call[1] for call in api.calls if call[0] == "checkpoint"], ["preparing", "transferring", "selecting_media", "editing", "captioning", "ready_to_publish", "publishing", "verifying"])
+
+    def test_runner_final_checkpoint_response_loss_never_allows_another_final_tap(self):
+        class OneFinalTap(FlowAdapter):
+            def __init__(self): super().__init__("youtube"); self.final_taps = 0
+            def publish(self, job, device, checkpoint):
+                checkpoint("selecting_media", 25); checkpoint("editing", 45); checkpoint("captioning", 65); checkpoint("ready_to_publish", 80); checkpoint("publishing", 90, final_action=True); self.final_taps += 1
+        api = ResponseLossApi(self.job()); adapter = OneFinalTap()
+        PublicationRunner(api, FakeRegistry(), {"youtube": adapter}, heartbeat_interval=999).run_once(5)
+        self.assertEqual(adapter.final_taps, 0, "the response loss raised before irreversible tap")
+        self.assertIn(("finish", "review_required"), api.calls)
+
+    def test_runner_real_instagram_checkpoint_response_loss_never_taps_share(self):
+        base = self.job(); claimed = PublicationJob(base.id, base.device_id, base.media_id, "instagram", base.caption, base.media)
+        api = ResponseLossApi(claimed); device = ScriptDevice("com.instagram.android", platform_dumps("instagram"))
+        PublicationRunner(api, ScriptRegistry(device), {"instagram": InstagramPublisher(expected_account="expected.account")}, heartbeat_interval=999).run_once(5)
+        self.assertIn(("finish", "review_required"), api.calls)
+        self.assertFalse(any(call == ("tap", (600, 1400, 700, 1500)) for call in device.calls))
 
     def test_config_rejects_missing_or_invalid_adb_without_secret_echo(self):
         with self.assertRaises(Exception) as raised:

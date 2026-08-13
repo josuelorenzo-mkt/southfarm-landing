@@ -40,7 +40,8 @@ class PublicationRunner:
     def run_once(self, device_id: int) -> bool:
         claim = self.api.claim(device_id)
         if not claim: return False
-        job, token, adapter = claim.job, claim.claim_token, self.adapters.get(claim.job.platform)
+        job, token, adapter_source = claim.job, claim.claim_token, self.adapters.get(claim.job.platform)
+        adapter = adapter_source(job) if callable(adapter_source) else adapter_source
         state = {"final_intent": False, "final_persisted": False, "terminal_attempted": False, "index": -1}; stop = threading.Event(); heartbeat_error: list[Exception] = []; device = None; remote_path = None
         def heartbeat_loop():
             while not stop.wait(self.heartbeat_interval):
@@ -112,7 +113,15 @@ def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int]
 
 def platform_adapters() -> dict[str, Any]:
     from .platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
-    return {"instagram": InstagramPublisher(), "tiktok": TikTokPublisher(), "youtube": YouTubeShortPublisher()}
+    def configured(cls: Any) -> Callable[[Any], Any]:
+        def build(job: Any) -> Any:
+            account = getattr(job, 'account', {})
+            expected = account.get('username') if isinstance(account, dict) else None
+            if not isinstance(expected, str) or not expected.strip():
+                raise PublisherError('ACCOUNT_SNAPSHOT_INVALID', 'Publication job lacks a safe expected account')
+            return cls(expected_account=expected)
+        return build
+    return {"instagram": configured(InstagramPublisher), "tiktok": configured(TikTokPublisher), "youtube": configured(YouTubeShortPublisher)}
 
 def main() -> None:
     api, registry, device_id = _config()

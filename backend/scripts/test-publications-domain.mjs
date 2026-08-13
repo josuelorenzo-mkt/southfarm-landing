@@ -13,8 +13,8 @@ db.pragma('foreign_keys = ON');
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE workspaces (id INTEGER PRIMARY KEY);
-  CREATE TABLE devices (id INTEGER PRIMARY KEY, workspace_id INTEGER);
-  CREATE TABLE social_accounts (id INTEGER PRIMARY KEY, device_id INTEGER, platform TEXT, username TEXT);
+  CREATE TABLE devices (id INTEGER PRIMARY KEY, workspace_id INTEGER, device_id TEXT);
+  CREATE TABLE social_accounts (id INTEGER PRIMARY KEY, device_id INTEGER, platform TEXT, username TEXT, display_name TEXT);
   CREATE TABLE task_runs (
     id INTEGER PRIMARY KEY,
     device_id INTEGER,
@@ -66,8 +66,8 @@ for (const column of [
 }
 
 db.prepare('INSERT INTO workspaces (id) VALUES (1)').run();
-db.prepare('INSERT INTO devices (id, workspace_id) VALUES (1, 1)').run();
-db.prepare("INSERT INTO social_accounts (id, device_id, platform, username) VALUES (1, 1, 'youtube', 'southfarm')").run();
+db.prepare("INSERT INTO devices (id, workspace_id, device_id) VALUES (1, 1, 'southfarm-test-android')").run();
+db.prepare("INSERT INTO social_accounts (id, device_id, platform, username, display_name) VALUES (1, 1, 'youtube', 'southfarm', 'SouthFarm')").run();
 
 const store = new PublicationStore(db);
 let mediaSequence = 0;

@@ -30,6 +30,8 @@ class PublicationJob:
     platform: str
     caption: str
     media: dict[str, Any] = field(default_factory=dict)
+    account: dict[str, Any] = field(default_factory=dict)
+    device: dict[str, Any] = field(default_factory=dict)
     status: str = "claimed"
 
     @classmethod
@@ -46,7 +48,10 @@ class PublicationJob:
             if set(media) != {"id", "size_bytes", "sha256", "mime_type", "file_extension"} or type(media["id"]) is not int or media["id"] != media_id or type(media["size_bytes"]) is not int or media["size_bytes"] <= 0 or type(media["sha256"]) is not str or len(media["sha256"]) != 64 or media["sha256"] != media["sha256"].lower() or any(character not in "0123456789abcdef" for character in media["sha256"]):
                 raise ValueError("invalid media metadata")
             if type(media["mime_type"]) is not str or type(media["file_extension"]) is not str or allowed_extensions.get(media["mime_type"]) != media["file_extension"]: raise ValueError("invalid media metadata")
-            return cls(id=job_id, device_id=device_id, media_id=media_id, platform=platform, caption=caption, media=media, status=status)
+            account, device = value["account"], value["device"]
+            if type(account) is not dict or set(account) != {"id", "username", "display_name", "platform"} or type(account["id"]) is not int or account["id"] <= 0 or not all(type(account[key]) is str and account[key].strip() for key in ("username", "display_name", "platform")) or account["platform"] != platform: raise ValueError("invalid account snapshot")
+            if type(device) is not dict or set(device) != {"id", "device_id"} or device["id"] != device_id or type(device["device_id"]) is not str or not device["device_id"].strip(): raise ValueError("invalid device snapshot")
+            return cls(id=job_id, device_id=device_id, media_id=media_id, platform=platform, caption=caption, media=media, account=account, device=device, status=status)
         except (KeyError, TypeError, ValueError) as error:
             raise PublisherError("JOB_INVALID", "Claim response contains an invalid publication job") from error
 

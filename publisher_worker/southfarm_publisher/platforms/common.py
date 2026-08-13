@@ -26,8 +26,13 @@ def enabled(node: dict[str, str]) -> bool:
 class GuardedPublisher:
     package = ""
 
-    def __init__(self, *, expected_account: str | None = None, pause: Callable[[float], None] = time.sleep):
-        self.expected_account, self._pause = expected_account, pause
+    def __init__(self, *, expected_account: str, forbidden_accounts: set[str] | None = None, pause: Callable[[float], None] = time.sleep, timeout: float = 15.0, poll: float = 0.5):
+        if not isinstance(expected_account, str) or not expected_account.strip():
+            raise PublisherError("ACCOUNT_SNAPSHOT_INVALID", "A non-empty expected social account is required")
+        self.expected_account, self.forbidden_accounts = expected_account.strip(), set(forbidden_accounts or ())
+        self._pause, self.timeout, self.poll = pause, max(0.1, float(timeout)), max(0.05, float(poll))
+        self._prepared = False
+        self._baseline: set[str] = set()
 
     def _require_package(self, device: Any) -> None:
         current = device.foreground_package()
@@ -43,6 +48,16 @@ class GuardedPublisher:
         if not isinstance(nodes, list):
             raise PublisherError("UI_DUMP_INVALID", "Device UI dump is invalid", retryable=True)
         return nodes
+
+    def wait_for(self, device: Any, *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, clock: Callable[[], float] = time.monotonic) -> dict[str, str]:
+        deadline = clock() + self.timeout
+        while True:
+            nodes = self._nodes(device)
+            if context is None or any(all(item.get(key) == value for key, value in context.items()) for item in nodes):
+                found = self._one(nodes, error=error, text=text, content_desc=content_desc, resource_id=resource_id, required=False)
+                if found is not None: return found
+            if clock() >= deadline: raise PublisherError("UI_TIMEOUT", f"Timed out waiting for {error}", retryable=True)
+            self._pause(self.poll)
 
     @staticmethod
     def _matches(node: dict[str, str], *, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None) -> bool:
@@ -63,11 +78,19 @@ class GuardedPublisher:
         device.tap_bounds(SafeAdb.bounds(node))
 
     def _account(self, nodes: list[dict[str, str]]) -> None:
-        if not self.expected_account:
-            return
+        if self.expected_account in self.forbidden_accounts:
+            raise PublisherError("FORBIDDEN_ACCOUNT", "This social account is forbidden for publishing")
         exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
         if len(exact) != 1:
             raise PublisherError("ACCOUNT_MISMATCH", "Expected authenticated account label is absent or ambiguous")
+
+    def _capture_baseline(self, nodes: list[dict[str, str]]) -> None:
+        self._baseline = {value for node in nodes for value in (node.get("content-desc"), node.get("text")) if value}
+        self._prepared = True
+
+    def _require_prepared(self) -> None:
+        if not self._prepared:
+            raise PublisherError("FLOW_NOT_PREPARED", "Publication must begin from the verified account profile and baseline")
 
     def _caption(self, device: Any, caption: str, *, youtube: bool = False) -> None:
         validate_caption(caption, youtube=youtube)
@@ -76,10 +99,11 @@ class GuardedPublisher:
             device.text((" " if index else "") + word)
             nodes = self._nodes(device)
             expected = " ".join(words[:index + 1])
-            visible = " ".join((node.get("text") or "") for node in nodes)
-            # UIAutomator sometimes omits the active text while the keyboard is open.
-            # It may not contradict the prefix, but an observable divergence is fatal.
-            if visible and any(node.get("class", "").endswith("EditText") or node.get("resource-id", "") for node in nodes) and expected not in visible and words[0] in visible:
+            fields = [node for node in nodes if node.get("class", "").endswith("EditText")]
+            if len(fields) != 1:
+                raise PublisherError("CAPTION_NOT_OBSERVABLE", "Active caption field is absent or ambiguous")
+            observed = " ".join((fields[0].get("text") or fields[0].get("content-desc") or "").split())
+            if observed != expected:
                 raise PublisherError("CAPTION_DIVERGED", "Caption text diverged before publishing")
 
     def _final(self, device: Any, checkpoint: Callable[..., None], *, button: dict[str, str], context: dict[str, str], evidence: dict[str, Any]) -> None:
@@ -101,7 +125,10 @@ class GuardedPublisher:
                 matches.append(node)
         if len(matches) != 1:
             raise PublisherError("VERIFICATION_MISSING", "The exact newly published item is not uniquely visible", retryable=True, final_action_uncertain=True)
-        return matches[0].get("content-desc") or matches[0].get("text") or caption
+        identity = matches[0].get("content-desc") or matches[0].get("text") or caption
+        if identity in self._baseline:
+            raise PublisherError("VERIFICATION_NO_DELTA", "The matching item predates this publication", retryable=True, final_action_uncertain=True)
+        return identity
 
     def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
         # This deliberately has no call site in normal jobs. It refuses to delete

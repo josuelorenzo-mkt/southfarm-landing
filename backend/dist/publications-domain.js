@@ -30,6 +30,19 @@ function safeClaimMedia(row) {
         return null;
     return { id: media.id, size_bytes: media.size_bytes, sha256: media.sha256, mime_type: media.mime_type, file_extension: media.file_extension };
 }
+function safeClaimSnapshot(value, platform, socialAccountId, deviceId) {
+    try {
+        const row = value;
+        const account = JSON.parse(String(row.account_snapshot || ''));
+        const device = JSON.parse(String(row.device_snapshot || ''));
+        if (!Number.isInteger(account.id) || account.id !== socialAccountId || typeof account.username !== 'string' || !account.username.trim() || typeof account.display_name !== 'string' || !account.display_name.trim() || account.platform !== platform || !['instagram', 'tiktok', 'youtube'].includes(String(account.platform)) || !Number.isInteger(device.id) || device.id !== deviceId || typeof device.device_id !== 'string' || !device.device_id.trim())
+            return null;
+        return { account: account, device: device };
+    }
+    catch {
+        return null;
+    }
+}
 export function validatePublicationInput(input) {
     const caption = typeof input.caption === 'string' ? input.caption.trim().replace(/\s+/g, ' ') : '';
     const platform = String(input.platform || '').toLowerCase();
@@ -86,7 +99,8 @@ export class PublicationStore {
         const valid = validatePublicationInput(input);
         requireIso(input.scheduledFor, 'scheduledFor');
         const createdAt = new Date().toISOString();
-        return this.transaction(() => { const result = this.db.prepare(`INSERT INTO publication_jobs (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_by_type, created_by_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?)`).run(input.workspaceId, input.deviceId, input.socialAccountId, valid.platform, valid.caption, valid.wordCount, input.scheduledFor, actor.type, actor.id, createdAt, createdAt); const row = this.row(Number(result.lastInsertRowid)); this.event(row.id, null, 'queued', actor, createdAt); return publicationJobView(row, this.db); });
+        return this.transaction(() => { const account = this.db.prepare("SELECT id, username, COALESCE(NULLIF(display_name, ''), username) AS display_name, platform FROM social_accounts WHERE id = ? AND device_id = ? AND platform = ?").get(input.socialAccountId, input.deviceId, valid.platform); const device = this.db.prepare('SELECT id, device_id FROM devices WHERE id = ? AND workspace_id = ?').get(input.deviceId, input.workspaceId); if (!account || !device || !Number.isInteger(account.id) || typeof account.username !== 'string' || typeof account.display_name !== 'string' || typeof device.device_id !== 'string')
+            throw new Error('Publication account or device snapshot is unavailable'); const result = this.db.prepare(`INSERT INTO publication_jobs (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, ?, ?)`).run(input.workspaceId, input.deviceId, input.socialAccountId, valid.platform, valid.caption, valid.wordCount, input.scheduledFor, actor.type, actor.id, JSON.stringify(account), JSON.stringify(device), createdAt, createdAt); const row = this.row(Number(result.lastInsertRowid)); this.event(row.id, null, 'queued', actor, createdAt); return publicationJobView(row, this.db); });
     }
     listJobs(workspaceId) { const rows = workspaceId === undefined ? this.db.prepare('SELECT * FROM publication_jobs ORDER BY scheduled_for, id').all() : this.db.prepare('SELECT * FROM publication_jobs WHERE workspace_id = ? ORDER BY scheduled_for, id').all(workspaceId); return rows.map((row) => publicationJobView(row, this.db)); }
     getJob(id) { return publicationJobView(this.row(id), this.db); }
@@ -112,13 +126,15 @@ export class PublicationStore {
                 this.event(invalid.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
                 return { claimed: false, job: null };
             }
-            const candidate = this.db.prepare(`SELECT job.*, media.id AS claim_media_id, media.size_bytes AS claim_media_size_bytes, LOWER(media.sha256) AS claim_media_sha256, media.mime_type AS claim_media_mime_type, media.file_extension AS claim_media_file_extension FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
+            const candidate = this.db.prepare(`SELECT job.*, media.id AS claim_media_id, media.size_bytes AS claim_media_size_bytes, LOWER(media.sha256) AS claim_media_sha256, media.mime_type AS claim_media_mime_type, media.file_extension AS claim_media_file_extension, account.id AS live_account_id, account.username AS live_account_username, COALESCE(NULLIF(account.display_name, ''), account.username) AS live_account_display_name, account.platform AS live_account_platform, device.device_id AS live_device_id FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' JOIN social_accounts account ON account.id = job.social_account_id AND account.device_id = job.device_id JOIN devices device ON device.id = job.device_id AND device.workspace_id = job.workspace_id WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
             if (!candidate)
                 return { claimed: false, job: null };
             const media = safeClaimMedia({ id: candidate.claim_media_id, size_bytes: candidate.claim_media_size_bytes, sha256: candidate.claim_media_sha256, mime_type: candidate.claim_media_mime_type, file_extension: candidate.claim_media_file_extension });
-            if (!media) {
+            const snapshots = safeClaimSnapshot(candidate, candidate.platform, candidate.social_account_id, candidate.device_id);
+            const liveMatchesSnapshot = snapshots && candidate.live_account_id === snapshots.account.id && candidate.live_account_username === snapshots.account.username && candidate.live_account_display_name === snapshots.account.display_name && candidate.live_account_platform === snapshots.account.platform && candidate.live_device_id === snapshots.device.device_id;
+            if (!media || !snapshots || !liveMatchesSnapshot) {
                 const reason = 'MEDIA_UNAVAILABLE';
-                this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, 'Publication media metadata is invalid', now, now, candidate.id);
+                this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, !media ? 'Publication media metadata is invalid' : 'Publication account or device snapshot no longer matches live state', now, now, candidate.id);
                 this.event(candidate.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
                 return { claimed: false, job: null };
             }
@@ -129,7 +145,7 @@ export class PublicationStore {
                 throw new Error('Publication job is no longer claimable');
             this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now);
             this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now);
-            return { claimed: true, job: { ...this.getJob(candidate.id), media } };
+            return { claimed: true, job: { ...this.getJob(candidate.id), media, ...snapshots } };
         });
     }
     heartbeat(id, worker, now) { return this.transaction(() => { const row = this.row(id); this.requireLiveWorkerLock(row, worker, now); const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const lockUpdate = this.db.prepare('UPDATE device_automation_locks SET expires_at = ?, updated_at = ? WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(expiresAt, now, row.device_id, id, worker.id, now); if (lockUpdate.changes !== 1)

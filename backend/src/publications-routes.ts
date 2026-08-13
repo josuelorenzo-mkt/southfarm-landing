@@ -280,7 +280,7 @@ export function registerPublicationRoutes({
              status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 'user', ?, ?, ?, ?, ?)`)
             .run(workspaceId, Number(req.user.userId), deviceId, accountId, state.mediaId, input.platform, input.caption, input.wordCount, scheduledFor,
-              String(req.user.userId), JSON.stringify({ username: account.username, platform: account.platform }), JSON.stringify({ device_id: device.device_id, device_name: device.device_name }), createdAt, createdAt);
+              String(req.user.userId), JSON.stringify({ id: Number(account.id), username: String(account.username), display_name: String(account.display_name || account.username), platform: String(account.platform) }), JSON.stringify({ id: Number(device.id), device_id: String(device.device_id) }), createdAt, createdAt);
           state.jobId = Number(jobInsert.lastInsertRowid);
           db.prepare(`INSERT INTO publication_events (publication_job_id, from_status, to_status, current_step, actor_type, actor_id, created_at)
             VALUES (?, NULL, 'queued', 'queued', 'user', ?, ?)`).run(state.jobId, String(req.user.userId), createdAt);

@@ -65,8 +65,20 @@ export type PublicationMediaClaimView = {
     mime_type: string;
     file_extension: string;
 };
+export type PublicationAccountClaimView = {
+    id: number;
+    username: string;
+    display_name: string;
+    platform: 'instagram' | 'tiktok' | 'youtube';
+};
+export type PublicationDeviceClaimView = {
+    id: number;
+    device_id: string;
+};
 export type ClaimedPublicationJob = PublicationJobView & {
     media: PublicationMediaClaimView;
+    account: PublicationAccountClaimView;
+    device: PublicationDeviceClaimView;
 };
 type PublicationRow = Record<string, unknown> & {
     id: number;

@@ -11,14 +11,17 @@ class TikTokPublisher(GuardedPublisher):
 
     def prepare(self, job: Any, device: Any) -> None:
         self._launch(device); nodes = self._nodes(device); self._account(nodes)
+        self._capture_baseline(nodes)
         # exact Create is required; Create a Story is a different destructive flow.
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create", required=False)
         if create is None: raise PublisherError("CREATE_CONTROL", "TikTok exact Create control is absent")
         self._tap(device, create)
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
-        validate_caption(job.caption); nodes = self._nodes(device)
-        if not any(node.get("text") == "Add description..." for node in nodes):
+        self._require_prepared(); validate_caption(job.caption); nodes = self._nodes(device)
+        if any(node.get("text") == "Add description..." for node in nodes):
+            raise PublisherError("MID_FLOW_ABORT", "TikTok was already in a publish flow; refusing to resume")
+        else:
             upload = self._one(nodes, error="UPLOAD_SELECTOR", text="Upload", required=False) or self._one(nodes, error="UPLOAD_SELECTOR", resource_id="com.zhiliaoapp.musically:id/upload_hot_area")
             self._tap(device, upload); checkpoint("selecting_media", 25, evidence={"platform": "tiktok", "baseline": "profile"})
             gallery = self._nodes(device); candidates = [node for node in gallery if node.get("resource-id") == "com.zhiliaoapp.musically:id/ica"]
@@ -36,7 +39,19 @@ class TikTokPublisher(GuardedPublisher):
         self._final(device, checkpoint, button={"text": "Post", "resource-id": "com.zhiliaoapp.musically:id/st6"}, context={"text": "Add description..."}, evidence={"platform": "tiktok", "final": "post"})
 
     def verify(self, job: Any, device: Any) -> str:
-        return self._identity(self._nodes(device), job.caption, marker="0")
+        nodes = self._nodes(device); self._account(nodes)
+        return self._identity(nodes, job.caption, marker="0")
 
     def cleanup(self, job: Any, device: Any) -> None:
         return None
+
+    def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
+        nodes = self._nodes(device)
+        target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
+        self._tap(device, target)
+        menu = self._one(self._nodes(device), error="VIDEO_MENU", content_desc="More actions", required=False) or self._one(self._nodes(device), error="VIDEO_MENU", text="More actions")
+        self._tap(device, menu)
+        self._tap(device, self._one(self._nodes(device), error="DELETE_ACTION", text="Delete"))
+        self._tap(device, self._one(self._nodes(device), error="DELETE_CONFIRMATION", text="Delete"))
+        restored = {value for node in self._nodes(device) for value in (node.get("content-desc"), node.get("text")) if value}
+        if expected_identity in restored or restored != baseline: raise PublisherError("BASELINE_NOT_RESTORED", "TikTok cleanup did not restore exact baseline")

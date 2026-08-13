@@ -25,12 +25,16 @@ class ApiClientTests(unittest.TestCase):
         fixture = {
             "claimed": True, "claim_token": "claim-1",
             "job": {"id": 7, "device_id": 5, "media_id": 3, "platform": "youtube", "caption": "safe test", "status": "claimed",
-                    "media": {"id": 3, "size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4"}},
+                    "media": {"id": 3, "size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4"},
+                    "account": {"id": 9, "username": "worker-test-channel", "display_name": "worker-test-channel", "platform": "youtube"},
+                    "device": {"id": 5, "device_id": "worker-test-android"}},
         }
         client = PublisherApiClient("https://api.example.test", "secret-token", "worker-a", opener=lambda request, timeout: FakeResponse(body=__import__('json').dumps(fixture).encode()))
         claim = client.claim(5)
         self.assertEqual(claim.job.media_id, claim.job.media["id"])
         self.assertEqual(claim.job.media["mime_type"], "video/mp4")
+        self.assertEqual(claim.job.account["username"], "worker-test-channel")
+        self.assertEqual(claim.job.device["device_id"], "worker-test-android")
         for media in ({}, {"id": 3}, {**fixture["job"]["media"], "id": 4}, {**fixture["job"]["media"], "sha256": "UPPER"}, {**fixture["job"]["media"], "mime_type": "text/plain"}, {**fixture["job"]["media"], "file_extension": "mov"}):
             with self.subTest(media=media):
                 with self.assertRaises(PublisherError) as raised: PublicationJob.from_json({**fixture["job"], "media": media})
@@ -45,6 +49,10 @@ class ApiClientTests(unittest.TestCase):
             lambda job: job.update(media=[("id", 3)]),
             lambda job: job.update(media="3"),
             lambda job: job["media"].update(size_bytes="5"),
+            lambda job: job.pop("account"),
+            lambda job: job["account"].update(username=""),
+            lambda job: job["account"].update(platform="tiktok"),
+            lambda job: job["device"].update(device_id=""),
         ):
             with self.subTest(mutation=mutation):
                 invalid = copy.deepcopy(fixture["job"]); mutation(invalid)

@@ -11,14 +11,16 @@ class InstagramPublisher(GuardedPublisher):
 
     def prepare(self, job: Any, device: Any) -> None:
         self._launch(device); nodes = self._nodes(device); self._account(nodes)
+        self._capture_baseline(nodes)
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create New", required=False)
         if create: self._tap(device, create)
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
-        validate_caption(job.caption)
+        self._require_prepared(); validate_caption(job.caption)
         nodes = self._nodes(device)
-        # Direct final state supports safe resume after a monitored dry run; otherwise follow exact Reel semantics.
-        if not any(node.get("text") == "About Reels" or node.get("resource-id") == "com.instagram.android:id/clips_nux_sheet_share_button" for node in nodes):
+        if any(node.get("text") == "About Reels" or node.get("resource-id") == "com.instagram.android:id/clips_nux_sheet_share_button" for node in nodes):
+            raise PublisherError("MID_FLOW_ABORT", "Instagram was already in a publish flow; refusing to resume")
+        else:
             reel = self._one(nodes, error="REEL_SELECTOR", content_desc="Create new reel", required=False) or self._one(nodes, error="REEL_SELECTOR", text="Reel")
             self._tap(device, reel); checkpoint("selecting_media", 25, evidence={"platform": "instagram", "stage": "reel"})
             media = self._one(self._nodes(device), error="MEDIA_SELECTOR", content_desc=f"publication-{job.id}-{job.media_id}.{job.media['file_extension']}", required=False)
@@ -36,7 +38,19 @@ class InstagramPublisher(GuardedPublisher):
         self._final(device, checkpoint, button={"text": "Share", "resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"}, context={"text": "About Reels"}, evidence={"platform": "instagram", "final": "share"})
 
     def verify(self, job: Any, device: Any) -> str:
-        return self._identity(self._nodes(device), job.caption, marker="reel")
+        nodes = self._nodes(device); self._account(nodes)
+        return self._identity(nodes, job.caption, marker="reel")
 
     def cleanup(self, job: Any, device: Any) -> None:
         return None
+
+    def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
+        nodes = self._nodes(device)
+        target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
+        self._tap(device, target)
+        menu = self._one(self._nodes(device), error="REEL_MENU", content_desc="More options", required=False) or self._one(self._nodes(device), error="REEL_MENU", text="More options")
+        self._tap(device, menu)
+        self._tap(device, self._one(self._nodes(device), error="DELETE_ACTION", text="Delete"))
+        self._tap(device, self._one(self._nodes(device), error="DELETE_CONFIRMATION", text="Delete"))
+        restored = {value for node in self._nodes(device) for value in (node.get("content-desc"), node.get("text")) if value}
+        if expected_identity in restored or restored != baseline: raise PublisherError("BASELINE_NOT_RESTORED", "Instagram cleanup did not restore exact baseline")
