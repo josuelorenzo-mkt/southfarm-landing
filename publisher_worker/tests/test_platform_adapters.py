@@ -14,12 +14,26 @@ from southfarm_publisher.platforms.youtube import YouTubeShortPublisher
 class Device:
     def __init__(self, package, dumps):
         self.package, self.dumps, self.taps, self.typed, self.swipes = package, list(dumps), [], [], []
+        self._last_dump, self._after_tap, self._stale_reads = None, True, 0
     def foreground_package(self): return self.package
-    def dump_ui(self): return self.dumps.pop(0) if self.dumps else []
-    def tap_bounds(self, bounds, delay_seconds=0): self.taps.append(bounds)
-    def text(self, value): self.typed.append(value)
-    def swipe(self, *args): self.swipes.append(args)
-    def command(self, *args, **kwargs): return ""
+    def dump_ui(self):
+        if self._after_tap or self._last_dump is None:
+            if not self.dumps:
+                raise PublisherError("UI_TIMEOUT", "fake device has no next UI revision")
+            self._last_dump = self.dumps.pop(0)
+            self._after_tap = False
+            self._stale_reads = 0
+        else:
+            self._stale_reads += 1
+            if self._stale_reads > 3:
+                raise PublisherError("UI_TIMEOUT", "fake device UI did not advance")
+        return self._last_dump
+    def tap_bounds(self, bounds, delay_seconds=0): self.taps.append(bounds); self._after_tap = True; self._stale_reads = 0
+    def text(self, value): self.typed.append(value); self._after_tap = True; self._stale_reads = 0
+    def swipe(self, *args): self.swipes.append(args); self._after_tap = True; self._stale_reads = 0
+    def command(self, *args, **kwargs):
+        if "keyevent" in args: self._after_tap = True
+        return ""
 
 
 def job(platform="tiktok", caption="safe publishing test"):
@@ -65,17 +79,17 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.taps, [], "a wrong foreground package is rejected before every tap")
 
     def test_account_label_mismatch_blocks_tiktok_create(self):
-        device = Device("com.zhiliaoapp.musically", [[node(**{"content-desc": "Create"}), node(text="different.account")]])
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create"}), node(text="different.account")]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account").prepare(job(), device)
         self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
-        self.assertEqual(device.taps, [])
+        self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before account rejection")
     def test_tiktok_refuses_create_a_story_collision(self):
-        device = Device("com.zhiliaoapp.musically", [[node(**{"content-desc": "Create a Story"}), node(text="expected.account")]])
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create a Story"}), node(text="expected.account")]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account").prepare(job(), device)
         self.assertEqual(raised.exception.code, "CREATE_CONTROL")
-        self.assertEqual(device.taps, [])
+        self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before Create collision rejection")
 
     def test_youtube_refuses_shorts_collision(self):
         device = Device("com.google.android.youtube", [[node(text="Create"), node(text="expected.account")], [node(text="Shorts", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]])
@@ -146,7 +160,7 @@ class PlatformAdapterTests(unittest.TestCase):
         device = Device("com.google.android.youtube", [
             [node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,100][700,200]"}), node(**{"content-desc": "older post - play Short"})],
             [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
-            [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
+            [node(**{"resource-id": "com.google.android.youtube:id/delete"}), node(text="Confirm delete")],
             [node(text="expected.account"), node(**{"content-desc": "older post - play Short"})],
         ])
         YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
@@ -155,7 +169,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
         expected, baseline = "safe reel", {"older reel", "expected.account"}
         device = Device("com.instagram.android", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
         InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
@@ -163,7 +177,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
         expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(text="expected.account"), node(**{"content-desc": "older video"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
         TikTokPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 3)
@@ -219,17 +233,17 @@ class PlatformAdapterTests(unittest.TestCase):
 
 
     def test_forbidden_account_blocks_before_create(self):
-        device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(text="Create")]])
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(text="expected.account"), node(text="Create")]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account", forbidden_accounts={"expected.account"}).prepare(job(), device)
         self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
-        self.assertEqual(device.taps, [])
+        self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before forbidden-account rejection")
 
     def test_instagram_factory_normalizes_forbidden_account_only_for_instagram(self):
         from southfarm_publisher.runner import platform_adapters
         claimed = job("instagram"); claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "@Expected.Account", "display_name": "Expected", "platform": "instagram"}, {"id": 5, "device_id": "android"})
         instagram = platform_adapters(forbidden_instagram_accounts={"expected.account"})["instagram"](claimed)
-        device = Device("com.instagram.android", [[node(text="@Expected.Account"), node(**{"content-desc": "Create New"})]])
+        device = Device("com.instagram.android", [[node(text="Profile")], [node(text="@Expected.Account"), node(**{"content-desc": "Create New"})]])
         with self.assertRaises(PublisherError) as raised: instagram.prepare(claimed, device)
         self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
         youtube = platform_adapters(forbidden_instagram_accounts={"expected.account"})["youtube"](PublicationJob(claimed.id, claimed.device_id, claimed.media_id, "youtube", claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "youtube"}, {"id": 5, "device_id": "android"}))
@@ -242,24 +256,95 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "CAPTION_DIVERGED")
         self.assertEqual(device.typed, ["safe"])
 
+    def test_gallery_baseline_uses_stable_identity_when_old_tiles_shift_bounds(self):
+        publisher = InstagramPublisher(expected_account="expected.account")
+        old = node(**{"content-desc": "Video thumbnail created yesterday", "resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "bounds": "[0,100][200,300]"})
+        publisher._capture_gallery_baseline([old], publisher._is_video_tile)
+        shifted_old = node(**{"content-desc": "Video thumbnail created yesterday", "resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "bounds": "[0,300][200,500]"})
+        new = node(**{"content-desc": "Video thumbnail created today", "resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "bounds": "[0,100][200,300]"})
+        self.assertEqual(publisher._new_gallery_tile([new, shifted_old], publisher._is_video_tile), new)
+
+    def test_instagram_prepare_rejects_username_incidental_outside_profile(self):
+        device = Device("com.instagram.android", [[node(text="expected.account"), node(**{"content-desc": "Create New"})]])
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).prepare(job("instagram"), device)
+        self.assertEqual(raised.exception.code, "PROFILE_TAB")
+        self.assertEqual(device.taps, [])
+
+    def test_tiktok_prepare_rejects_username_incidental_outside_profile(self):
+        device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(text="Create")]])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).prepare(job(), device)
+        self.assertEqual(raised.exception.code, "PROFILE_TAB")
+        self.assertEqual(device.taps, [])
+
+    def test_tap_and_wait_rejects_target_already_present_before_tap(self):
+        screen = [node(text="Create"), node(text="Upload")]
+        device = Device("com.zhiliaoapp.musically", [screen, screen, screen])
+        publisher = TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05)
+        with self.assertRaises(PublisherError) as raised:
+            publisher.tap_and_wait(device, screen[0], error="UPLOAD_SELECTOR", text="Upload")
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 1)
+
+    def test_instagram_duration_is_read_from_associated_label_not_thumbnail_description(self):
+        publisher = InstagramPublisher(expected_account="expected.account")
+        thumbnail = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created today", "bounds": "[0,100][200,300]"})
+        label = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,260][200,300]"})
+        self.assertEqual(publisher._instagram_video_tiles([thumbnail, label], 25), [thumbnail])
+
+    def test_instagram_duration_rejects_duplicate_or_mismatched_labels(self):
+        publisher = InstagramPublisher(expected_account="expected.account")
+        thumbnail = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail", "bounds": "[0,100][200,300]"})
+        mismatch = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:24", "bounds": "[120,260][200,300]"})
+        duplicate = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[125,260][200,300]"})
+        self.assertEqual(publisher._instagram_video_tiles([thumbnail, mismatch], 25), [])
+        self.assertEqual(publisher._instagram_video_tiles([thumbnail, duplicate, duplicate], 25), [])
+
+    def test_instagram_duration_accepts_minutes_format_from_label(self):
+        publisher = InstagramPublisher(expected_account="expected.account")
+        thumbnail = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail", "bounds": "[0,100][200,300]"})
+        label = node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "1:05", "bounds": "[120,260][200,300]"})
+        self.assertEqual(publisher._instagram_video_tiles([thumbnail, label], 65), [thumbnail])
+
+    def test_tiktok_verification_uses_ev2_cover_and_exact_tv_play_count_zero(self):
+        publisher = TikTokPublisher(expected_account="expected.account")
+        old = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "old cover", "bounds": "[0,100][200,300]"})
+        old_count = node(**{"resource-id": "com.zhiliaoapp.musically:id/tv_play_count", "text": "12", "bounds": "[0,280][80,300]"})
+        publisher._capture_profile_tiles([old, old_count])
+        new = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "new cover", "bounds": "[0,100][200,300]"})
+        new_count = node(**{"resource-id": "com.zhiliaoapp.musically:id/tv_play_count", "text": "0", "bounds": "[0,280][80,300]"})
+        shifted_old = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "old cover", "bounds": "[0,300][200,500]"})
+        shifted_count = node(**{"resource-id": "com.zhiliaoapp.musically:id/tv_play_count", "text": "12", "bounds": "[0,480][80,500]"})
+        self.assertEqual(publisher._verified_new_profile_tile([new, new_count, shifted_old, shifted_count]), new)
+
+    def test_tiktok_verification_rejects_zero_in_unrelated_content_description(self):
+        publisher = TikTokPublisher(expected_account="expected.account")
+        publisher._capture_profile_tiles([])
+        cover = node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "new cover 0 comments", "bounds": "[0,100][200,300]"})
+        wrong_count = node(**{"resource-id": "com.zhiliaoapp.musically:id/tv_play_count", "text": "1", "bounds": "[0,280][80,300]"})
+        with self.assertRaises(PublisherError) as raised:
+            publisher._verified_new_profile_tile([cover, wrong_count])
+        self.assertEqual(raised.exception.code, "VERIFICATION_VIEW_COUNT")
+
     def test_instagram_full_profile_to_share_flow_has_monotonic_checkpoints(self):
         base = job("instagram", "safe test"); clip = PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, {**base.media, "duration_seconds": 25})
         remote = "publication-7-3.mp4"
+        home = [node(text="Profile")]
         profile = [node(text="expected.account"), node(**{"content-desc": "Create New"}), node(**{"content-desc": "older reel"})]
         create = [node(**{"content-desc": "Create new reel"})]
-        gallery = [node(**{"content-desc": "Video thumbnail created today 0:25"})]
+        gallery = [node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created today", "bounds": "[0,100][200,300]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,260][200,300]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created yesterday", "bounds": "[0,300][200,500]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,460][200,500]"})]
         editor = [node(**{"resource-id": "com.instagram.android:id/clips_right_action_button"})]
         privacy = [node(text="Continue"), node(text="Downloads privacy")]
         caption = [node(text="Write a caption and add hashtags...")]
         field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
-        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
-        details = [node(text="Next")]
+        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"}), node(text="Next")]
         final = [node(text="About Reels"), node(text="Share", **{"resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"})]
         # Prepare records the old gallery before transfer, returns to Profile, then publish
         # reopens it and sees the one newly scanned tile.
-        old_gallery = [node(**{"content-desc": "Video thumbnail created yesterday 0:25"})]
-        device = Device("com.instagram.android", [profile, create, old_gallery, profile, profile, create, gallery, editor, privacy, caption, field_empty, field_one, field_two, details, final, final])
+        old_gallery = [node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created yesterday", "bounds": "[0,100][200,300]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,260][200,300]"})]
+        device = Device("com.instagram.android", [home, profile, create, old_gallery, home, profile, create, gallery, editor, privacy, caption, field_empty, field_one, field_two, final, final])
         events = []
         publisher = InstagramPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)
@@ -270,18 +355,19 @@ class PlatformAdapterTests(unittest.TestCase):
 
     def test_tiktok_full_profile_to_post_flow_has_monotonic_checkpoints(self):
         clip = job("tiktok", "safe test")
-        profile = [node(text="expected.account"), node(text="Create"), node(**{"content-desc": "older tile"})]
+        home = [node(text="Profile")]
+        profile = [node(text="expected.account"), node(text="Create"), node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "older tile"})]
         upload = [node(text="Upload")]
-        gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "publication-7-3.mp4"})]
+        gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "publication-7-3.mp4", "bounds": "[0,100][200,300]"}), node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "old-tile", "bounds": "[0,300][200,500]"})]
         next_one = [node(text="Next (1)")]
         editor = [node(text="Next")]
         field = [node(text="Add description...", **{"resource-id": "com.zhiliaoapp.musically:id/h00"})]
         field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
-        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
+        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"}), node(text="Add description..."), node(text="Public"), node(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})]
         details = [node(text="Add description..."), node(text="Public"), node(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})]
         old_gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "old-tile"})]
-        device = Device("com.zhiliaoapp.musically", [profile, upload, old_gallery, profile, profile, upload, gallery, next_one, editor, field, field_empty, field_one, field_two, details, details])
+        device = Device("com.zhiliaoapp.musically", [home, profile, upload, old_gallery, home, profile, upload, gallery, next_one, editor, field, field_empty, field_one, field_two, details, details])
         events = []
         publisher = TikTokPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)
@@ -302,7 +388,7 @@ class PlatformAdapterTests(unittest.TestCase):
         field = [node(text="Caption your Short", **{"class": "android.widget.EditText"})]
         field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
-        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
+        field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"}), node(text="Caption your Short"), node(text="Public"), node(text="Upload Short", **{"resource-id": "com.google.android.youtube:id/upload_bottom_button"})]
         details = [node(text="Caption your Short"), node(text="Public"), node(text="Upload Short", **{"resource-id": "com.google.android.youtube:id/upload_bottom_button"})]
         device = Device("com.google.android.youtube", [profile, short, import_button, gallery, next_one, done, editor, field, field_empty, field_one, field_two, details, details])
         events = []

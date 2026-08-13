@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .common import GuardedPublisher, validate_caption
+from ..adb_device import SafeAdb
 from ..models import PublisherError
 
 
@@ -16,10 +17,38 @@ class InstagramPublisher(GuardedPublisher):
     @staticmethod
     def _duration_formats(duration: int) -> set[str]:
         minutes, seconds = divmod(duration, 60)
-        return {f"{minutes}:{seconds:02d}", f"{duration} seconds", f"{duration} second"}
+        return {f"{minutes}:{seconds:02d}"}
+
+    @staticmethod
+    def _overlaps_or_touches(first: dict[str, str], second: dict[str, str]) -> bool:
+        ax1, ay1, ax2, ay2 = SafeAdb.bounds(first); bx1, by1, bx2, by2 = SafeAdb.bounds(second)
+        return ax1 < bx2 and bx1 < ax2 and ay1 <= by2 and by1 <= ay2
+
+    def _instagram_video_tiles(self, nodes: list[dict[str, str]], duration: int) -> list[dict[str, str]]:
+        """Return only thumbnails with one geometrically-associated real duration label."""
+        expected = self._duration_formats(duration)
+        labels = [node for node in nodes if node.get("resource-id") == "com.instagram.android:id/gallery_grid_item_label"]
+        matched: list[dict[str, str]] = []
+        for thumbnail in (node for node in nodes if self._is_video_tile(node)):
+            related = [label for label in labels if self._overlaps_or_touches(thumbnail, label)]
+            if len(related) == 1 and related[0].get("text") in expected:
+                matched.append(thumbnail)
+        return matched
+
+    def _navigate_profile(self, device: Any) -> list[dict[str, str]]:
+        nodes = self._nodes(device)
+        profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
+        if profile is None:
+            raise PublisherError("PROFILE_TAB", "Instagram Profile tab is required before account verification")
+        def verified_account(screen: list[dict[str, str]]) -> dict[str, str] | None:
+            self._account(screen)
+            return next((item for item in screen if item.get("text") == self.expected_account or item.get("content-desc") == self.expected_account), None)
+        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=verified_account)
+        self._account(self._last_nodes)
+        return self._last_nodes
 
     def prepare(self, job: Any, device: Any) -> None:
-        self._launch(device); nodes = self._nodes(device); self._account(nodes)
+        self._launch(device); nodes = self._navigate_profile(device)
         self._capture_baseline(nodes)
         self._profile_tiles = {self._tile_signature(node) for node in nodes if "reel" in node.get("content-desc", "").casefold()}
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create New", required=False)
@@ -30,8 +59,7 @@ class InstagramPublisher(GuardedPublisher):
         # Back out before the runner transfers media; stale publish screens are never reused.
         if hasattr(device, "back"): device.back()
         else: device.command("shell", "input", "keyevent", "4")
-        profile = self.wait_for(device, error="PROFILE_RETURN", text=self.expected_account)
-        self._account(self._last_nodes)
+        self._navigate_profile(device)
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption)
@@ -47,8 +75,7 @@ class InstagramPublisher(GuardedPublisher):
             reel = self.tap_and_wait(device, create, error="REEL_SELECTOR", content_desc="Create new reel")
             self.tap_and_wait(device, reel, error="GALLERY_MEDIA", predicate=lambda screen: next((item for item in screen if item.get("content-desc", "").startswith("Video thumbnail")), None)); checkpoint("selecting_media", 25, evidence={"platform": "instagram", "stage": "reel"})
             gallery = self._last_nodes
-            duration_marker = f"0:{duration:02d}"
-            media = self._new_gallery_tile(gallery, lambda node: self._is_video_tile(node) and any(item in node.get("content-desc", "") for item in self._duration_formats(duration)))
+            media = self._new_gallery_tile(gallery, lambda node: node in self._instagram_video_tiles(gallery, duration), baseline_predicate=self._is_video_tile)
             editor = self.tap_and_wait(device, media, error="EDITOR_NEXT", resource_id="com.instagram.android:id/clips_right_action_button")
             next_screen = self.tap_and_wait(device, editor, error="CAPTION_OR_PRIVACY", predicate=lambda screen: next((item for item in screen if item.get("text") in {"Continue", "Write a caption and add hashtags..."}), None)); checkpoint("editing", 45, evidence={"platform": "instagram", "stage": "editor"})
             if next_screen.get("text") == "Continue":
@@ -63,12 +90,7 @@ class InstagramPublisher(GuardedPublisher):
         self._final(device, checkpoint, button={"text": "Share", "resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"}, context={"text": "About Reels"}, evidence={"platform": "instagram", "final": "share"})
 
     def verify(self, job: Any, device: Any) -> str:
-        nodes = self._nodes(device)
-        profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
-        if profile is None: raise PublisherError("PROFILE_TAB", "Instagram Profile tab is required for verification", retryable=True, final_action_uncertain=True)
-        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", text=self.expected_account)
-        nodes = self._last_nodes
-        self._account(nodes)
+        nodes = self._navigate_profile(device)
         candidates = [node for node in nodes if "reel" in node.get("content-desc", "").casefold() and self._tile_signature(node) not in self._profile_tiles]
         if len(candidates) != 1: raise PublisherError("VERIFICATION_NO_DELTA", "Instagram profile must show exactly one new reel tile", retryable=True, final_action_uncertain=True)
         return candidates[0].get("content-desc") or candidates[0].get("text") or "instagram-reel"

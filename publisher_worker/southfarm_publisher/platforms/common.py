@@ -84,8 +84,35 @@ class GuardedPublisher:
 
     def tap_and_wait(self, device: Any, node: dict[str, str], *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, predicate: Callable[[list[dict[str, str]]], dict[str, str] | None] | None = None) -> dict[str, str]:
         """Perform one reversible navigation tap, then require a fresh next screen."""
-        self._tap(device, node)
-        return self.wait_for(device, error=error, text=text, content_desc=content_desc, resource_id=resource_id, context=context, predicate=predicate)
+        # An ADB tap returning successfully is not evidence that the app accepted it.
+        # Take an immediately-before dump and refuse to accept a target from that
+        # same UI revision (for example a stale dialog already left on screen).
+        before = self._nodes(device)
+        before_fingerprint = self._screen_fingerprint(before)
+        selected = self._one(before, error="STALE_CONTROL", text=node.get("text"), content_desc=node.get("content-desc"), resource_id=node.get("resource-id"))
+        self._tap(device, selected)
+        return self._wait_for_fresh(device, before_fingerprint, error=error, text=text, content_desc=content_desc, resource_id=resource_id, context=context, predicate=predicate)
+
+    @staticmethod
+    def _screen_fingerprint(nodes: list[dict[str, str]]) -> tuple[tuple[tuple[str, str], ...], ...]:
+        return tuple(sorted(tuple(sorted((str(key), str(value)) for key, value in node.items())) for node in nodes))
+
+    def _wait_for_fresh(self, device: Any, before_fingerprint: tuple[tuple[tuple[str, str], ...], ...], *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, predicate: Callable[[list[dict[str, str]]], dict[str, str] | None] | None = None, clock: Callable[[], float] = time.monotonic) -> dict[str, str]:
+        deadline = clock() + self.timeout
+        while True:
+            nodes = self._nodes(device)
+            if self._screen_fingerprint(nodes) != before_fingerprint:
+                if predicate is not None:
+                    found = predicate(nodes)
+                elif context is None or any(all(item.get(key) == value for key, value in context.items()) for item in nodes):
+                    found = self._one(nodes, error=error, text=text, content_desc=content_desc, resource_id=resource_id, required=False)
+                else:
+                    found = None
+                if found is not None:
+                    return found
+            if clock() >= deadline:
+                raise PublisherError("UI_TIMEOUT", f"Timed out waiting for fresh {error}", retryable=True)
+            self._pause(self.poll)
 
     def _account(self, nodes: list[dict[str, str]]) -> None:
         if self.expected_account.lstrip('@').casefold() in self.forbidden_accounts:
@@ -99,14 +126,20 @@ class GuardedPublisher:
         self._prepared = True
 
     @staticmethod
-    def _tile_signature(node: dict[str, str]) -> tuple[str, str, str]:
-        return (node.get("resource-id", ""), node.get("content-desc", ""), node.get("bounds", ""))
+    def _tile_signature(node: dict[str, str]) -> tuple[str, str, str, str]:
+        # Bounds are display positions, not a media identity: inserting a first
+        # tile shifts every existing item.  Keep only stable UI identity fields.
+        return (node.get("resource-id", ""), node.get("content-desc", ""), node.get("text", ""), node.get("class", ""))
 
     def _capture_gallery_baseline(self, nodes: list[dict[str, str]], predicate: Callable[[dict[str, str]], bool]) -> None:
         self._gallery_baseline = {self._tile_signature(node) for node in nodes if predicate(node)}
 
-    def _new_gallery_tile(self, nodes: list[dict[str, str]], predicate: Callable[[dict[str, str]], bool]) -> dict[str, str]:
-        candidates = [node for node in nodes if predicate(node) and self._tile_signature(node) not in getattr(self, "_gallery_baseline", set())]
+    def _new_gallery_tile(self, nodes: list[dict[str, str]], predicate: Callable[[dict[str, str]], bool], *, baseline_predicate: Callable[[dict[str, str]], bool] | None = None) -> dict[str, str]:
+        current = {self._tile_signature(node) for node in nodes if (baseline_predicate or predicate)(node)}
+        baseline = getattr(self, "_gallery_baseline", set())
+        if not baseline.issubset(current):
+            raise PublisherError("MEDIA_BASELINE_MISSING", "Gallery baseline changed unexpectedly")
+        candidates = [node for node in nodes if predicate(node) and self._tile_signature(node) not in baseline]
         if len(candidates) != 1: raise PublisherError("MEDIA_AMBIGUOUS", "Gallery must contain exactly one new verified video tile")
         self._chosen_tile = self._tile_signature(candidates[0])
         return candidates[0]
