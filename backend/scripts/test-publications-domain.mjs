@@ -75,9 +75,22 @@ const later = '2026-08-13T12:00:31.000Z';
 const future = '2026-08-13T13:00:00.000Z';
 const actor = { type: 'user', id: 'owner-1' };
 const worker = { id: 'worker-1', deviceId: 1, leaseSeconds: 30 };
+const replacementWorker = { id: 'worker-2', deviceId: 1, leaseSeconds: 30 };
 const jobInput = {
   workspaceId: 1, deviceId: 1, socialAccountId: 1, platform: 'youtube',
   caption: 'SouthFarm publishes this test video safely today', scheduledFor: now,
+};
+const eventCount = (jobId) => db.prepare('SELECT COUNT(*) AS count FROM publication_events WHERE publication_job_id = ?').get(jobId).count;
+const assertLockRejectsWithoutMutation = (jobId, action) => {
+  const before = store.getJob(jobId);
+  const beforeEvents = eventCount(jobId);
+  assert.throws(action, /live device automation lock/);
+  const after = store.getJob(jobId);
+  assert.deepEqual(
+    [after.status, after.current_step, after.progress_percent, after.final_action_at],
+    [before.status, before.current_step, before.progress_percent, before.final_action_at],
+  );
+  assert.equal(eventCount(jobId), beforeEvents);
 };
 
 db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires_at) VALUES (1, 1, 'pending', ?, ?)").run(future, null);
@@ -115,10 +128,22 @@ const lockJob = store.createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).job.id, lockJob.id);
 db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(lockJob.id);
 assert.throws(() => store.heartbeat(lockJob.id, worker, now), /lock/);
+assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, now, { step: 'preparing', progressPercent: 10 }));
+assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', now, actor));
 db.prepare("INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (1, ?, 'other-worker', ?, ?, ?)").run(lockJob.id, future, now, now);
 assert.throws(() => store.heartbeat(lockJob.id, worker, now), /lock/);
+assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, now, { step: 'preparing', progressPercent: 10 }));
+assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', now, actor));
 db.prepare("UPDATE device_automation_locks SET worker_id = ?, expires_at = ? WHERE publication_job_id = ?").run(worker.id, now, lockJob.id);
 assert.throws(() => store.heartbeat(lockJob.id, worker, now), /lock/);
+assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, now, { step: 'preparing', progressPercent: 10 }));
+assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', now, actor));
+
+const replacementJob = store.createJob(jobInput, actor);
+assert.equal(store.claimDueJob(replacementWorker, later).job.id, replacementJob.id);
+assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, later, { step: 'preparing', progressPercent: 10 }));
+assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', later, actor));
+db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(replacementJob.id);
 
 const pausedJob = store.createJob(jobInput, actor);
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (5, 1, 'paused', NULL)").run();

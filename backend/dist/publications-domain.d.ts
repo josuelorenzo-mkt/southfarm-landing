@@ -64,6 +64,7 @@ export declare class PublicationStore {
     private row;
     private event;
     private transition;
+    private requireLiveWorkerLock;
     createJob(input: CreatePublicationJobInput, actor: PublicationActor): PublicationJobView;
     listJobs(workspaceId?: number): PublicationJobView[];
     getJob(id: number): PublicationJobView;
