@@ -35,7 +35,13 @@ class PublicationJob:
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "PublicationJob":
         try:
-            return cls(id=int(value["id"]), device_id=int(value["device_id"]), media_id=int(value["media_id"]), platform=str(value["platform"]), caption=str(value["caption"]), media=dict(value.get("media") or {}), status=str(value.get("status", "claimed")))
+            job_id, device_id, media_id = int(value["id"]), int(value["device_id"]), int(value["media_id"])
+            media = dict(value["media"])
+            allowed_extensions = {"video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm"}
+            if set(media) != {"id", "size_bytes", "sha256", "mime_type", "file_extension"} or isinstance(media["id"], bool) or int(media["id"]) != media_id or isinstance(media["size_bytes"], bool) or not isinstance(media["size_bytes"], int) or media["size_bytes"] <= 0 or not isinstance(media["sha256"], str) or len(media["sha256"]) != 64 or media["sha256"] != media["sha256"].lower() or any(character not in "0123456789abcdef" for character in media["sha256"]):
+                raise ValueError("invalid media metadata")
+            if allowed_extensions.get(media["mime_type"]) != media["file_extension"]: raise ValueError("invalid media metadata")
+            return cls(id=job_id, device_id=device_id, media_id=media_id, platform=str(value["platform"]), caption=str(value["caption"]), media=media, status=str(value.get("status", "claimed")))
         except (KeyError, TypeError, ValueError) as error:
             raise PublisherError("JOB_INVALID", "Claim response contains an invalid publication job") from error
 
@@ -44,4 +50,3 @@ class PublicationJob:
 class ClaimedJob:
     job: PublicationJob
     claim_token: str
-

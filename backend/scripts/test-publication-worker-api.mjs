@@ -47,6 +47,13 @@ try {
   assert.equal([claimA, claimB].filter((item) => item.body.claimed).length, 1, 'two claims have exactly one winner');
   const claim = claimA.body.claimed ? claimA.body : claimB.body; const job = claim.job;
   assert.match(claim.claim_token, /^[0-9a-f-]{36}$/i); assert.notEqual(claim.claim_token, token);
+  assert.deepEqual(Object.keys(job.media).sort(), ['file_extension', 'id', 'mime_type', 'sha256', 'size_bytes']);
+  assert.equal(job.media.id, job.media_id);
+  assert.equal(job.media.sha256, job.media.sha256.toLowerCase());
+  assert.equal(typeof job.media.size_bytes, 'number');
+  assert.equal(job.media.private_path, undefined);
+  assert.equal(job.media.workspace_id, undefined);
+  assert.equal(JSON.stringify(claim), JSON.stringify(claim).replaceAll(mediaRoot, '[private-root]'), 'claim never leaks its private media root');
   const taskClaim = await request('/api/tasks/claim', { method: 'POST', headers: { Authorization: `Bearer ${deviceToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: 'worker-test-android', installation_id: 'worker-test-android' }) });
   assert.equal(taskClaim.response.status, 200); assert.equal(taskClaim.body.claimed, false); assert.equal(taskClaim.body.reason, 'device_busy_publication');
   const badHeartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: 'wrong' }) }); assert.equal(badHeartbeat.response.status, 409);
@@ -98,6 +105,27 @@ try {
   }
   const postFinalFailed = await request(`/api/publication-worker/jobs/${finalJob.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: finalClaim.worker_id, claim_token: finalClaim.claim_token, status: 'failed' }) }); assert.equal(postFinalFailed.response.status, 409);
   const postFinalReview = await request(`/api/publication-worker/jobs/${finalJob.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: finalClaim.worker_id, claim_token: finalClaim.claim_token, status: 'review_required' }) }); assert.equal(postFinalReview.response.status, 200);
+  for (const [username, mutation] of [
+    ['missing-media', (publicationId) => db.prepare('UPDATE publication_jobs SET media_id = NULL WHERE id = ?').run(publicationId)],
+    ['staging-media', (publicationId) => db.prepare("UPDATE publication_media SET upload_status = 'staging' WHERE id = (SELECT media_id FROM publication_jobs WHERE id = ?)").run(publicationId)],
+    ['mismatched-media', (publicationId) => {
+      const foreignUser = Number(db.prepare('INSERT INTO users (email, password, name) VALUES (?, ?, ?)').run(`foreign-${crypto.randomUUID()}@example.test`, 'test-password-123', 'Foreign workspace').lastInsertRowid);
+      const foreignWorkspace = Number(db.prepare('INSERT INTO workspaces (name, owner_user_id) VALUES (?, ?)').run('Foreign workspace', foreignUser).lastInsertRowid);
+      db.prepare('UPDATE publication_jobs SET workspace_id = ? WHERE id = ?').run(foreignWorkspace, publicationId);
+    }],
+  ]) {
+    const isolatedAccount = Number(db.prepare("INSERT INTO social_accounts (user_id, device_id, platform, username) VALUES (?, ?, 'youtube', ?)").run(owner.user.id, deviceId, username).lastInsertRowid);
+    const invalid = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: form(deviceId, isolatedAccount, `Safe ${username} claim`) });
+    assert.equal(invalid.response.status, 201, JSON.stringify(invalid.body));
+    mutation(invalid.body.publication.id);
+    const invalidClaim = await request('/api/publication-worker/claim', { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: 'worker-invalid', device_id: deviceId }) });
+    assert.equal(invalidClaim.body.claimed, false, `${username} is never executable`);
+    const invalidRow = db.prepare('SELECT status, error_code FROM publication_jobs WHERE id = ?').get(invalid.body.publication.id);
+    assert.deepEqual(invalidRow, { status: 'review_required', error_code: 'MEDIA_UNAVAILABLE' });
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE publication_job_id = ?').get(invalid.body.publication.id).count, 0);
+    const invalidEvent = db.prepare('SELECT payload FROM publication_events WHERE publication_job_id = ? ORDER BY id DESC LIMIT 1').get(invalid.body.publication.id);
+    assert.equal(JSON.parse(invalidEvent.payload).reason, 'MEDIA_UNAVAILABLE');
+  }
   console.log('publication-worker-api test passed: auth, atomic claim, shared lock, lease, media, cancellation, finish');
   db.close();
 } finally { await stop(); try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {} }

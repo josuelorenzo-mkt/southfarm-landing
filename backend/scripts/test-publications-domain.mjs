@@ -70,6 +70,15 @@ db.prepare('INSERT INTO devices (id, workspace_id) VALUES (1, 1)').run();
 db.prepare("INSERT INTO social_accounts (id, device_id, platform, username) VALUES (1, 1, 'youtube', 'southfarm')").run();
 
 const store = new PublicationStore(db);
+let mediaSequence = 0;
+const createJob = (input, actor) => {
+  const job = store.createJob(input, actor);
+  const mediaId = ++mediaSequence;
+  db.prepare(`INSERT INTO publication_media (id, workspace_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'video/mp4', 'mp4', 1, ?, 'stored', ?, ?)`).run(mediaId, input.workspaceId, `clip-${mediaId}.mp4`, `${mediaId}.mp4`, '0'.repeat(64), now, now);
+  db.prepare('UPDATE publication_jobs SET media_id = ? WHERE id = ?').run(mediaId, job.id);
+  return store.getJob(job.id);
+};
 const now = '2026-08-13T12:00:00.000Z';
 const later = '2026-08-13T12:00:31.000Z';
 const future = '2026-08-13T13:00:00.000Z';
@@ -96,7 +105,7 @@ const assertLockRejectsWithoutMutation = (jobId, action) => {
 db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires_at) VALUES (1, 1, 'pending', ?, ?)").run(future, null);
 db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires_at) VALUES (2, 1, 'overdue', ?, ?)").run(now, now);
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (3, 1, 'running', ?)").run(now);
-const job = store.createJob(jobInput, actor);
+const job = createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).job.id, job.id, 'future and expired task runs do not block a claim');
 worker.claimToken = store.getJob(job.id).claim_token;
 assert.equal(store.claimDueJob(worker, now).claimed, false);
@@ -122,12 +131,12 @@ assert.equal(store.checkpoint(job.id, worker, now, { step: 'verifying', progress
 assert.equal(store.finish(job.id, worker, 'completed', now, actor).status, 'completed');
 
 db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires_at) VALUES (4, 1, 'pending', ?, ?)").run(now, future);
-const blockedJob = store.createJob(jobInput, actor);
+const blockedJob = createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).claimed, false, 'a due, unexpired pending task blocks a claim');
 db.prepare('DELETE FROM task_runs WHERE id = 4').run();
 store.rescheduleJob(blockedJob.id, future, actor);
 
-const lockJob = store.createJob(jobInput, actor);
+const lockJob = createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).job.id, lockJob.id);
 worker.claimToken = store.getJob(lockJob.id).claim_token;
 db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(lockJob.id);
@@ -143,14 +152,14 @@ assert.throws(() => store.heartbeat(lockJob.id, worker, now), /lock/);
 assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, now, { step: 'preparing', progressPercent: 10 }));
 assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', now, actor));
 
-const replacementJob = store.createJob(jobInput, actor);
+const replacementJob = createJob(jobInput, actor);
 assert.equal(store.claimDueJob(replacementWorker, later).job.id, replacementJob.id);
 replacementWorker.claimToken = store.getJob(replacementJob.id).claim_token;
 assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, later, { step: 'preparing', progressPercent: 10 }));
 assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', later, actor));
 db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(replacementJob.id);
 
-const pausedJob = store.createJob(jobInput, actor);
+const pausedJob = createJob(jobInput, actor);
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (5, 1, 'paused', NULL)").run();
 assert.equal(store.claimDueJob(worker, later).claimed, false, 'paused task with a live lease blocks a claim');
 

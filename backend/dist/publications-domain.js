@@ -87,8 +87,35 @@ export class PublicationStore {
         throw new PublicationTransitionError('Cannot cancel publication job after final action'); if (row.status === 'queued')
         return publicationJobView(this.transition(row, 'cancelled', actor, at), this.db); if (!Object.prototype.hasOwnProperty.call(PUBLICATION_STATE_TRANSITIONS, row.status) || row.status === 'cancellation_requested')
         throw new PublicationTransitionError(`Cannot cancel publication job in ${row.status}`); this.db.prepare('UPDATE publication_jobs SET cancel_requested_at = ? WHERE id = ?').run(at, id); return publicationJobView(this.transition(row, 'cancellation_requested', actor, at), this.db); }); }
-    claimDueJob(worker, now) { requireIso(now, 'now'); return this.transaction(() => { this.db.prepare('DELETE FROM device_automation_locks WHERE expires_at <= ?').run(now); const candidate = this.db.prepare(`SELECT job.* FROM publication_jobs job WHERE job.device_id = ? AND job.status = 'queued' AND job.scheduled_for <= ? AND NOT EXISTS (SELECT 1 FROM publication_jobs review WHERE review.social_account_id = job.social_account_id AND review.status = 'review_required') AND NOT EXISTS (SELECT 1 FROM task_runs run WHERE run.device_id = job.device_id AND ((run.status IN ('running', 'paused') AND (run.lease_expires_at IS NULL OR run.lease_expires_at > ?)) OR (run.status IN ('pending', 'overdue') AND (run.scheduled_for IS NULL OR run.scheduled_for <= ?) AND (run.expires_at IS NULL OR run.expires_at > ?)))) AND NOT EXISTS (SELECT 1 FROM device_automation_locks lock WHERE lock.device_id = job.device_id AND lock.expires_at > ?) ORDER BY job.scheduled_for, job.id LIMIT 1`).get(worker.deviceId, now, now, now, now, now); if (!candidate)
-        return { claimed: false, job: null }; const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const claimToken = randomUUID(); this.db.prepare("UPDATE publication_jobs SET status = 'claimed', current_step = 'claimed', claimed_by = ?, claim_token = ?, claimed_at = ?, lease_expires_at = ?, last_heartbeat_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND status = 'queued'").run(worker.id, claimToken, now, expiresAt, now, now, candidate.id); this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now); this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now); return { claimed: true, job: this.getJob(candidate.id) }; }); }
+    claimDueJob(worker, now) {
+        requireIso(now, 'now');
+        return this.transaction(() => {
+            this.db.prepare('DELETE FROM device_automation_locks WHERE expires_at <= ?').run(now);
+            const eligibility = `job.device_id = ? AND job.status = 'queued' AND job.scheduled_for <= ?
+        AND NOT EXISTS (SELECT 1 FROM publication_jobs review WHERE review.social_account_id = job.social_account_id AND review.status = 'review_required')
+        AND NOT EXISTS (SELECT 1 FROM task_runs run WHERE run.device_id = job.device_id AND ((run.status IN ('running', 'paused') AND (run.lease_expires_at IS NULL OR run.lease_expires_at > ?)) OR (run.status IN ('pending', 'overdue') AND (run.scheduled_for IS NULL OR run.scheduled_for <= ?) AND (run.expires_at IS NULL OR run.expires_at > ?))))
+        AND NOT EXISTS (SELECT 1 FROM device_automation_locks lock WHERE lock.device_id = job.device_id AND lock.expires_at > ?)`;
+            const args = [worker.deviceId, now, now, now, now, now];
+            const invalid = this.db.prepare(`SELECT job.* FROM publication_jobs job LEFT JOIN publication_media media ON media.id = job.media_id WHERE ${eligibility} AND (media.id IS NULL OR media.workspace_id != job.workspace_id OR media.upload_status != 'stored') ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
+            if (invalid) {
+                const reason = 'MEDIA_UNAVAILABLE';
+                this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, 'Publication media is missing, not stored, or belongs to another workspace', now, now, invalid.id);
+                this.event(invalid.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
+                return { claimed: false, job: null };
+            }
+            const candidate = this.db.prepare(`SELECT job.* FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
+            if (!candidate)
+                return { claimed: false, job: null };
+            const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds));
+            const claimToken = randomUUID();
+            const claimed = this.db.prepare("UPDATE publication_jobs SET status = 'claimed', current_step = 'claimed', claimed_by = ?, claim_token = ?, claimed_at = ?, lease_expires_at = ?, last_heartbeat_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND status = 'queued'").run(worker.id, claimToken, now, expiresAt, now, now, candidate.id);
+            if (claimed.changes !== 1)
+                throw new Error('Publication job is no longer claimable');
+            this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now);
+            this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now);
+            return { claimed: true, job: this.getJob(candidate.id) };
+        });
+    }
     heartbeat(id, worker, now) { return this.transaction(() => { const row = this.row(id); this.requireLiveWorkerLock(row, worker, now); const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const lockUpdate = this.db.prepare('UPDATE device_automation_locks SET expires_at = ?, updated_at = ? WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(expiresAt, now, row.device_id, id, worker.id, now); if (lockUpdate.changes !== 1)
         throw new Error('Worker does not hold a live device automation lock'); const jobUpdate = this.db.prepare('UPDATE publication_jobs SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ? AND claimed_by = ? AND claim_token = ? AND lease_expires_at > ?').run(expiresAt, now, now, id, worker.id, worker.claimToken, now); if (jobUpdate.changes !== 1)
         throw new Error('Worker no longer owns publication job'); return this.getJob(id); }); }

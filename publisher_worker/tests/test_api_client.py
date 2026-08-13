@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from southfarm_publisher.api_client import PublisherApiClient
-from southfarm_publisher.models import PublisherError
+from southfarm_publisher.models import PublisherError, PublicationJob
 
 
 class FakeResponse:
@@ -20,6 +20,21 @@ class FakeResponse:
 
 
 class ApiClientTests(unittest.TestCase):
+    def test_claim_fixture_requires_safe_media_contract_before_adb(self):
+        fixture = {
+            "claimed": True, "claim_token": "claim-1",
+            "job": {"id": 7, "device_id": 5, "media_id": 3, "platform": "youtube", "caption": "safe test", "status": "claimed",
+                    "media": {"id": 3, "size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4"}},
+        }
+        client = PublisherApiClient("https://api.example.test", "secret-token", "worker-a", opener=lambda request, timeout: FakeResponse(body=__import__('json').dumps(fixture).encode()))
+        claim = client.claim(5)
+        self.assertEqual(claim.job.media_id, claim.job.media["id"])
+        self.assertEqual(claim.job.media["mime_type"], "video/mp4")
+        for media in ({}, {"id": 3}, {**fixture["job"]["media"], "id": 4}, {**fixture["job"]["media"], "sha256": "UPPER"}, {**fixture["job"]["media"], "mime_type": "text/plain"}, {**fixture["job"]["media"], "file_extension": "mov"}):
+            with self.subTest(media=media):
+                with self.assertRaises(PublisherError) as raised: PublicationJob.from_json({**fixture["job"], "media": media})
+                self.assertEqual(raised.exception.code, "JOB_INVALID")
+
     def test_download_streams_and_removes_partial_file_on_hash_mismatch(self):
         client = PublisherApiClient("https://api.example.test", "secret-token", "worker-a", opener=lambda request, timeout: FakeResponse(body=b"wrong"))
         with tempfile.TemporaryDirectory() as directory:
