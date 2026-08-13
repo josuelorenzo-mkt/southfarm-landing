@@ -64,6 +64,11 @@ export type PublicationMediaClaimView = {
     sha256: string;
     mime_type: string;
     file_extension: string;
+    duration_seconds: number;
+    width: number;
+    height: number;
+    video_codec: string;
+    audio_codec: string | null;
 };
 export type PublicationAccountClaimView = {
     id: number;

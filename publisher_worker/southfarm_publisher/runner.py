@@ -104,26 +104,31 @@ class PublicationRunner:
             except PublisherError: claimed = False
             if not claimed and not stop.is_set(): sleep(self.backoff_seconds(random_value))
 
-def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int]:
+def _normalized_accounts(value: str) -> set[str]:
+    return {item.strip().lstrip('@').casefold() for item in value.split(',') if item.strip()}
+
+def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int, set[str]]:
     api_url, token, worker_id, device_id = (env.get(key, "").strip() for key in ("SOUTHFARM_API_URL", "SOUTHFARM_PUBLISHER_WORKER_TOKEN", "SOUTHFARM_PUBLISHER_WORKER_ID", "SOUTHFARM_PUBLISHER_DEVICE_ID"))
     if not device_id.isdigit() or int(device_id) <= 0: raise PublisherError("CONFIG_INVALID", "SOUTHFARM_PUBLISHER_DEVICE_ID must be a positive integer")
     adb = env.get("SOUTHFARM_ADB", DEFAULT_ADB)
     if not os.path.isfile(adb) or not os.access(adb, os.X_OK): raise PublisherError("CONFIG_INVALID", "Configured ADB executable is unavailable")
-    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb), int(device_id)
+    raw_forbidden, allow_all = env.get("SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS"), env.get("SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS", "").strip().lower()
+    if raw_forbidden is None and allow_all != "true": raise PublisherError("CONFIG_INVALID", "Instagram forbidden-account policy must be configured")
+    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb), int(device_id), _normalized_accounts(raw_forbidden or "")
 
-def platform_adapters() -> dict[str, Any]:
+def platform_adapters(*, forbidden_instagram_accounts: set[str] | None = None) -> dict[str, Any]:
     from .platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
-    def configured(cls: Any) -> Callable[[Any], Any]:
+    def configured(cls: Any, forbidden: set[str] | None = None) -> Callable[[Any], Any]:
         def build(job: Any) -> Any:
             account = getattr(job, 'account', {})
             expected = account.get('username') if isinstance(account, dict) else None
             if not isinstance(expected, str) or not expected.strip():
                 raise PublisherError('ACCOUNT_SNAPSHOT_INVALID', 'Publication job lacks a safe expected account')
-            return cls(expected_account=expected)
+            return cls(expected_account=expected, forbidden_accounts=forbidden)
         return build
-    return {"instagram": configured(InstagramPublisher), "tiktok": configured(TikTokPublisher), "youtube": configured(YouTubeShortPublisher)}
+    return {"instagram": configured(InstagramPublisher, forbidden_instagram_accounts), "tiktok": configured(TikTokPublisher), "youtube": configured(YouTubeShortPublisher)}
 
 def main() -> None:
-    api, registry, device_id = _config()
-    PublicationRunner(api, registry, platform_adapters()).run_forever(device_id, stop=threading.Event())
+    api, registry, device_id, forbidden = _config()
+    PublicationRunner(api, registry, platform_adapters(forbidden_instagram_accounts=forbidden)).run_forever(device_id, stop=threading.Event())
 if __name__ == "__main__": main()

@@ -22,7 +22,7 @@ class Device:
 
 
 def job(platform="tiktok", caption="safe publishing test"):
-    return PublicationJob(7, 5, 3, platform, caption, {"id": 3, "size_bytes": 1, "sha256": "a" * 64, "mime_type": "video/mp4", "file_extension": "mp4"})
+    return PublicationJob(7, 5, 3, platform, caption, {"id": 3, "size_bytes": 1, "sha256": "a" * 64, "mime_type": "video/mp4", "file_extension": "mp4", "duration_seconds": 25, "width": 1080, "height": 1920, "video_codec": "hevc", "audio_codec": "aac"})
 
 
 def node(**values):
@@ -61,7 +61,7 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             resumed_for_final(InstagramPublisher).publish(job("instagram"), device, lambda *args, **kwargs: None)
         self.assertEqual(raised.exception.code, "WRONG_PACKAGE")
-        self.assertEqual(device.taps, [])
+        self.assertEqual(device.taps, [], "a wrong foreground package is rejected before every tap")
 
     def test_account_label_mismatch_blocks_tiktok_create(self):
         device = Device("com.zhiliaoapp.musically", [[node(**{"content-desc": "Create"}), node(text="different.account")]])
@@ -77,11 +77,11 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.taps, [])
 
     def test_youtube_refuses_shorts_collision(self):
-        device = Device("com.google.android.youtube", [[node(text="Shorts", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"}), node(text="expected.account")]])
+        device = Device("com.google.android.youtube", [[node(text="Create"), node(text="expected.account")], [node(text="Shorts", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]])
         with self.assertRaises(PublisherError) as raised:
             YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
-        self.assertEqual(raised.exception.code, "SHORT_SELECTOR")
-        self.assertEqual(device.taps, [])
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 1, "Create may open the mode sheet; Shorts is never tapped")
 
     def test_instagram_mid_flow_is_refused_before_share_tap(self):
         final = [node(text="About Reels"), node(text="Share", **{"resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"})]
@@ -129,7 +129,7 @@ class PlatformAdapterTests(unittest.TestCase):
         device = Device("com.google.android.youtube", [[node(text="You")], [node(**{"content-desc": "View channel"})], [node(**{"content-desc": "other caption - play Short"})]])
         with self.assertRaises(PublisherError) as raised:
             YouTubeShortPublisher(expected_account="expected.account").verify(job("youtube"), device)
-        self.assertEqual(raised.exception.code, "VERIFICATION_MISSING")
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
 
     def test_verify_rejects_identity_already_present_in_profile_baseline(self):
         identity = "safe publishing test, No views - play Short"
@@ -141,32 +141,48 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "VERIFICATION_NO_DELTA")
 
     def test_cleanup_requires_verified_identity_and_restores_baseline(self):
-        expected, baseline = "safe publishing test - play Short", {"older post - play Short"}
+        expected, baseline = "safe publishing test - play Short", {"older post - play Short", "expected.account"}
         device = Device("com.google.android.youtube", [
-            [node(**{"content-desc": expected}), node(**{"content-desc": "older post - play Short"})],
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older post - play Short"})],
             [node(**{"content-desc": "More actions"})],
             [node(text="Delete")],
             [node(text="Delete")],
-            [node(**{"content-desc": "older post - play Short"})],
+            [node(text="expected.account"), node(**{"content-desc": "older post - play Short"})],
         ])
         YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
 
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
-        expected, baseline = "safe reel", {"older reel"}
+        expected, baseline = "safe reel", {"older reel", "expected.account"}
         device = Device("com.instagram.android", [
-            [node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"content-desc": "More options"})], [node(text="Delete")], [node(text="Delete")], [node(**{"content-desc": "older reel"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"content-desc": "More options"})], [node(text="Delete")], [node(text="Delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
         InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
 
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
-        expected, baseline = "safe video", {"older video"}
+        expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [
-            [node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], [node(text="Delete")], [node(**{"content-desc": "older video"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], [node(text="Delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
         TikTokPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
+
+    def test_cleanup_collision_or_extra_identity_never_taps_delete_target(self):
+        expected, baseline = "safe reel", {"older reel", "expected.account"}
+        device = Device("com.instagram.android", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"}), node(**{"content-desc": "unrelated reel"})]])
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
+        self.assertEqual(raised.exception.code, "CLEANUP_IDENTITY_MISMATCH")
+        self.assertEqual(device.taps, [])
+
+    def test_cleanup_missing_confirmation_never_taps_delete_action(self):
+        expected, baseline = "safe video", {"older video", "expected.account"}
+        device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], []])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 3, "confirmation is never tapped when its fresh dialog is absent")
 
     def test_caption_contract_blocks_eleven_words_before_youtube_ui(self):
         too_many = job("youtube", "one two three four five six seven eight nine ten eleven")
@@ -184,12 +200,23 @@ class PlatformAdapterTests(unittest.TestCase):
             publisher.wait_for(device, error="MISSING", text="never", clock=lambda: next(ticks))
         self.assertEqual(raised.exception.code, "UI_TIMEOUT")
 
+
     def test_forbidden_account_blocks_before_create(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(text="Create")]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account", forbidden_accounts={"expected.account"}).prepare(job(), device)
         self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
         self.assertEqual(device.taps, [])
+
+    def test_instagram_factory_normalizes_forbidden_account_only_for_instagram(self):
+        from southfarm_publisher.runner import platform_adapters
+        claimed = job("instagram"); claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "@Expected.Account", "display_name": "Expected", "platform": "instagram"}, {"id": 5, "device_id": "android"})
+        instagram = platform_adapters(forbidden_instagram_accounts={"expected.account"})["instagram"](claimed)
+        device = Device("com.instagram.android", [[node(text="@Expected.Account"), node(**{"content-desc": "Create New"})]])
+        with self.assertRaises(PublisherError) as raised: instagram.prepare(claimed, device)
+        self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
+        youtube = platform_adapters(forbidden_instagram_accounts={"expected.account"})["youtube"](PublicationJob(claimed.id, claimed.device_id, claimed.media_id, "youtube", claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "youtube"}, {"id": 5, "device_id": "android"}))
+        self.assertEqual(youtube.forbidden_accounts, set())
 
     def test_caption_requires_each_observable_exact_prefix(self):
         device = Device("com.google.android.youtube", [[node(**{"class": "android.widget.EditText", "text": "wrong"})]])
@@ -199,19 +226,20 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.typed, ["safe"])
 
     def test_instagram_full_profile_to_share_flow_has_monotonic_checkpoints(self):
-        clip = job("instagram", "safe test")
+        base = job("instagram", "safe test"); clip = PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, {**base.media, "duration_seconds": 25})
         remote = "publication-7-3.mp4"
         profile = [node(text="expected.account"), node(**{"content-desc": "Create New"}), node(**{"content-desc": "older reel"})]
         create = [node(**{"content-desc": "Create new reel"})]
-        gallery = [node(**{"content-desc": remote})]
+        gallery = [node(**{"content-desc": "Video thumbnail created today 0:25"})]
         editor = [node(**{"resource-id": "com.instagram.android:id/clips_right_action_button"})]
         privacy = [node(text="Continue"), node(text="Downloads privacy")]
         caption = [node(text="Write a caption and add hashtags...")]
+        field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
         field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
         details = [node(text="Next")]
         final = [node(text="About Reels"), node(text="Share", **{"resource-id": "com.instagram.android:id/clips_nux_sheet_share_button"})]
-        device = Device("com.instagram.android", [profile, create, gallery, editor, privacy, caption, field_one, field_two, details, final, final])
+        device = Device("com.instagram.android", [profile, create, gallery, editor, privacy, caption, field_empty, field_one, field_two, details, final, final])
         events = []
         publisher = InstagramPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)
@@ -224,14 +252,15 @@ class PlatformAdapterTests(unittest.TestCase):
         clip = job("tiktok", "safe test")
         profile = [node(text="expected.account"), node(text="Create"), node(**{"content-desc": "older tile"})]
         upload = [node(text="Upload")]
-        gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica"})]
+        gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "publication-7-3.mp4"})]
         next_one = [node(text="Next (1)")]
         editor = [node(text="Next")]
         field = [node(text="Add description...", **{"resource-id": "com.zhiliaoapp.musically:id/h00"})]
+        field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
         field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
         details = [node(text="Add description..."), node(text="Public"), node(text="Post", **{"resource-id": "com.zhiliaoapp.musically:id/st6"})]
-        device = Device("com.zhiliaoapp.musically", [profile, upload, gallery, next_one, editor, field, field_one, field_two, details, details])
+        device = Device("com.zhiliaoapp.musically", [profile, upload, gallery, next_one, editor, field, field_empty, field_one, field_two, details, details])
         events = []
         publisher = TikTokPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)
@@ -242,17 +271,19 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_youtube_full_profile_to_upload_flow_has_monotonic_checkpoints(self):
         clip = job("youtube", "safe test")
         remote = "publication-7-3.mp4"
-        profile = [node(text="expected.account"), node(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"}), node(**{"content-desc": "old channel card - play Short"})]
+        profile = [node(text="expected.account"), node(text="Create"), node(**{"content-desc": "old channel card - play Short"})]
+        short = [node(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]
         import_button = [node(**{"resource-id": "com.google.android.youtube:id/reel_camera_gallery_button_delegate"})]
         gallery = [node(**{"resource-id": "com.google.android.youtube:id/thumb_image_view", "content-desc": remote})]
         next_one = [node(text="Next", **{"resource-id": "com.google.android.youtube:id/multi_select_next_button"})]
         done = [node(text="Done", **{"resource-id": "com.google.android.youtube:id/creation_next_button"})]
         editor = [node(text="Next", **{"resource-id": "com.google.android.youtube:id/shorts_post_bottom_button"})]
         field = [node(text="Caption your Short", **{"class": "android.widget.EditText"})]
+        field_empty = [node(**{"class": "android.widget.EditText", "text": ""})]
         field_one = [node(**{"class": "android.widget.EditText", "text": "safe"})]
         field_two = [node(**{"class": "android.widget.EditText", "text": "safe test"})]
         details = [node(text="Caption your Short"), node(text="Public"), node(text="Upload Short", **{"resource-id": "com.google.android.youtube:id/upload_bottom_button"})]
-        device = Device("com.google.android.youtube", [profile, import_button, gallery, next_one, done, editor, field, field_one, field_two, details, details])
+        device = Device("com.google.android.youtube", [profile, short, import_button, gallery, next_one, done, editor, field, field_empty, field_one, field_two, details, details])
         events = []
         publisher = YouTubeShortPublisher(expected_account="expected.account")
         publisher.prepare(clip, device)

@@ -11,12 +11,14 @@ const token = 'test-publisher-worker-token';
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'southfarm-worker-api-'));
 const dbPath = path.join(tempDir, 'southfarm.db');
 const mediaRoot = path.join(tempDir, 'private-media');
+const testVideo = 'C:\\Users\\josu_\\Downloads\\Videos to test\\MP-V-2.mp4';
+const testProbe = process.env.SOUTHFARM_TEST_FFPROBE || 'C:\\Users\\josu_\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-essentials_build\\bin\\ffprobe.exe';
 let backend; let output = '';
 
 function start() {
   backend = spawn(process.env.SOUTHFARM_TEST_NODE_PATH || process.execPath, [path.resolve('dist/index.js')], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), SOUTHFARM_DB_PATH: dbPath, SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot, SOUTHFARM_JWT_SECRET: 'worker-api-test-secret', SOUTHFARM_PUBLISHER_WORKER_TOKEN: token, SOUTHFARM_AUTO_PLANNER_ENABLED: 'false' },
+    env: { ...process.env, PORT: String(port), SOUTHFARM_DB_PATH: dbPath, SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot, SOUTHFARM_JWT_SECRET: 'worker-api-test-secret', SOUTHFARM_PUBLISHER_WORKER_TOKEN: token, SOUTHFARM_AUTO_PLANNER_ENABLED: 'false', SOUTHFARM_FFPROBE: testProbe },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   backend.stdout.on('data', (chunk) => { output += chunk; }); backend.stderr.on('data', (chunk) => { output += chunk; });
@@ -25,7 +27,7 @@ async function stop() { if (backend?.exitCode === null) { backend.kill('SIGTERM'
 async function waitForHealth() { for (let i = 0; i < 60; i += 1) { try { if ((await fetch(`http://127.0.0.1:${port}/api/health`)).ok) return; } catch {} await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error(`backend unavailable: ${output}`); }
 async function request(pathname, init = {}) { const response = await fetch(`http://127.0.0.1:${port}${pathname}`, init); const body = await response.json().catch(() => ({})); return { response, body }; }
 async function createUser() { const { response, body } = await request('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: `worker-${Date.now()}@example.test`, password: 'test-password-123', name: 'Worker test' }) }); assert.equal(response.status, 201); return body; }
-function form(deviceId, accountId, caption = 'Safe worker API media test') { const value = new FormData(); value.set('video', new Blob([Buffer.from('000000186674797069736f6d0000020069736f6d6d703431', 'hex')], { type: 'video/mp4' }), 'clip.mp4'); value.set('platform', 'youtube'); value.set('device_id', String(deviceId)); value.set('social_account_id', String(accountId)); value.set('caption', caption); value.set('scheduled_for', new Date(Date.now() - 1_000).toISOString()); return value; }
+function form(deviceId, accountId, caption = 'Safe worker API media test') { const value = new FormData(); value.set('video', new Blob([fs.readFileSync(testVideo)], { type: 'video/mp4' }), 'clip.mp4'); value.set('platform', 'youtube'); value.set('device_id', String(deviceId)); value.set('social_account_id', String(accountId)); value.set('caption', caption); value.set('scheduled_for', new Date(Date.now() - 1_000).toISOString()); return value; }
 const workerHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
 start();
@@ -47,7 +49,7 @@ try {
   assert.equal([claimA, claimB].filter((item) => item.body.claimed).length, 1, 'two claims have exactly one winner');
   const claim = claimA.body.claimed ? claimA.body : claimB.body; const job = claim.job;
   assert.match(claim.claim_token, /^[0-9a-f-]{36}$/i); assert.notEqual(claim.claim_token, token);
-  assert.deepEqual(Object.keys(job.media).sort(), ['file_extension', 'id', 'mime_type', 'sha256', 'size_bytes']);
+  assert.deepEqual(Object.keys(job.media).sort(), ['audio_codec', 'duration_seconds', 'file_extension', 'height', 'id', 'mime_type', 'sha256', 'size_bytes', 'video_codec', 'width']);
   assert.deepEqual(job.account, { id: accountId, username: 'worker-test-channel', display_name: 'worker-test-channel', platform: 'youtube' });
   assert.deepEqual(job.device, { id: deviceId, device_id: 'worker-test-android' });
   assert.equal(job.media.id, job.media_id);

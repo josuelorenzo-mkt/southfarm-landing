@@ -5,6 +5,7 @@ import type Database from 'better-sqlite3';
 import type { Express, NextFunction, Request, Response } from 'express';
 import multer, { MulterError } from 'multer';
 import { PublicationStore, PublicationTransitionError, validatePublicationInput } from './publications-domain.js';
+import { inspectPublicationVideo } from './publication-media-inspector.js';
 
 type SqliteDatabase = Database.Database;
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
@@ -191,8 +192,8 @@ function mediaForJob(db: SqliteDatabase, job: any): any | null {
 }
 
 export function registerPublicationRoutes({
-  app, db, store, auth, requireRole, mediaRoot, testHooks,
-}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string; testHooks?: { afterRename?: (req: any, res: Response) => Promise<void> | void; beforeReschedule?: () => void; beforeCancel?: () => void } }): void {
+  app, db, store, auth, requireRole, mediaRoot, testHooks, inspectVideo = inspectPublicationVideo,
+}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string; inspectVideo?: typeof inspectPublicationVideo; testHooks?: { afterRename?: (req: any, res: Response) => Promise<void> | void; beforeReschedule?: () => void; beforeCancel?: () => void } }): void {
   const root = path.resolve(mediaRoot);
   const tempRoot = path.join(root, '.tmp');
   fs.mkdirSync(tempRoot, { recursive: true });
@@ -258,11 +259,13 @@ export function registerPublicationRoutes({
         const extension = MIME_EXTENSIONS[req.file.mimetype];
         const createdAt = new Date().toISOString();
         const sha256 = hashFile(state.uploadedPath!);
+        let metadata;
+        try { metadata = await inspectVideo(state.uploadedPath!); } catch { routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified'); }
         if (state.aborted || req.aborted) routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
         const mediaInsert = db.prepare(`INSERT INTO publication_media
-          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
-          VALUES (?, ?, ?, '', ?, ?, ?, ?, 'staging', ?, ?)`)
-          .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, createdAt, createdAt);
+          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)
+          VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?)`)
+          .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, metadata.duration_seconds, metadata.width, metadata.height, metadata.video_codec, metadata.audio_codec, createdAt, createdAt);
         state.mediaId = Number(mediaInsert.lastInsertRowid);
         const mediaKey = `${state.mediaId}.${extension}`;
         state.finalPath = path.join(root, mediaKey);

@@ -16,6 +16,7 @@ const dbPath = path.join(tempDir, 'southfarm.db');
 const mediaRoot = path.join(tempDir, 'private-media');
 const abortMarker = path.join(tempDir, 'after-rename.marker');
 const backendNodePath = process.env.SOUTHFARM_TEST_NODE_PATH || process.execPath;
+const testProbe = process.env.SOUTHFARM_TEST_FFPROBE || 'C:\\Users\\josu_\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-essentials_build\\bin\\ffprobe.exe';
 let output = '';
 let backend;
 function startBackend() {
@@ -23,7 +24,7 @@ function startBackend() {
     cwd: process.cwd(),
     env: {
       ...process.env, PORT: String(port), SOUTHFARM_DB_PATH: dbPath, SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot,
-      SOUTHFARM_JWT_SECRET: 'test-only-southfarm-secret', SOUTHFARM_AUTO_PLANNER_ENABLED: 'false',
+      SOUTHFARM_JWT_SECRET: 'test-only-southfarm-secret', SOUTHFARM_AUTO_PLANNER_ENABLED: 'false', SOUTHFARM_FFPROBE: testProbe,
     }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   backend.stdout.on('data', (chunk) => { output += chunk.toString(); });
@@ -44,7 +45,7 @@ async function stopBackend() {
 }
 startBackend();
 
-const mp4Header = Buffer.from('000000186674797069736f6d0000020069736f6d6d703431', 'hex');
+const mp4Header = fs.readFileSync('C:\\Users\\josu_\\Downloads\\Videos to test\\MP-V-2.mp4');
 const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
 const webmHeader = Buffer.from('1a45dfa3874282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -177,10 +178,12 @@ try {
     assert.equal(result.response.status, 400, `${JSON.stringify(options)} ${JSON.stringify(result.body)}`);
   }
   const quicktime = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, type: 'video/quicktime', contents: quicktimeHeader }) });
-  assert.equal(quicktime.response.status, 201, JSON.stringify(quicktime.body));
+  assert.equal(quicktime.response.status, 400, 'a recognised container without inspectable video metadata is rejected');
+  assert.equal(quicktime.body.error_code, 'MEDIA_METADATA_INVALID');
   const webm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, type: 'video/webm', contents: webmHeader }) });
-  assert.equal(webm.response.status, 201, JSON.stringify(webm.body));
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'validation failures must remove temporary/final media');
+  assert.equal(webm.response.status, 400, 'a recognised container without inspectable video metadata is rejected');
+  assert.equal(webm.body.error_code, 'MEDIA_METADATA_INVALID');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'validation failures must remove temporary/final media');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'validation failures must remove temporary media');
 
   const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
@@ -191,6 +194,7 @@ try {
   abortApp.use(express.json());
   registerPublicationRoutes({
     app: abortApp, db, store: new PublicationStore(db), mediaRoot: abortRoot,
+    inspectVideo: async () => ({ duration_seconds: 25, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac' }),
     auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
     requireRole: () => (_req, _res, next) => next(),
     testHooks: { afterRename: (req, res) => {
@@ -217,6 +221,10 @@ try {
   await new Promise((resolve) => abortServer.close(resolve));
 
   const racePort = port + 2;
+  const raceScheduleJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(raceScheduleJob.response.status, 201, JSON.stringify(raceScheduleJob.body));
+  const raceCancelJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(raceCancelJob.response.status, 201, JSON.stringify(raceCancelJob.body));
   const raceApp = express();
   raceApp.use(express.json());
   registerPublicationRoutes({
@@ -224,14 +232,14 @@ try {
     auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
     requireRole: () => (_req, _res, next) => next(),
     testHooks: {
-      beforeReschedule: () => db.prepare("UPDATE publication_jobs SET status = 'claimed' WHERE id = ?").run(webm.body.publication.id),
-      beforeCancel: () => db.prepare("UPDATE publication_jobs SET final_action_at = ? WHERE id = ?").run(futureIso, quicktime.body.publication.id),
+      beforeReschedule: () => db.prepare("UPDATE publication_jobs SET status = 'claimed' WHERE id = ?").run(raceScheduleJob.body.publication.id),
+      beforeCancel: () => db.prepare("UPDATE publication_jobs SET final_action_at = ? WHERE id = ?").run(futureIso, raceCancelJob.body.publication.id),
     },
   });
   const raceServer = await new Promise((resolve) => { const server = raceApp.listen(racePort, () => resolve(server)); });
-  const raceScheduleResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${webm.body.publication.id}/schedule`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }) });
+  const raceScheduleResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${raceScheduleJob.body.publication.id}/schedule`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }) });
   assert.equal(raceScheduleResponse.status, 409, 'store transition race must remain a 409');
-  const raceCancelResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${quicktime.body.publication.id}/cancel`, { method: 'POST' });
+  const raceCancelResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${raceCancelJob.body.publication.id}/cancel`, { method: 'POST' });
   assert.equal(raceCancelResponse.status, 409, 'store cancellation race must remain a 409');
   await new Promise((resolve) => raceServer.close(resolve));
 

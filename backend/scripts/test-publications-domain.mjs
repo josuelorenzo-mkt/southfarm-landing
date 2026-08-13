@@ -74,8 +74,8 @@ let mediaSequence = 0;
 const createJob = (input, actor) => {
   const job = store.createJob(input, actor);
   const mediaId = ++mediaSequence;
-  db.prepare(`INSERT INTO publication_media (id, workspace_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'video/mp4', 'mp4', 1, ?, 'stored', ?, ?)`).run(mediaId, input.workspaceId, `clip-${mediaId}.mp4`, `${mediaId}.mp4`, '0'.repeat(64), now, now);
+  db.prepare(`INSERT INTO publication_media (id, workspace_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'video/mp4', 'mp4', 1, ?, 25, 1080, 1920, 'hevc', 'aac', 'stored', ?, ?)`).run(mediaId, input.workspaceId, `clip-${mediaId}.mp4`, `${mediaId}.mp4`, '0'.repeat(64), now, now);
   db.prepare('UPDATE publication_jobs SET media_id = ? WHERE id = ?').run(mediaId, job.id);
   return store.getJob(job.id);
 };
@@ -108,7 +108,7 @@ db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALU
 const job = createJob(jobInput, actor);
 const firstClaim = store.claimDueJob(worker, now);
 assert.equal(firstClaim.job.id, job.id, 'future and expired task runs do not block a claim');
-assert.deepEqual(firstClaim.job.media, { id: 1, size_bytes: 1, sha256: '0'.repeat(64), mime_type: 'video/mp4', file_extension: 'mp4' });
+assert.deepEqual(firstClaim.job.media, { id: 1, size_bytes: 1, sha256: '0'.repeat(64), mime_type: 'video/mp4', file_extension: 'mp4', duration_seconds: 25, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac' });
 db.prepare('UPDATE publication_media SET sha256 = ? WHERE id = 1').run('f'.repeat(64));
 assert.equal(firstClaim.job.media.sha256, '0'.repeat(64), 'claim returns its media snapshot even if storage changes after its transaction');
 worker.claimToken = store.getJob(job.id).claim_token;

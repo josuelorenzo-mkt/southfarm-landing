@@ -25,7 +25,7 @@ class ApiClientTests(unittest.TestCase):
         fixture = {
             "claimed": True, "claim_token": "claim-1",
             "job": {"id": 7, "device_id": 5, "media_id": 3, "platform": "youtube", "caption": "safe test", "status": "claimed",
-                    "media": {"id": 3, "size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4"},
+                    "media": {"id": 3, "size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4", "duration_seconds": 25, "width": 1080, "height": 1920, "video_codec": "hevc", "audio_codec": "aac"},
                     "account": {"id": 9, "username": "worker-test-channel", "display_name": "worker-test-channel", "platform": "youtube"},
                     "device": {"id": 5, "device_id": "worker-test-android"}},
         }

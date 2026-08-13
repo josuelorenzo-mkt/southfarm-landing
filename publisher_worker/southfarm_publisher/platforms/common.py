@@ -29,7 +29,8 @@ class GuardedPublisher:
     def __init__(self, *, expected_account: str, forbidden_accounts: set[str] | None = None, pause: Callable[[float], None] = time.sleep, timeout: float = 15.0, poll: float = 0.5):
         if not isinstance(expected_account, str) or not expected_account.strip():
             raise PublisherError("ACCOUNT_SNAPSHOT_INVALID", "A non-empty expected social account is required")
-        self.expected_account, self.forbidden_accounts = expected_account.strip(), set(forbidden_accounts or ())
+        self.expected_account = expected_account.strip()
+        self.forbidden_accounts = {item.strip().lstrip('@').casefold() for item in (forbidden_accounts or ()) if item.strip()}
         self._pause, self.timeout, self.poll = pause, max(0.1, float(timeout)), max(0.05, float(poll))
         self._prepared = False
         self._baseline: set[str] = set()
@@ -47,13 +48,17 @@ class GuardedPublisher:
         nodes = device.dump_ui()
         if not isinstance(nodes, list):
             raise PublisherError("UI_DUMP_INVALID", "Device UI dump is invalid", retryable=True)
+        self._last_nodes = nodes
         return nodes
 
-    def wait_for(self, device: Any, *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, clock: Callable[[], float] = time.monotonic) -> dict[str, str]:
+    def wait_for(self, device: Any, *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, predicate: Callable[[list[dict[str, str]]], dict[str, str] | None] | None = None, clock: Callable[[], float] = time.monotonic) -> dict[str, str]:
         deadline = clock() + self.timeout
         while True:
             nodes = self._nodes(device)
-            if context is None or any(all(item.get(key) == value for key, value in context.items()) for item in nodes):
+            if predicate is not None:
+                found = predicate(nodes)
+                if found is not None: return found
+            elif context is None or any(all(item.get(key) == value for key, value in context.items()) for item in nodes):
                 found = self._one(nodes, error=error, text=text, content_desc=content_desc, resource_id=resource_id, required=False)
                 if found is not None: return found
             if clock() >= deadline: raise PublisherError("UI_TIMEOUT", f"Timed out waiting for {error}", retryable=True)
@@ -77,8 +82,13 @@ class GuardedPublisher:
     def _tap(self, device: Any, node: dict[str, str]) -> None:
         device.tap_bounds(SafeAdb.bounds(node))
 
+    def tap_and_wait(self, device: Any, node: dict[str, str], *, error: str, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None, context: dict[str, str] | None = None, predicate: Callable[[list[dict[str, str]]], dict[str, str] | None] | None = None) -> dict[str, str]:
+        """Perform one reversible navigation tap, then require a fresh next screen."""
+        self._tap(device, node)
+        return self.wait_for(device, error=error, text=text, content_desc=content_desc, resource_id=resource_id, context=context, predicate=predicate)
+
     def _account(self, nodes: list[dict[str, str]]) -> None:
-        if self.expected_account in self.forbidden_accounts:
+        if self.expected_account.lstrip('@').casefold() in self.forbidden_accounts:
             raise PublisherError("FORBIDDEN_ACCOUNT", "This social account is forbidden for publishing")
         exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
         if len(exact) != 1:
@@ -130,18 +140,11 @@ class GuardedPublisher:
             raise PublisherError("VERIFICATION_NO_DELTA", "The matching item predates this publication", retryable=True, final_action_uncertain=True)
         return identity
 
-    def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
-        # This deliberately has no call site in normal jobs. It refuses to delete
-        # unless exactly the proved identity is visible and the expected baseline is preserved.
-        nodes = self._nodes(device)
+    def _cleanup_preflight(self, expected_identity: str, baseline: set[str], device: Any) -> list[dict[str, str]]:
+        if not expected_identity or expected_identity in baseline:
+            raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup identity must be a new verified item")
+        nodes = self._nodes(device); self._account(nodes)
         identities = {node.get("content-desc") or node.get("text") for node in nodes if node.get("content-desc") or node.get("text")}
-        if expected_identity not in identities or not baseline.issubset(identities):
-            raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Refusing test cleanup without the exact verified item and baseline")
-        target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
-        self._tap(device, target)
-        delete = self._one(self._nodes(device), error="DELETE_CONFIRMATION", text="Delete", required=False)
-        if delete is None: raise PublisherError("DELETE_CONFIRMATION", "Test cleanup delete confirmation is absent")
-        self._tap(device, delete)
-        restored = {node.get("content-desc") or node.get("text") for node in self._nodes(device) if node.get("content-desc") or node.get("text")}
-        if expected_identity in restored or not baseline.issubset(restored):
-            raise PublisherError("BASELINE_NOT_RESTORED", "Test cleanup did not restore the exact baseline")
+        if identities != baseline | {expected_identity}:
+            raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup screen must contain exactly baseline plus verified item")
+        return nodes

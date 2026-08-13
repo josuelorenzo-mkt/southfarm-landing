@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer, { MulterError } from 'multer';
 import { PublicationTransitionError, validatePublicationInput } from './publications-domain.js';
+import { inspectPublicationVideo } from './publication-media-inspector.js';
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MIME_EXTENSIONS = {
     'video/mp4': 'mp4',
@@ -230,7 +231,7 @@ function mediaForJob(db, job) {
         return null;
     return db.prepare('SELECT * FROM publication_media WHERE id = ? AND workspace_id = ?').get(job.media_id, job.workspace_id) || null;
 }
-export function registerPublicationRoutes({ app, db, store, auth, requireRole, mediaRoot, testHooks, }) {
+export function registerPublicationRoutes({ app, db, store, auth, requireRole, mediaRoot, testHooks, inspectVideo = inspectPublicationVideo, }) {
     const root = path.resolve(mediaRoot);
     const tempRoot = path.join(root, '.tmp');
     fs.mkdirSync(tempRoot, { recursive: true });
@@ -318,12 +319,19 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 const extension = MIME_EXTENSIONS[req.file.mimetype];
                 const createdAt = new Date().toISOString();
                 const sha256 = hashFile(state.uploadedPath);
+                let metadata;
+                try {
+                    metadata = await inspectVideo(state.uploadedPath);
+                }
+                catch {
+                    routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified');
+                }
                 if (state.aborted || req.aborted)
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const mediaInsert = db.prepare(`INSERT INTO publication_media
-          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
-          VALUES (?, ?, ?, '', ?, ?, ?, ?, 'staging', ?, ?)`)
-                    .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, createdAt, createdAt);
+          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)
+          VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?)`)
+                    .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, metadata.duration_seconds, metadata.width, metadata.height, metadata.video_codec, metadata.audio_codec, createdAt, createdAt);
                 state.mediaId = Number(mediaInsert.lastInsertRowid);
                 const mediaKey = `${state.mediaId}.${extension}`;
                 state.finalPath = path.join(root, mediaKey);
