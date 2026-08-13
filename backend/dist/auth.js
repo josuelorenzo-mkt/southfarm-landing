@@ -1,13 +1,11 @@
 import { Router } from 'express';
-import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import db from './db';
-const JWT_SECRET = process.env.JWT_SECRET || 'southfarm-secret-change-in-production-2026';
-const JWT_EXPIRES = '7d';
+import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config';
 export const authRouter = Router();
 // Helper: generate JWT
 function signToken(userId) {
-    return jwt.sign({ userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+    return signSouthFarmJwt(userId);
 }
 // Helper: auth middleware
 export function authMiddleware(req, res, next) {
@@ -17,7 +15,7 @@ export function authMiddleware(req, res, next) {
         return;
     }
     try {
-        const payload = jwt.verify(header.slice(7), JWT_SECRET);
+        const payload = verifySouthFarmJwt(header.slice(7));
         req.userId = payload.userId;
         next();
     }
