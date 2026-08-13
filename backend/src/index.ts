@@ -12,6 +12,7 @@ import { applySchedulerMigrations } from './scheduler-migrations.js';
 import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
+import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
@@ -36,6 +37,14 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
+const PUBLISHER_WORKER_TOKEN = String(process.env.SOUTHFARM_PUBLISHER_WORKER_TOKEN || '').trim();
+const PUBLISHER_WORKER_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.SOUTHFARM_PUBLISHER_WORKER_ENABLED || 'false'));
+if (PUBLISHER_WORKER_ENABLED && !PUBLISHER_WORKER_TOKEN) {
+  throw new Error('SOUTHFARM_PUBLISHER_WORKER_TOKEN is required when the publisher worker is enabled');
+}
+const PUBLISHER_WORKER_TOKEN_HASH = PUBLISHER_WORKER_TOKEN
+  ? createHash('sha256').update(PUBLISHER_WORKER_TOKEN).digest()
+  : null;
 const TASK_LEASE_SECONDS = Math.max(30, Number(process.env.SOUTHFARM_TASK_LEASE_SECONDS || 45));
 const LEGACY_WARMUP_DEDUPE_WINDOW_MS = Math.max(
   60_000,
@@ -2244,6 +2253,15 @@ registerPublicationRoutes({
   requireRole,
   mediaRoot: PUBLICATION_MEDIA_ROOT,
 });
+if (PUBLISHER_WORKER_TOKEN_HASH) {
+  registerPublicationWorkerRoutes({
+    app,
+    db,
+    store: publicationStore,
+    mediaRoot: PUBLICATION_MEDIA_ROOT,
+    workerTokenHash: PUBLISHER_WORKER_TOKEN_HASH,
+  });
+}
 
 function authUserView(userId: number): any | null {
   const user = db.prepare('SELECT id, email, name, created_at FROM users WHERE id = ?').get(userId) as any;
@@ -3315,6 +3333,12 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const device = touchDevice(userId, req.body);
       refreshTaskLifecycle();
       const now = nowIso();
+      const publicationLock: any = db.prepare(`
+        SELECT publication_job_id FROM device_automation_locks
+        WHERE device_id = ? AND expires_at > ?
+        LIMIT 1
+      `).get(device.id, now);
+      if (publicationLock) return { device, task: null, reused: false, reason: 'device_busy_publication' };
       const control = ensureWorkspaceControl(Number(device.workspace_id || req.user.workspaceId));
       const controlMode = normalizeSchedulerControlMode(control.scheduler_mode);
       if (controlMode === 'paused') return { device, task: null, reused: false };
@@ -3427,6 +3451,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
         claimed: false,
         server_time: nowIso(),
         device: deviceView(result.device),
+        ...(result.reason ? { reason: result.reason } : {}),
       });
     }
 

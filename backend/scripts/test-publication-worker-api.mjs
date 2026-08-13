@@ -1,0 +1,78 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import Database from 'better-sqlite3';
+
+const port = 3323;
+const token = 'test-publisher-worker-token';
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'southfarm-worker-api-'));
+const dbPath = path.join(tempDir, 'southfarm.db');
+const mediaRoot = path.join(tempDir, 'private-media');
+let backend; let output = '';
+
+function start() {
+  backend = spawn(process.env.SOUTHFARM_TEST_NODE_PATH || process.execPath, [path.resolve('dist/index.js')], {
+    cwd: process.cwd(),
+    env: { ...process.env, PORT: String(port), SOUTHFARM_DB_PATH: dbPath, SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot, SOUTHFARM_JWT_SECRET: 'worker-api-test-secret', SOUTHFARM_PUBLISHER_WORKER_TOKEN: token, SOUTHFARM_AUTO_PLANNER_ENABLED: 'false' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  backend.stdout.on('data', (chunk) => { output += chunk; }); backend.stderr.on('data', (chunk) => { output += chunk; });
+}
+async function stop() { if (backend?.exitCode === null) { backend.kill('SIGTERM'); await new Promise((resolve) => backend.once('exit', resolve)); } }
+async function waitForHealth() { for (let i = 0; i < 60; i += 1) { try { if ((await fetch(`http://127.0.0.1:${port}/api/health`)).ok) return; } catch {} await new Promise((resolve) => setTimeout(resolve, 50)); } throw new Error(`backend unavailable: ${output}`); }
+async function request(pathname, init = {}) { const response = await fetch(`http://127.0.0.1:${port}${pathname}`, init); const body = await response.json().catch(() => ({})); return { response, body }; }
+async function createUser() { const { response, body } = await request('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: `worker-${Date.now()}@example.test`, password: 'test-password-123', name: 'Worker test' }) }); assert.equal(response.status, 201); return body; }
+function form(deviceId, accountId, caption = 'Safe worker API media test') { const value = new FormData(); value.set('video', new Blob([Buffer.from('000000186674797069736f6d0000020069736f6d6d703431', 'hex')], { type: 'video/mp4' }), 'clip.mp4'); value.set('platform', 'youtube'); value.set('device_id', String(deviceId)); value.set('social_account_id', String(accountId)); value.set('caption', caption); value.set('scheduled_for', new Date(Date.now() - 1_000).toISOString()); return value; }
+const workerHeaders = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+start();
+try {
+  await waitForHealth();
+  const owner = await createUser();
+  const db = new Database(dbPath);
+  const workspaceId = db.prepare("SELECT workspace_id FROM workspace_members WHERE user_id = ? AND status = 'active'").get(owner.user.id).workspace_id;
+  const deviceId = Number(db.prepare("INSERT INTO devices (user_id, workspace_id, device_id, installation_id, device_name, lifecycle_status) VALUES (?, ?, 'worker-test-android', 'worker-test-android', 'Worker test phone', 'active')").run(owner.user.id, workspaceId).lastInsertRowid);
+  const accountId = Number(db.prepare("INSERT INTO social_accounts (user_id, device_id, platform, username) VALUES (?, ?, 'youtube', 'worker-test-channel')").run(owner.user.id, deviceId).lastInsertRowid);
+  const deviceToken = `sfd-worker-device-${crypto.randomUUID()}`;
+  db.prepare('UPDATE devices SET device_token_hash = ? WHERE id = ?').run(crypto.createHash('sha256').update(deviceToken).digest('hex'), deviceId);
+  const ownerHeaders = { Authorization: `Bearer ${owner.token}` };
+  const first = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: form(deviceId, accountId) }); assert.equal(first.response.status, 201, JSON.stringify(first.body));
+
+  for (const headers of [{}, { Authorization: 'Bearer incorrect' }]) { const denied = await request('/api/publication-worker/claim', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_id: 'worker-a', device_id: deviceId }) }); assert.equal(denied.response.status, 401); }
+  const [claimA, claimB] = await Promise.all(['worker-a', 'worker-b'].map((worker_id) => request('/api/publication-worker/claim', { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id, device_id: deviceId }) })));
+  assert.equal([claimA, claimB].filter((item) => item.body.claimed).length, 1, 'two claims have exactly one winner');
+  const claim = claimA.body.claimed ? claimA.body : claimB.body; const job = claim.job;
+  assert.match(claim.claim_token, /^[0-9a-f-]{36}$/i); assert.notEqual(claim.claim_token, token);
+  const taskClaim = await request('/api/tasks/claim', { method: 'POST', headers: { Authorization: `Bearer ${deviceToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: 'worker-test-android', installation_id: 'worker-test-android' }) });
+  assert.equal(taskClaim.response.status, 200); assert.equal(taskClaim.body.claimed, false); assert.equal(taskClaim.body.reason, 'device_busy_publication');
+  const badHeartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: 'wrong' }) }); assert.equal(badHeartbeat.response.status, 409);
+  const before = db.prepare('SELECT lease_expires_at FROM publication_jobs WHERE id = ?').get(job.id).lease_expires_at;
+  const heartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token }) }); assert.equal(heartbeat.response.status, 200); assert.equal(heartbeat.body.cancel_requested, false);
+  const after = db.prepare('SELECT lease_expires_at FROM publication_jobs WHERE id = ?').get(job.id).lease_expires_at; assert.ok(after >= before); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE device_id = ? AND expires_at > ?').get(deviceId, new Date().toISOString()).count, 1);
+  db.prepare('UPDATE publication_jobs SET cancel_requested_at = ? WHERE id = ?').run(new Date().toISOString(), job.id);
+  const cancelled = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token }) }); assert.equal(cancelled.body.cancel_requested, true);
+  const media = await request(`/api/publication-worker/media/${job.media_id}`, { headers: { Authorization: `Bearer ${token}`, 'X-SouthFarm-Worker-Id': claim.worker_id, 'X-SouthFarm-Claim-Token': claim.claim_token } }); assert.equal(media.response.status, 200); assert.match(media.response.headers.get('content-disposition'), /attachment/);
+  const foreign = await request('/api/publication-worker/media/999999', { headers: { Authorization: `Bearer ${token}`, 'X-SouthFarm-Worker-Id': claim.worker_id, 'X-SouthFarm-Claim-Token': claim.claim_token } }); assert.equal(foreign.response.status, 404);
+  const checkpoint = await request(`/api/publication-worker/jobs/${job.id}/checkpoint`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token, step: 'preparing', progress_percent: 10 }) }); assert.equal(checkpoint.response.status, 200);
+  db.prepare("UPDATE publication_jobs SET status = 'cancellation_requested', current_step = 'cancellation_requested' WHERE id = ?").run(job.id);
+  const finish = await request(`/api/publication-worker/jobs/${job.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token, status: 'cancelled' }) }); assert.equal(finish.response.status, 200); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE publication_job_id = ?').get(job.id).count, 0);
+  const taskBlocked = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: form(deviceId, accountId, 'Task lock blocks publication claim') }); assert.equal(taskBlocked.response.status, 201);
+  db.prepare("INSERT INTO task_runs (user_id, device_id, task_type, status, lease_expires_at) VALUES (?, ?, 'warmup_youtube', 'running', ?)").run(owner.user.id, deviceId, new Date(Date.now() + 60_000).toISOString());
+  const blockedClaim = await request('/api/publication-worker/claim', { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: 'worker-c', device_id: deviceId }) }); assert.equal(blockedClaim.body.claimed, false, 'live task lease blocks a publication claim');
+  db.prepare("DELETE FROM task_runs WHERE device_id = ? AND status = 'running'").run(deviceId);
+  const finalClaimResponse = await request('/api/publication-worker/claim', { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: 'worker-c', device_id: deviceId }) }); assert.equal(finalClaimResponse.body.claimed, true);
+  const finalClaim = finalClaimResponse.body; const finalJob = finalClaim.job;
+  db.prepare("UPDATE publication_media SET private_path = '../outside.mp4' WHERE id = ?").run(finalJob.media_id);
+  const traversal = await request(`/api/publication-worker/media/${finalJob.media_id}`, { headers: { Authorization: `Bearer ${token}`, 'X-SouthFarm-Worker-Id': finalClaim.worker_id, 'X-SouthFarm-Claim-Token': finalClaim.claim_token } }); assert.equal(traversal.response.status, 404, 'stored paths may not escape private root');
+  db.prepare('UPDATE publication_media SET private_path = ? WHERE id = ?').run(`${finalJob.media_id}.mp4`, finalJob.media_id);
+  for (const [step, progress_percent, final_action] of [['preparing', 10, false], ['transferring', 20, false], ['selecting_media', 30, false], ['editing', 50, false], ['captioning', 65, false], ['ready_to_publish', 80, false], ['publishing', 90, true]]) {
+    const cp = await request(`/api/publication-worker/jobs/${finalJob.id}/checkpoint`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: finalClaim.worker_id, claim_token: finalClaim.claim_token, step, progress_percent, final_action }) }); assert.equal(cp.response.status, 200, `${step} checkpoint`);
+  }
+  const postFinalFailed = await request(`/api/publication-worker/jobs/${finalJob.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: finalClaim.worker_id, claim_token: finalClaim.claim_token, status: 'failed' }) }); assert.equal(postFinalFailed.response.status, 409);
+  const postFinalReview = await request(`/api/publication-worker/jobs/${finalJob.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: finalClaim.worker_id, claim_token: finalClaim.claim_token, status: 'review_required' }) }); assert.equal(postFinalReview.response.status, 200);
+  console.log('publication-worker-api test passed: auth, atomic claim, shared lock, lease, media, cancellation, finish');
+  db.close();
+} finally { await stop(); try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {} }
