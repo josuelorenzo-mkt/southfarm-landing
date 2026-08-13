@@ -90,6 +90,20 @@ if (hasTable("notifications")) {
     delete: () => db.prepare("DELETE FROM notifications WHERE created_at < ?").run(activityCutoff).changes,
   });
 }
+if (hasTable("publication_events")) {
+  actions.push({
+    name: "terminal_publication_events_older_than_6_months",
+    count: () => count("SELECT COUNT(*) AS count FROM publication_events event JOIN publication_jobs job ON job.id = event.publication_job_id WHERE job.status IN ('completed', 'failed', 'cancelled') AND COALESCE(job.completed_at, job.updated_at, job.created_at) < ?", [activityCutoff]),
+    delete: () => db.prepare("DELETE FROM publication_events WHERE publication_job_id IN (SELECT id FROM publication_jobs WHERE status IN ('completed', 'failed', 'cancelled') AND COALESCE(completed_at, updated_at, created_at) < ?)").run(activityCutoff).changes,
+  });
+}
+if (hasTable("publication_jobs")) {
+  actions.push({
+    name: "terminal_publication_jobs_older_than_6_months",
+    count: () => count("SELECT COUNT(*) AS count FROM publication_jobs WHERE status IN ('completed', 'failed', 'cancelled') AND COALESCE(completed_at, updated_at, created_at) < ?", [activityCutoff]),
+    delete: () => db.prepare("DELETE FROM publication_jobs WHERE status IN ('completed', 'failed', 'cancelled') AND COALESCE(completed_at, updated_at, created_at) < ?").run(activityCutoff).changes,
+  });
+}
 
 const preview = actions.map((action) => ({ name: action.name, eligible_rows: action.count() }));
 const result = {

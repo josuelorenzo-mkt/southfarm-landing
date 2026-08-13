@@ -61,6 +61,11 @@ try {
   $env:SOUTHFARM_SCHEDULER_MODE = "fixed"
   $env:SOUTHFARM_SCHEDULER_TICK_SECONDS = "30"
   $env:SOUTHFARM_AUTO_PLANNER_TICK_SECONDS = "30"
+  # Publisher credentials and private-media paths remain only in this ACL-protected runtime config.
+  $env:SOUTHFARM_PUBLICATION_MEDIA_ROOT = [string]$runtimeConfig.publication_media_root
+  $env:SOUTHFARM_PUBLISHER_WORKER_TOKEN = [string]$runtimeConfig.publisher_worker_token
+  $env:SOUTHFARM_PUBLISHER_WORKER_ENABLED = if ([bool]$runtimeConfig.publisher_worker_enabled) { "true" } else { "false" }
+  $env:SOUTHFARM_FFPROBE = [string]$runtimeConfig.ffprobe_path
 
   $restartDelay = [Math]::Max(1, $InitialRestartDelaySeconds)
   $maxDelay = [Math]::Max($restartDelay, $MaxRestartDelaySeconds)

@@ -3,6 +3,11 @@ param(
   [string]$SourceBackendPath = (Join-Path $PSScriptRoot "..\..\backend"),
   [string]$SouthFarmLocalRoot = (Join-Path $env:LOCALAPPDATA "SouthFarm"),
   [string]$RuntimeSystemRoot = (Join-Path $env:ProgramData "SouthFarm"),
+  [switch]$InstallPublisherWorker,
+  [string]$PublisherRunAsUser,
+  [int]$PublisherDeviceId,
+  [string]$ForbiddenInstagramAccounts,
+  [switch]$AllowAllInstagramAccounts,
   [switch]$StartNow
 )
 
@@ -22,6 +27,7 @@ $databasePath = Join-Path $SouthFarmLocalRoot "data\southfarm.db"
 $publishPath = Join-Path $PSScriptRoot "publish-southfarm-backend-runtime.ps1"
 $apiInstallerPath = Join-Path $PSScriptRoot "install-southfarm-api-task.ps1"
 $cloudflaredInstallerPath = Join-Path $PSScriptRoot "install-southfarm-cloudflared.ps1"
+$publisherInstallerPath = Join-Path $PSScriptRoot "install-southfarm-publisher-worker.ps1"
 
 function Invoke-RequiredPowerShellScript {
   param(
@@ -65,6 +71,15 @@ Invoke-RequiredPowerShellScript `
   -Path $cloudflaredInstallerPath `
   -Arguments $cloudflaredArgs `
   -FailureMessage "Windows Cloudflare Tunnel installation failed"
+
+if ($InstallPublisherWorker) {
+  if ([string]::IsNullOrWhiteSpace($PublisherRunAsUser) -or $PublisherDeviceId -le 0) { throw "PublisherRunAsUser and PublisherDeviceId are required with InstallPublisherWorker." }
+  $publisherArgs = @{ RunAsUser = $PublisherRunAsUser; DeviceId = $PublisherDeviceId; RuntimeRoot = $RuntimeSystemRoot; ForbiddenInstagramAccounts = $ForbiddenInstagramAccounts; AllowAllInstagramAccounts = $AllowAllInstagramAccounts }
+  Invoke-RequiredPowerShellScript `
+    -Path $publisherInstallerPath `
+    -Arguments $publisherArgs `
+    -FailureMessage "Publisher Worker installation failed"
+}
 
 Write-Output "SouthFarm Windows runtime installation completed."
 Write-Output ("Backend runtime: " + $runtimeBackendPath)
