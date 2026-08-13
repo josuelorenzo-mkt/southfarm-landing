@@ -41,6 +41,44 @@ function cleanupUploadedFiles(req) {
         catch { }
     }
 }
+function compensateUpload(db, req, state) {
+    if (state.committed || state.cleaning)
+        return;
+    state.cleaning = true;
+    cleanupUploadedFiles(req);
+    try {
+        removeFile(state.uploadedPath);
+    }
+    catch { }
+    try {
+        removeFile(state.finalPath);
+    }
+    catch { }
+    try {
+        db.transaction(() => {
+            if (state.jobId)
+                db.prepare('DELETE FROM publication_events WHERE publication_job_id = ?').run(state.jobId);
+            if (state.jobId)
+                db.prepare('DELETE FROM publication_jobs WHERE id = ?').run(state.jobId);
+            if (state.mediaId)
+                db.prepare('DELETE FROM publication_media WHERE id = ?').run(state.mediaId);
+        })();
+    }
+    catch { }
+    state.cleaning = false;
+}
+async function testPauseAfterRename(req, res) {
+    const marker = String(process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER || '').trim();
+    if (!marker)
+        return;
+    fs.writeFileSync(marker, 'renamed');
+    await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 5000);
+        const done = () => { clearTimeout(timeout); resolve(); };
+        req.once('aborted', done);
+        res.once('close', done);
+    });
+}
 function cleanFilename(name) {
     const base = path.basename(String(name || '')).replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').trim();
     return base.slice(0, 180) || 'video';
@@ -51,9 +89,26 @@ function validSignature(filePath, mimeType) {
         const header = Buffer.alloc(64);
         const bytes = fs.readSync(fd, header, 0, header.length, 0);
         if (mimeType === 'video/webm') {
-            return bytes >= 11
-                && header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
-                && header.subarray(4, bytes).toString('ascii').includes('webm');
+            if (bytes < 8 || !header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])))
+                return false;
+            for (let offset = 4; offset + 3 < bytes; offset += 1) {
+                if (header[offset] !== 0x42 || header[offset + 1] !== 0x82)
+                    continue;
+                const firstLengthByte = header[offset + 2];
+                let lengthBytes = 1;
+                while (lengthBytes <= 8 && (firstLengthByte & (0x80 >> (lengthBytes - 1))) === 0)
+                    lengthBytes += 1;
+                if (lengthBytes > 8 || offset + 2 + lengthBytes > bytes)
+                    return false;
+                let valueLength = firstLengthByte & ((1 << (8 - lengthBytes)) - 1);
+                for (let index = 1; index < lengthBytes; index += 1)
+                    valueLength = valueLength * 256 + header[offset + 2 + index];
+                const valueStart = offset + 2 + lengthBytes;
+                if (valueLength !== 4 || valueStart + valueLength > bytes)
+                    return false;
+                return header.subarray(valueStart, valueStart + valueLength).toString('ascii') === 'webm';
+            }
+            return false;
         }
         if (bytes < 16 || header.subarray(4, 8).toString('ascii') !== 'ftyp')
             return false;
@@ -67,8 +122,12 @@ function validSignature(filePath, mimeType) {
         const brands = [majorBrand, ...compatibleBrands];
         const mp4Brands = new Set(['isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'dash', 'msdh', 'mmp4']);
         const quicktimeBrands = new Set(['qt  ']);
-        const allowed = mimeType === 'video/quicktime' ? quicktimeBrands : mp4Brands;
-        return brands.some((brand) => allowed.has(brand));
+        const imageOrHevcBrands = new Set(['avif', 'avis', 'heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1']);
+        if (brands.some((brand) => imageOrHevcBrands.has(brand)))
+            return false;
+        if (mimeType === 'video/quicktime')
+            return majorBrand === 'qt  ';
+        return mp4Brands.has(majorBrand);
     }
     finally {
         fs.closeSync(fd);
@@ -204,12 +263,14 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         fileFilter: (_req, file, callback) => callback(null, Object.prototype.hasOwnProperty.call(MIME_EXTENSIONS, file.mimetype)),
     }).single('video');
     app.post('/api/publications', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
-        req.once('aborted', () => cleanupUploadedFiles(req));
-        upload(req, res, (uploadError) => {
-            const uploadedPath = req.file?.path;
-            let finalPath;
-            let mediaId;
-            let jobId;
+        const state = { committed: false, aborted: false, cleaning: false };
+        req.once('aborted', () => { state.aborted = true; compensateUpload(db, req, state); });
+        res.once('close', () => { if (!state.committed) {
+            state.aborted = true;
+            compensateUpload(db, req, state);
+        } });
+        upload(req, res, async (uploadError) => {
+            state.uploadedPath = req.file?.path;
             try {
                 if (uploadError instanceof MulterError && uploadError.code === 'LIMIT_FILE_SIZE')
                     routeError(413, 'VIDEO_TOO_LARGE', 'Video exceeds the 200 MiB limit');
@@ -217,7 +278,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                     routeError(400, 'VALIDATION_ERROR', 'Invalid video upload');
                 if (!req.file)
                     routeError(400, 'VALIDATION_ERROR', 'A single video file is required');
-                if (!validSignature(uploadedPath, req.file.mimetype))
+                if (!validSignature(state.uploadedPath, req.file.mimetype))
                     routeError(400, 'VALIDATION_ERROR', 'Video signature is not supported');
                 let input;
                 try {
@@ -244,48 +305,46 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                     routeError(400, 'VALIDATION_ERROR', 'Video size is invalid');
                 const extension = MIME_EXTENSIONS[req.file.mimetype];
                 const createdAt = new Date().toISOString();
-                const sha256 = hashFile(uploadedPath);
+                const sha256 = hashFile(state.uploadedPath);
+                if (state.aborted || req.aborted)
+                    routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const mediaInsert = db.prepare(`INSERT INTO publication_media
           (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
           VALUES (?, ?, ?, '', ?, ?, ?, ?, 'staging', ?, ?)`)
                     .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, createdAt, createdAt);
-                mediaId = Number(mediaInsert.lastInsertRowid);
-                const mediaKey = `${mediaId}.${extension}`;
-                finalPath = path.join(root, mediaKey);
+                state.mediaId = Number(mediaInsert.lastInsertRowid);
+                const mediaKey = `${state.mediaId}.${extension}`;
+                state.finalPath = path.join(root, mediaKey);
                 // The staging row records its intended final key before the rename.
                 // Startup recovery can therefore remove either half of a crash safely.
                 db.prepare('UPDATE publication_media SET private_path = ?, updated_at = ? WHERE id = ? AND upload_status = ?')
-                    .run(mediaKey, createdAt, mediaId, 'staging');
-                fs.renameSync(uploadedPath, finalPath);
+                    .run(mediaKey, createdAt, state.mediaId, 'staging');
+                fs.renameSync(state.uploadedPath, state.finalPath);
+                await testPauseAfterRename(req, res);
+                if (state.aborted || req.aborted)
+                    routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const transaction = db.transaction(() => {
-                    db.prepare("UPDATE publication_media SET private_path = ?, upload_status = 'stored', updated_at = ? WHERE id = ? AND upload_status = 'staging'").run(mediaKey, createdAt, mediaId);
+                    db.prepare("UPDATE publication_media SET private_path = ?, upload_status = 'stored', updated_at = ? WHERE id = ? AND upload_status = 'staging'").run(mediaKey, createdAt, state.mediaId);
                     const jobInsert = db.prepare(`INSERT INTO publication_jobs
             (workspace_id, created_by_user_id, device_id, social_account_id, media_id, platform, caption, word_count, scheduled_for,
              status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 'user', ?, ?, ?, ?, ?)`)
-                        .run(workspaceId, Number(req.user.userId), deviceId, accountId, mediaId, input.platform, input.caption, input.wordCount, scheduledFor, String(req.user.userId), JSON.stringify({ username: account.username, platform: account.platform }), JSON.stringify({ device_id: device.device_id, device_name: device.device_name }), createdAt, createdAt);
-                    jobId = Number(jobInsert.lastInsertRowid);
+                        .run(workspaceId, Number(req.user.userId), deviceId, accountId, state.mediaId, input.platform, input.caption, input.wordCount, scheduledFor, String(req.user.userId), JSON.stringify({ username: account.username, platform: account.platform }), JSON.stringify({ device_id: device.device_id, device_name: device.device_name }), createdAt, createdAt);
+                    state.jobId = Number(jobInsert.lastInsertRowid);
                     db.prepare(`INSERT INTO publication_events (publication_job_id, from_status, to_status, current_step, actor_type, actor_id, created_at)
-            VALUES (?, NULL, 'queued', 'queued', 'user', ?, ?)`).run(jobId, String(req.user.userId), createdAt);
+            VALUES (?, NULL, 'queued', 'queued', 'user', ?, ?)`).run(state.jobId, String(req.user.userId), createdAt);
                 });
                 transaction();
-                const job = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(jobId);
+                if (state.aborted || req.aborted)
+                    routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
+                const job = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(state.jobId);
+                state.committed = true;
                 res.status(201).json({ publication: safePublication(job, mediaForJob(db, job)) });
             }
             catch (error) {
-                cleanupUploadedFiles(req);
-                try {
-                    removeFile(uploadedPath);
-                }
-                catch { }
-                try {
-                    removeFile(finalPath);
-                }
-                catch { }
-                if (jobId)
-                    db.prepare('DELETE FROM publication_jobs WHERE id = ?').run(jobId);
-                if (mediaId)
-                    db.prepare('DELETE FROM publication_media WHERE id = ?').run(mediaId);
+                compensateUpload(db, req, state);
+                if (state.aborted || req.aborted || res.headersSent)
+                    return;
                 if (error instanceof PublicationRouteError)
                     return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
                 return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to create publication' });
@@ -337,7 +396,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         catch (error) {
             if (error instanceof PublicationRouteError)
                 return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
-            return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: 'Publication cannot be rescheduled' });
+            return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to reschedule publication' });
         }
     });
     app.post('/api/publications/:id/cancel', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
@@ -352,7 +411,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         catch (error) {
             if (error instanceof PublicationRouteError)
                 return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
-            return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: 'Publication cannot be cancelled' });
+            return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
         }
     });
 }

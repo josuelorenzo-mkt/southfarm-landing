@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 
@@ -10,6 +11,7 @@ const port = 3321;
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'southfarm-publications-api-'));
 const dbPath = path.join(tempDir, 'southfarm.db');
 const mediaRoot = path.join(tempDir, 'private-media');
+const abortMarker = path.join(tempDir, 'after-rename.marker');
 const backendNodePath = process.env.SOUTHFARM_TEST_NODE_PATH || process.execPath;
 let output = '';
 let backend;
@@ -23,6 +25,14 @@ function startBackend() {
   });
   backend.stdout.on('data', (chunk) => { output += chunk.toString(); });
   backend.stderr.on('data', (chunk) => { output += chunk.toString(); });
+}
+
+async function waitForPath(target) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(target)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${target}`);
 }
 async function stopBackend() {
   if (backend?.exitCode !== null) return;
@@ -151,10 +161,12 @@ try {
     { type: 'text/plain' },
     { contents: Buffer.from('not an MP4') },
     { contents: Buffer.from('0000001866747970617669660000020061766966', 'hex') },
+    { contents: Buffer.from('0000001866747970617669660000020069736f6d', 'hex') },
     { contents: Buffer.from('000000086674797069736f6d', 'hex') },
     { type: 'video/mp4', contents: quicktimeHeader },
     { type: 'video/webm', contents: mp4Header },
     { type: 'video/webm', contents: Buffer.from('1a45dfa39f4282846d6174726f736b61', 'hex') },
+    { type: 'video/webm', contents: Buffer.from('1a45dfa39f4282846e6f747765626d', 'hex') },
   ]) {
     const result = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, ...options }) });
     assert.equal(result.response.status, 400, `${JSON.stringify(options)} ${JSON.stringify(result.body)}`);
@@ -165,6 +177,41 @@ try {
   assert.equal(webm.response.status, 201, JSON.stringify(webm.body));
   assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'validation failures must remove temporary/final media');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'validation failures must remove temporary media');
+
+  const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
+  const mediaBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count;
+  process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER = abortMarker;
+  await stopBackend();
+  startBackend();
+  await waitForHealth();
+  const abortBoundary = `abort-${crypto.randomUUID()}`;
+  const abortBody = Buffer.concat([
+    Buffer.from(`--${abortBoundary}\r\nContent-Disposition: form-data; name="video"; filename="abort.mp4"\r\nContent-Type: video/mp4\r\n\r\n`), mp4Header,
+    Buffer.from(`\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="platform"\r\n\r\nyoutube\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="device_id"\r\n\r\n${deviceId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="social_account_id"\r\n\r\n${accountId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\nAbort cleanup proves no publication survives\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="scheduled_for"\r\n\r\n${futureIso}\r\n--${abortBoundary}--\r\n`),
+  ]);
+  const abortRequest = http.request({ hostname: '127.0.0.1', port, path: '/api/publications', method: 'POST', headers: { Authorization: `Bearer ${owner.token}`, 'Content-Type': `multipart/form-data; boundary=${abortBoundary}`, 'Content-Length': abortBody.length } });
+  abortRequest.on('error', () => {});
+  abortRequest.end(abortBody);
+  await waitForPath(abortMarker);
+  abortRequest.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count, jobsBeforeAbort, 'aborted upload after rename must not enqueue a job');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count, mediaBeforeAbort, 'aborted upload after rename must not retain media metadata');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'aborted upload after rename must remove final media');
+  assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'aborted upload after rename must remove temp media');
+  delete process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER;
+
+  db.exec(`CREATE TRIGGER publication_test_failure BEFORE UPDATE ON publication_jobs
+    WHEN OLD.id = ${quicktime.body.publication.id} BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
+  const internalSchedule = await request(`/api/publications/${quicktime.body.publication.id}/schedule`, {
+    method: 'PATCH', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }),
+  });
+  assert.equal(internalSchedule.response.status, 500);
+  assert.equal(internalSchedule.body.error_code, 'INTERNAL_ERROR');
+  const internalCancel = await request(`/api/publications/${quicktime.body.publication.id}/cancel`, { method: 'POST', headers: ownerHeaders });
+  assert.equal(internalCancel.response.status, 500);
+  assert.equal(internalCancel.body.error_code, 'INTERNAL_ERROR');
+  db.exec('DROP TRIGGER publication_test_failure');
 
   const foreignDevice = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId: foreignDeviceId, accountId: foreignAccountId }) });
   assert.equal(foreignDevice.response.status, 404);
