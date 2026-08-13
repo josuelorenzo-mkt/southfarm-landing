@@ -9,6 +9,7 @@ import { createHash, randomBytes, randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
+import { applyPublicationMigrations } from './publications-migrations.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
@@ -352,6 +353,7 @@ db.exec(`
 
   applySchedulerMigrations(db);
   applyAuthMigrations(db);
+  applyPublicationMigrations(db);
   cleanupRefreshSessions(db, new Date().toISOString());
 
 function nowIso(): string {
