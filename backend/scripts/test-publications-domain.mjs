@@ -106,7 +106,11 @@ db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires
 db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires_at) VALUES (2, 1, 'overdue', ?, ?)").run(now, now);
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (3, 1, 'running', ?)").run(now);
 const job = createJob(jobInput, actor);
-assert.equal(store.claimDueJob(worker, now).job.id, job.id, 'future and expired task runs do not block a claim');
+const firstClaim = store.claimDueJob(worker, now);
+assert.equal(firstClaim.job.id, job.id, 'future and expired task runs do not block a claim');
+assert.deepEqual(firstClaim.job.media, { id: 1, size_bytes: 1, sha256: '0'.repeat(64), mime_type: 'video/mp4', file_extension: 'mp4' });
+db.prepare('UPDATE publication_media SET sha256 = ? WHERE id = 1').run('f'.repeat(64));
+assert.equal(firstClaim.job.media.sha256, '0'.repeat(64), 'claim returns its media snapshot even if storage changes after its transaction');
 worker.claimToken = store.getJob(job.id).claim_token;
 assert.equal(store.claimDueJob(worker, now).claimed, false);
 assert.throws(() => store.rescheduleJob(job.id, future, actor), /queued/);

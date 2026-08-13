@@ -21,6 +21,15 @@ function isoAfter(now, seconds) { return new Date(new Date(now).getTime() + seco
 function requireIso(value, label) { if (Number.isNaN(new Date(value).getTime()))
     throw new Error(`${label} must be an ISO timestamp`); }
 function canTransition(from, to) { return PUBLICATION_STATE_TRANSITIONS[from].includes(to); }
+function safeClaimMedia(row) {
+    const media = row;
+    if (!media || !Number.isInteger(media.id) || !Number.isInteger(media.size_bytes) || Number(media.size_bytes) <= 0 || typeof media.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(media.sha256) || typeof media.mime_type !== 'string' || typeof media.file_extension !== 'string')
+        return null;
+    const extensions = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm' };
+    if (extensions[media.mime_type] !== media.file_extension)
+        return null;
+    return { id: media.id, size_bytes: media.size_bytes, sha256: media.sha256, mime_type: media.mime_type, file_extension: media.file_extension };
+}
 export function validatePublicationInput(input) {
     const caption = typeof input.caption === 'string' ? input.caption.trim().replace(/\s+/g, ' ') : '';
     const platform = String(input.platform || '').toLowerCase();
@@ -103,9 +112,16 @@ export class PublicationStore {
                 this.event(invalid.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
                 return { claimed: false, job: null };
             }
-            const candidate = this.db.prepare(`SELECT job.* FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
+            const candidate = this.db.prepare(`SELECT job.*, media.id AS claim_media_id, media.size_bytes AS claim_media_size_bytes, LOWER(media.sha256) AS claim_media_sha256, media.mime_type AS claim_media_mime_type, media.file_extension AS claim_media_file_extension FROM publication_jobs job JOIN publication_media media ON media.id = job.media_id AND media.workspace_id = job.workspace_id AND media.upload_status = 'stored' WHERE ${eligibility} ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
             if (!candidate)
                 return { claimed: false, job: null };
+            const media = safeClaimMedia({ id: candidate.claim_media_id, size_bytes: candidate.claim_media_size_bytes, sha256: candidate.claim_media_sha256, mime_type: candidate.claim_media_mime_type, file_extension: candidate.claim_media_file_extension });
+            if (!media) {
+                const reason = 'MEDIA_UNAVAILABLE';
+                this.db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', error_code = ?, error_message = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'").run(reason, 'Publication media metadata is invalid', now, now, candidate.id);
+                this.event(candidate.id, 'queued', 'review_required', { type: 'system', id: 'publication-claim' }, now, { reason });
+                return { claimed: false, job: null };
+            }
             const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds));
             const claimToken = randomUUID();
             const claimed = this.db.prepare("UPDATE publication_jobs SET status = 'claimed', current_step = 'claimed', claimed_by = ?, claim_token = ?, claimed_at = ?, lease_expires_at = ?, last_heartbeat_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND status = 'queued'").run(worker.id, claimToken, now, expiresAt, now, now, candidate.id);
@@ -113,7 +129,7 @@ export class PublicationStore {
                 throw new Error('Publication job is no longer claimable');
             this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now);
             this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now);
-            return { claimed: true, job: this.getJob(candidate.id) };
+            return { claimed: true, job: { ...this.getJob(candidate.id), media } };
         });
     }
     heartbeat(id, worker, now) { return this.transaction(() => { const row = this.row(id); this.requireLiveWorkerLock(row, worker, now); const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const lockUpdate = this.db.prepare('UPDATE device_automation_locks SET expires_at = ?, updated_at = ? WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(expiresAt, now, row.device_id, id, worker.id, now); if (lockUpdate.changes !== 1)

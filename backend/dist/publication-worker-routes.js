@@ -45,11 +45,6 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
             if (!result.claimed || !result.job)
                 return res.json({ claimed: false, server_time: new Date().toISOString() });
             const job = result.job;
-            const media = db.prepare(`SELECT id, size_bytes, LOWER(sha256) AS sha256, mime_type, file_extension FROM publication_media
-        WHERE id = ? AND workspace_id = ? AND upload_status = 'stored'`).get(job.media_id, job.workspace_id);
-            if (!media || Number(media.id) !== Number(job.media_id))
-                return res.status(409).json({ error_code: 'WORKER_CLAIM_INVALID', error: 'Claimed publication media is unavailable' });
-            job.media = media;
             res.json({ claimed: true, worker_id: worker.id, claim_token: job.claim_token, job, server_time: new Date().toISOString() });
         }
         catch (error) {

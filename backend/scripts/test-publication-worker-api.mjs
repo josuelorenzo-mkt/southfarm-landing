@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 
 const port = 3323;
@@ -54,6 +54,11 @@ try {
   assert.equal(job.media.private_path, undefined);
   assert.equal(job.media.workspace_id, undefined);
   assert.equal(JSON.stringify(claim), JSON.stringify(claim).replaceAll(mediaRoot, '[private-root]'), 'claim never leaks its private media root');
+  const python = process.env.SOUTHFARM_TEST_PYTHON || 'py';
+  const pythonArgs = process.env.SOUTHFARM_TEST_PYTHON ? ['-c'] : ['-3', '-c'];
+  const parser = spawnSync(python, [...pythonArgs, "import json,sys; sys.path.insert(0, 'publisher_worker'); from southfarm_publisher.models import PublicationJob; PublicationJob.from_json(json.load(sys.stdin)); print('claim-contract-ok')"], { cwd: path.resolve('..'), input: JSON.stringify(job), encoding: 'utf8' });
+  assert.equal(parser.status, 0, `actual backend claim must parse in Python: ${parser.stderr || parser.stdout}`);
+  assert.match(parser.stdout, /claim-contract-ok/);
   const taskClaim = await request('/api/tasks/claim', { method: 'POST', headers: { Authorization: `Bearer ${deviceToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: 'worker-test-android', installation_id: 'worker-test-android' }) });
   assert.equal(taskClaim.response.status, 200); assert.equal(taskClaim.body.claimed, false); assert.equal(taskClaim.body.reason, 'device_busy_publication');
   const badHeartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: 'wrong' }) }); assert.equal(badHeartbeat.response.status, 409);

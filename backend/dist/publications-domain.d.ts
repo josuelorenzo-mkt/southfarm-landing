@@ -58,6 +58,16 @@ export type PublicationJobView = Record<string, unknown> & {
     status: PublicationStatus;
     final_action_at: string | null;
 };
+export type PublicationMediaClaimView = {
+    id: number;
+    size_bytes: number;
+    sha256: string;
+    mime_type: string;
+    file_extension: string;
+};
+export type ClaimedPublicationJob = PublicationJobView & {
+    media: PublicationMediaClaimView;
+};
 type PublicationRow = Record<string, unknown> & {
     id: number;
     device_id: number;
@@ -86,7 +96,7 @@ export declare class PublicationStore {
     requestCancellation(id: number, actor: PublicationActor, at?: string): PublicationJobView;
     claimDueJob(worker: PublicationClaimWorker, now: string): {
         claimed: boolean;
-        job: PublicationJobView | null;
+        job: ClaimedPublicationJob | null;
     };
     heartbeat(id: number, worker: PublicationWorker, now: string): PublicationJobView;
     checkpoint(id: number, worker: PublicationWorker, now: string, options: {
