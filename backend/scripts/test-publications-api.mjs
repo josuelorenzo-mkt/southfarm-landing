@@ -135,7 +135,7 @@ try {
 
   db.prepare(`INSERT INTO publication_jobs
     (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_at, updated_at)
-    VALUES (?, ?, ?, 'youtube', 'Needs manual review', 3, ?, 'review_required', 'review_required', ?, ?)`) 
+    VALUES (?, ?, ?, 'youtube', 'Needs manual review', 3, ?, 'review_required', 'review_required', ?, ?)`)
     .run(ownerWorkspace, deviceId, accountId, futureIso, futureIso, futureIso);
   const blockedByReview = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
   assert.equal(blockedByReview.response.status, 409);
