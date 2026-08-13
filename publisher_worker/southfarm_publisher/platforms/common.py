@@ -95,7 +95,10 @@ class GuardedPublisher:
 
     @staticmethod
     def _node_fingerprint(node: dict[str, str]) -> tuple[tuple[str, str], ...]:
-        return tuple(sorted((str(key), str(value)) for key, value in node.items()))
+        # Geometry and transient widget state may drift without navigation.  A
+        # logical target is defined only by stable semantic identity.
+        ignored = {"bounds", "enabled", "clickable", "focused", "selected", "checked", "index"}
+        return tuple(sorted((str(key), str(value)) for key, value in node.items() if key not in ignored))
 
     def _matching_signatures(self, nodes: list[dict[str, str]], *, text: str | None, content_desc: str | None, resource_id: str | None, context: dict[str, str] | None, predicate: Callable[[list[dict[str, str]]], dict[str, str] | None] | None) -> set[tuple[tuple[str, str], ...]]:
         if predicate is not None:
@@ -104,7 +107,8 @@ class GuardedPublisher:
             except PublisherError:
                 found = None
         elif context is None or any(all(item.get(key) == value for key, value in context.items()) for item in nodes):
-            found = self._one(nodes, error="TRANSITION_TARGET", text=text, content_desc=content_desc, resource_id=resource_id, required=False)
+            matches = [node for node in nodes if self._matches(node, text=text, content_desc=content_desc, resource_id=resource_id)]
+            found = matches[0] if len(matches) == 1 else None
         else:
             found = None
         return {self._node_fingerprint(found)} if found is not None else set()

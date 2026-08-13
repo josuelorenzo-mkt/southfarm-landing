@@ -12,9 +12,9 @@ from southfarm_publisher.platforms.youtube import YouTubeShortPublisher
 
 
 class Device:
-    def __init__(self, package, dumps):
+    def __init__(self, package, dumps, *, advance_on_poll=False):
         self.package, self.dumps, self.taps, self.typed, self.swipes = package, list(dumps), [], [], []
-        self._last_dump, self._after_tap, self._stale_reads = None, True, 0
+        self._last_dump, self._after_tap, self._stale_reads, self.advance_on_poll = None, True, 0, advance_on_poll
     def foreground_package(self): return self.package
     def dump_ui(self):
         if self._after_tap or self._last_dump is None:
@@ -23,6 +23,8 @@ class Device:
             self._last_dump = self.dumps.pop(0)
             self._after_tap = False
             self._stale_reads = 0
+        elif self.advance_on_poll and self.dumps:
+            self._last_dump = self.dumps.pop(0)
         else:
             self._stale_reads += 1
             if self._stale_reads > 3:
@@ -160,26 +162,27 @@ class PlatformAdapterTests(unittest.TestCase):
         device = Device("com.google.android.youtube", [
             [node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,100][700,200]"}), node(**{"content-desc": "older post - play Short"})],
             [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
+            [node(text="Confirm deletion")],
             [node(**{"resource-id": "com.google.android.youtube:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")],
             [node(text="expected.account"), node(**{"content-desc": "older post - play Short"})],
         ])
-        YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
+        YouTubeShortPublisher(expected_account="expected.account", pause=lambda _: setattr(device, "_after_tap", True)).cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 3)
 
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
         expected, baseline = "safe reel", {"older reel", "expected.account"}
         device = Device("com.instagram.android", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(text="Confirm deletion")], [node(**{"resource-id": "com.instagram.android:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
-        InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
+        InstagramPublisher(expected_account="expected.account", pause=lambda _: setattr(device, "_after_tap", True)).cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
 
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
         expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(text="Confirm deletion")], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
-        TikTokPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
+        TikTokPublisher(expected_account="expected.account", pause=lambda _: setattr(device, "_after_tap", True)).cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 3)
         self.assertEqual(len(device.swipes), 1)
 
@@ -295,6 +298,25 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             publisher.tap_and_wait(device, before[0], error="UPLOAD_SELECTOR", text="Upload")
         self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+
+    def test_tap_and_wait_rejects_stale_target_with_bounds_enabled_drift_and_toast(self):
+        before = [node(text="Create"), node(text="Upload", bounds="[0,100][200,200]")]
+        drift = [node(text="Create"), node(text="Upload", bounds="[0,120][220,220]", enabled="true"), node(text="Saved")]
+        device = Device("com.zhiliaoapp.musically", [before, drift])
+        publisher = TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None)
+        with self.assertRaises(PublisherError) as raised:
+            publisher.tap_and_wait(device, before[0], error="UPLOAD_SELECTOR", text="Upload")
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 1)
+
+    def test_tap_and_wait_accepts_same_logical_target_only_after_absence(self):
+        before = [node(text="Create"), node(text="Delete", **{"resource-id": "delete"})]
+        absent = [node(text="Confirm deletion")]
+        reappeared = [node(text="Delete", **{"resource-id": "delete", "bounds": "[20,1200][700,1300]"})]
+        device = Device("com.instagram.android", [before, absent, reappeared], advance_on_poll=True)
+        publisher = InstagramPublisher(expected_account="expected.account", timeout=.2, poll=.05, pause=lambda _: None)
+        selected = publisher.tap_and_wait(device, before[0], error="DELETE_CONFIRMATION", text="Delete", resource_id="delete")
+        self.assertEqual(selected["resource-id"], "delete")
 
     def test_gallery_baseline_preserves_duplicate_multiplicity_and_order(self):
         publisher = TikTokPublisher(expected_account="expected.account")
