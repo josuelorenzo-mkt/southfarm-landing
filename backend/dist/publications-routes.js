@@ -30,17 +30,45 @@ function removeFile(filePath) {
             throw error;
     }
 }
+function cleanupUploadedFiles(req) {
+    const candidates = [req.file, ...(Array.isArray(req.files) ? req.files : Object.values(req.files || {}).flat())]
+        .map((file) => file?.path)
+        .filter((filePath) => typeof filePath === 'string');
+    for (const filePath of candidates) {
+        try {
+            removeFile(filePath);
+        }
+        catch { }
+    }
+}
 function cleanFilename(name) {
     const base = path.basename(String(name || '')).replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').trim();
     return base.slice(0, 180) || 'video';
 }
-function validSignature(filePath) {
+function validSignature(filePath, mimeType) {
     const fd = fs.openSync(filePath, 'r');
     try {
-        const header = Buffer.alloc(16);
+        const header = Buffer.alloc(64);
         const bytes = fs.readSync(fd, header, 0, header.length, 0);
-        return (bytes >= 8 && header.subarray(4, 8).toString('ascii') === 'ftyp')
-            || (bytes >= 4 && header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])));
+        if (mimeType === 'video/webm') {
+            return bytes >= 11
+                && header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+                && header.subarray(4, bytes).toString('ascii').includes('webm');
+        }
+        if (bytes < 16 || header.subarray(4, 8).toString('ascii') !== 'ftyp')
+            return false;
+        const boxSize = header.readUInt32BE(0);
+        if (boxSize < 16 || boxSize > bytes)
+            return false;
+        const majorBrand = header.subarray(8, 12).toString('ascii').toLowerCase();
+        const compatibleBrands = [];
+        for (let offset = 16; offset + 4 <= boxSize; offset += 4)
+            compatibleBrands.push(header.subarray(offset, offset + 4).toString('ascii').toLowerCase());
+        const brands = [majorBrand, ...compatibleBrands];
+        const mp4Brands = new Set(['isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'dash', 'msdh', 'mmp4']);
+        const quicktimeBrands = new Set(['qt  ']);
+        const allowed = mimeType === 'video/quicktime' ? quicktimeBrands : mp4Brands;
+        return brands.some((brand) => allowed.has(brand));
     }
     finally {
         fs.closeSync(fd);
@@ -71,9 +99,21 @@ function parseId(value, label) {
 }
 function parseSchedule(value) {
     const scheduledFor = typeof value === 'string' ? value.trim() : '';
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/.exec(scheduledFor);
+    if (!match)
+        routeError(400, 'VALIDATION_ERROR', 'scheduled_for must be an RFC3339 timestamp with an offset');
+    const [, year, month, day, hour, minute, second = '0', fraction = '', offset] = match;
+    const values = [year, month, day, hour, minute, second].map(Number);
+    const [yearNumber, monthNumber, dayNumber, hourNumber, minuteNumber, secondNumber] = values;
+    const offsetValid = offset === 'Z' || (Number(offset.slice(1, 3)) <= 23 && Number(offset.slice(4, 6)) <= 59);
+    const calendar = new Date(Date.UTC(yearNumber, monthNumber - 1, dayNumber, hourNumber, minuteNumber, secondNumber));
+    if (!offsetValid || monthNumber < 1 || monthNumber > 12 || dayNumber < 1 || dayNumber > 31 || hourNumber > 23 || minuteNumber > 59 || secondNumber > 59
+        || calendar.getUTCFullYear() !== yearNumber || calendar.getUTCMonth() !== monthNumber - 1 || calendar.getUTCDate() !== dayNumber) {
+        routeError(400, 'VALIDATION_ERROR', 'scheduled_for is not a valid RFC3339 timestamp');
+    }
     const parsed = new Date(scheduledFor);
-    if (!scheduledFor || Number.isNaN(parsed.getTime()))
-        routeError(400, 'VALIDATION_ERROR', 'scheduled_for must be an ISO timestamp');
+    if (Number.isNaN(parsed.getTime()))
+        routeError(400, 'VALIDATION_ERROR', 'scheduled_for is not a valid RFC3339 timestamp');
     if (parsed.getTime() < Date.now() - 60000)
         routeError(400, 'VALIDATION_ERROR', 'scheduled_for cannot be in the past');
     return parsed.toISOString();
@@ -105,7 +145,12 @@ function safePublication(job, media, events) {
         view.events = events.map((event) => ({
             id: Number(event.id), from_status: event.from_status, to_status: event.to_status, current_step: event.current_step,
             message: event.message || null, actor_type: event.actor_type || null, created_at: event.created_at,
-            payload: event.payload ? JSON.parse(event.payload) : null,
+            payload: event.payload ? (() => { try {
+                return JSON.parse(event.payload);
+            }
+            catch {
+                return null;
+            } })() : null,
         }));
     return view;
 }
@@ -118,6 +163,38 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
     const root = path.resolve(mediaRoot);
     const tempRoot = path.join(root, '.tmp');
     fs.mkdirSync(tempRoot, { recursive: true });
+    const isInsideRoot = (candidate) => {
+        const resolved = path.resolve(root, candidate);
+        return resolved.startsWith(`${root}${path.sep}`) && path.dirname(resolved) === root;
+    };
+    const recoveryCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    for (const row of db.prepare(`SELECT id, private_path FROM publication_media media
+    WHERE media.upload_status = 'staging' AND media.updated_at < ?
+      AND NOT EXISTS (SELECT 1 FROM publication_jobs job WHERE job.media_id = media.id)`).all(recoveryCutoff)) {
+        const privatePath = String(row.private_path || '');
+        if (privatePath && isInsideRoot(privatePath)) {
+            try {
+                removeFile(path.resolve(root, privatePath));
+            }
+            catch { }
+        }
+        db.prepare('DELETE FROM publication_media WHERE id = ?').run(row.id);
+    }
+    for (const name of fs.readdirSync(tempRoot)) {
+        const candidate = path.join(tempRoot, name);
+        try {
+            if (fs.statSync(candidate).isFile() && Date.now() - fs.statSync(candidate).mtimeMs > 15 * 60 * 1000)
+                removeFile(candidate);
+        }
+        catch { }
+    }
+    const requireUserSession = (req, res, next) => {
+        if (req.user?.authType !== 'user') {
+            res.status(403).json({ error_code: 'USER_SESSION_REQUIRED', error: 'A user session is required for publications' });
+            return;
+        }
+        next();
+    };
     const upload = multer({
         storage: multer.diskStorage({
             destination: (_req, _file, callback) => callback(null, tempRoot),
@@ -126,7 +203,8 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         limits: { files: 1, fileSize: MAX_VIDEO_BYTES },
         fileFilter: (_req, file, callback) => callback(null, Object.prototype.hasOwnProperty.call(MIME_EXTENSIONS, file.mimetype)),
     }).single('video');
-    app.post('/api/publications', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    app.post('/api/publications', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
+        req.once('aborted', () => cleanupUploadedFiles(req));
         upload(req, res, (uploadError) => {
             const uploadedPath = req.file?.path;
             let finalPath;
@@ -139,7 +217,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                     routeError(400, 'VALIDATION_ERROR', 'Invalid video upload');
                 if (!req.file)
                     routeError(400, 'VALIDATION_ERROR', 'A single video file is required');
-                if (!validSignature(uploadedPath))
+                if (!validSignature(uploadedPath, req.file.mimetype))
                     routeError(400, 'VALIDATION_ERROR', 'Video signature is not supported');
                 let input;
                 try {
@@ -168,15 +246,19 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 const createdAt = new Date().toISOString();
                 const sha256 = hashFile(uploadedPath);
                 const mediaInsert = db.prepare(`INSERT INTO publication_media
-          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, created_at, updated_at)
-          VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?)`)
+          (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
+          VALUES (?, ?, ?, '', ?, ?, ?, ?, 'staging', ?, ?)`)
                     .run(workspaceId, Number(req.user.userId), cleanFilename(req.file.originalname), req.file.mimetype, extension, sizeBytes, sha256, createdAt, createdAt);
                 mediaId = Number(mediaInsert.lastInsertRowid);
                 const mediaKey = `${mediaId}.${extension}`;
                 finalPath = path.join(root, mediaKey);
+                // The staging row records its intended final key before the rename.
+                // Startup recovery can therefore remove either half of a crash safely.
+                db.prepare('UPDATE publication_media SET private_path = ?, updated_at = ? WHERE id = ? AND upload_status = ?')
+                    .run(mediaKey, createdAt, mediaId, 'staging');
                 fs.renameSync(uploadedPath, finalPath);
-                db.prepare('UPDATE publication_media SET private_path = ? WHERE id = ?').run(mediaKey, mediaId);
                 const transaction = db.transaction(() => {
+                    db.prepare("UPDATE publication_media SET private_path = ?, upload_status = 'stored', updated_at = ? WHERE id = ? AND upload_status = 'staging'").run(mediaKey, createdAt, mediaId);
                     const jobInsert = db.prepare(`INSERT INTO publication_jobs
             (workspace_id, created_by_user_id, device_id, social_account_id, media_id, platform, caption, word_count, scheduled_for,
              status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at)
@@ -191,6 +273,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 res.status(201).json({ publication: safePublication(job, mediaForJob(db, job)) });
             }
             catch (error) {
+                cleanupUploadedFiles(req);
                 try {
                     removeFile(uploadedPath);
                 }
@@ -209,7 +292,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             }
         });
     });
-    app.get('/api/publications', auth, (req, res) => {
+    app.get('/api/publications', auth, requireUserSession, (req, res) => {
         try {
             const workspaceId = Number(req.user.workspaceId);
             const where = ['workspace_id = ?'];
@@ -229,7 +312,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to list publications' });
         }
     });
-    app.get('/api/publications/:id', auth, (req, res) => {
+    app.get('/api/publications/:id', auth, requireUserSession, (req, res) => {
         try {
             const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
             const events = db.prepare('SELECT * FROM publication_events WHERE publication_job_id = ? ORDER BY id ASC').all(job.id);
@@ -241,7 +324,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to retrieve publication' });
         }
     });
-    app.patch('/api/publications/:id/schedule', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    app.patch('/api/publications/:id/schedule', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
         try {
             const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
             if (job.status !== 'queued')
@@ -257,7 +340,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: 'Publication cannot be rescheduled' });
         }
     });
-    app.post('/api/publications/:id/cancel', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    app.post('/api/publications/:id/cancel', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
         try {
             const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
             if (job.final_action_at)

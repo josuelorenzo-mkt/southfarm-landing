@@ -11,24 +11,29 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'southfarm-publications-ap
 const dbPath = path.join(tempDir, 'southfarm.db');
 const mediaRoot = path.join(tempDir, 'private-media');
 const backendNodePath = process.env.SOUTHFARM_TEST_NODE_PATH || process.execPath;
-const backend = spawn(backendNodePath, [path.resolve('dist/index.js')], {
-  cwd: process.cwd(),
-  env: {
-    ...process.env,
-    PORT: String(port),
-    SOUTHFARM_DB_PATH: dbPath,
-    SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot,
-    SOUTHFARM_JWT_SECRET: 'test-only-southfarm-secret',
-    SOUTHFARM_AUTO_PLANNER_ENABLED: 'false',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-
 let output = '';
-backend.stdout.on('data', (chunk) => { output += chunk.toString(); });
-backend.stderr.on('data', (chunk) => { output += chunk.toString(); });
+let backend;
+function startBackend() {
+  backend = spawn(backendNodePath, [path.resolve('dist/index.js')], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env, PORT: String(port), SOUTHFARM_DB_PATH: dbPath, SOUTHFARM_PUBLICATION_MEDIA_ROOT: mediaRoot,
+      SOUTHFARM_JWT_SECRET: 'test-only-southfarm-secret', SOUTHFARM_AUTO_PLANNER_ENABLED: 'false',
+    }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  backend.stdout.on('data', (chunk) => { output += chunk.toString(); });
+  backend.stderr.on('data', (chunk) => { output += chunk.toString(); });
+}
+async function stopBackend() {
+  if (backend?.exitCode !== null) return;
+  backend.kill('SIGTERM');
+  await new Promise((resolve) => { const timeout = setTimeout(() => { backend.kill('SIGKILL'); resolve(); }, 5000); backend.once('exit', () => { clearTimeout(timeout); resolve(); }); });
+}
+startBackend();
 
 const mp4Header = Buffer.from('000000186674797069736f6d0000020069736f6d6d703431', 'hex');
+const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
+const webmHeader = Buffer.from('1a45dfa39f4282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
 async function waitForHealth() {
@@ -81,6 +86,9 @@ try {
   const foreignAccountId = Number(db.prepare('INSERT INTO social_accounts (user_id, device_id, platform, username) VALUES (?, ?, ?, ?)').run(foreign.user.id, foreignDeviceId, 'youtube', 'foreign-channel').lastInsertRowid);
 
   const ownerHeaders = { Authorization: `Bearer ${owner.token}` };
+  const deviceToken = `sfd-test-device-${crypto.randomUUID()}`;
+  db.prepare('UPDATE devices SET device_token_hash = ? WHERE id = ?').run(crypto.createHash('sha256').update(deviceToken).digest('hex'), deviceId);
+  const deviceHeaders = { Authorization: `Bearer ${deviceToken}` };
   const valid = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
   assert.equal(valid.response.status, 201, JSON.stringify(valid.body));
   assert.equal(valid.body.publication.status, 'queued');
@@ -94,6 +102,28 @@ try {
   assert.equal(detail.response.status, 200);
   assert.equal(JSON.stringify({ list: list.body, detail: detail.body }).includes(mediaRoot), false);
   assert.equal(JSON.stringify({ list: list.body, detail: detail.body }).includes(tempDir), false);
+  db.prepare(`INSERT INTO publication_events (publication_job_id, actor_type, actor_id, payload, created_at)
+    VALUES (?, 'test', 'corrupt-payload', '{not-json', ?)`).run(valid.body.publication.id, futureIso);
+  const corruptEventDetail = await request(`/api/publications/${valid.body.publication.id}`, { headers: ownerHeaders });
+  assert.equal(corruptEventDetail.response.status, 200);
+  assert.equal(corruptEventDetail.body.publication.events.at(-1).payload, null);
+
+  const deviceCreate = await request('/api/publications', { method: 'POST', headers: deviceHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(deviceCreate.response.status, 403);
+  const deviceList = await request('/api/publications', { headers: deviceHeaders });
+  assert.equal(deviceList.response.status, 403);
+  const deviceDetail = await request(`/api/publications/${valid.body.publication.id}`, { headers: deviceHeaders });
+  assert.equal(deviceDetail.response.status, 403);
+  const deviceSchedule = await request(`/api/publications/${valid.body.publication.id}/schedule`, { method: 'PATCH', headers: { ...deviceHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }) });
+  assert.equal(deviceSchedule.response.status, 403);
+  const deviceCancel = await request(`/api/publications/${valid.body.publication.id}/cancel`, { method: 'POST', headers: deviceHeaders });
+  assert.equal(deviceCancel.response.status, 403);
+
+  const unexpectedBody = new FormData();
+  unexpectedBody.set('not_video', new Blob([mp4Header], { type: 'video/mp4' }), 'wrong.mp4');
+  const unexpected = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: unexpectedBody });
+  assert.equal(unexpected.response.status, 400);
+  assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'unexpected file fields must not leave temp media');
 
   const rescheduledFor = new Date(Date.now() + 20 * 60 * 1000).toISOString();
   const rescheduled = await request(`/api/publications/${valid.body.publication.id}/schedule`, {
@@ -113,14 +143,27 @@ try {
     { caption: 'one two three four five six seven eight nine ten eleven' },
     { caption: 'x'.repeat(101) },
     { scheduledFor: 'not-an-iso-date' },
+    { scheduledFor: '2026-08-13' },
+    { scheduledFor: '08/13/2026 12:00' },
+    { scheduledFor: '2026-08-13T12:00:00' },
+    { scheduledFor: '2026-08-13T12:00:00+25:00' },
     { contents: null },
     { type: 'text/plain' },
     { contents: Buffer.from('not an MP4') },
+    { contents: Buffer.from('0000001866747970617669660000020061766966', 'hex') },
+    { contents: Buffer.from('000000086674797069736f6d', 'hex') },
+    { type: 'video/mp4', contents: quicktimeHeader },
+    { type: 'video/webm', contents: mp4Header },
+    { type: 'video/webm', contents: Buffer.from('1a45dfa39f4282846d6174726f736b61', 'hex') },
   ]) {
     const result = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, ...options }) });
     assert.equal(result.response.status, 400, `${JSON.stringify(options)} ${JSON.stringify(result.body)}`);
   }
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'validation failures must remove temporary/final media');
+  const quicktime = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, type: 'video/quicktime', contents: quicktimeHeader }) });
+  assert.equal(quicktime.response.status, 201, JSON.stringify(quicktime.body));
+  const webm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, type: 'video/webm', contents: webmHeader }) });
+  assert.equal(webm.response.status, 201, JSON.stringify(webm.body));
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'validation failures must remove temporary/final media');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'validation failures must remove temporary media');
 
   const foreignDevice = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId: foreignDeviceId, accountId: foreignAccountId }) });
@@ -140,9 +183,43 @@ try {
   const blockedByReview = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
   assert.equal(blockedByReview.response.status, 409);
   assert.equal(blockedByReview.body.error_code, 'REVIEW_REQUIRED');
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'review gate must clean the uploaded temp file');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'review gate must clean the uploaded temp file');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'review gate must remove temporary media');
   db.prepare("DELETE FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").run(accountId);
+
+  const orphanTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const orphanId = Number(db.prepare(`INSERT INTO publication_media
+    (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
+    VALUES (?, ?, 'orphan.mp4', '999.mp4', 'video/mp4', 'mp4', ?, 'orphan', 'staging', ?, ?)`).run(ownerWorkspace, owner.user.id, mp4Header.length, orphanTime, orphanTime).lastInsertRowid);
+  fs.writeFileSync(path.join(mediaRoot, '999.mp4'), mp4Header);
+  fs.writeFileSync(path.join(mediaRoot, '.tmp', 'orphan.upload'), mp4Header);
+  fs.utimesSync(path.join(mediaRoot, '.tmp', 'orphan.upload'), new Date(orphanTime), new Date(orphanTime));
+  const outsidePath = path.join(tempDir, 'must-not-delete.mp4');
+  fs.writeFileSync(outsidePath, mp4Header);
+  const unsafeOrphanId = Number(db.prepare(`INSERT INTO publication_media
+    (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
+    VALUES (?, ?, 'unsafe.mp4', '../must-not-delete.mp4', 'video/mp4', 'mp4', ?, 'unsafe', 'staging', ?, ?)`).run(ownerWorkspace, owner.user.id, mp4Header.length, orphanTime, orphanTime).lastInsertRowid);
+  const linkedStagingId = Number(db.prepare(`INSERT INTO publication_media
+    (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, upload_status, created_at, updated_at)
+    VALUES (?, ?, 'linked.mp4', 'linked.mp4', 'video/mp4', 'mp4', ?, 'linked', 'staging', ?, ?)`).run(ownerWorkspace, owner.user.id, mp4Header.length, orphanTime, orphanTime).lastInsertRowid);
+  fs.writeFileSync(path.join(mediaRoot, 'linked.mp4'), mp4Header);
+  db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, media_id, platform, caption, word_count, scheduled_for, status, current_step, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'youtube', 'linked staging media', 3, ?, 'queued', 'queued', ?, ?)`).run(ownerWorkspace, deviceId, accountId, linkedStagingId, futureIso, futureIso, futureIso);
+  assert.ok(db.prepare('SELECT id FROM publication_media WHERE id = ?').get(orphanId));
+  db.close();
+  await stopBackend();
+  startBackend();
+  await waitForHealth();
+  const recoveredDb = new Database(dbPath);
+  assert.equal(recoveredDb.prepare('SELECT id FROM publication_media WHERE id = ?').get(orphanId), undefined);
+  assert.equal(recoveredDb.prepare('SELECT id FROM publication_media WHERE id = ?').get(unsafeOrphanId), undefined);
+  assert.ok(recoveredDb.prepare('SELECT id FROM publication_media WHERE id = ?').get(linkedStagingId), 'linked staging media must survive recovery');
+  assert.equal(fs.existsSync(path.join(mediaRoot, '999.mp4')), false);
+  assert.equal(fs.existsSync(outsidePath), true, 'recovery must never delete outside the media root');
+  assert.equal(fs.existsSync(path.join(mediaRoot, 'linked.mp4')), true, 'recovery must never delete linked media');
+  assert.equal(fs.existsSync(path.join(mediaRoot, '.tmp', 'orphan.upload')), false);
+  recoveredDb.close();
 
   // Stream the file body instead of allocating a 200 MiB fixture. Multer must
   // stop the request at its exact 200 MiB file limit and remove its temp file.
@@ -164,16 +241,13 @@ try {
   const large = await request('/api/publications', { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: largeBody, duplex: 'half' });
   assert.equal(large.response.status, 413, JSON.stringify(large.body));
   assert.equal(large.body.error_code, 'VIDEO_TOO_LARGE');
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'failed uploads must not leave media files');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 4, 'failed uploads must not leave media files');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'oversized uploads must remove temporary media');
-  db.close();
+  // The initial DB handle was closed before restart recovery.
 
   console.log('publications-api test passed: upload, ownership, RBAC, validation, privacy, and cleanup');
 } finally {
-  if (backend.exitCode === null) {
-    backend.kill('SIGTERM');
-    await new Promise((resolve) => { const timeout = setTimeout(() => { backend.kill('SIGKILL'); resolve(); }, 5000); backend.once('exit', () => { clearTimeout(timeout); resolve(); }); });
-  }
+  await stopBackend();
   // Windows may release SQLite/WAL handles just after the child exits. Cleanup
   // is best-effort so it cannot hide the route assertion that failed above.
   try {
