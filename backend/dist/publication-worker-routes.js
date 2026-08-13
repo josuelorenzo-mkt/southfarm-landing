@@ -69,14 +69,15 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
         const worker = mutationWorker(req);
         const step = value(req.body?.step);
         const progress = Number(req.body?.progress_percent);
-        const finalAction = Boolean(req.body?.final_action);
+        const hasFinalAction = Object.prototype.hasOwnProperty.call(req.body || {}, 'final_action');
+        const finalAction = req.body?.final_action;
         if (!id || !worker)
             return conflict(res, new Error('Worker claim is invalid or expired'));
-        if (!step || !CHECKPOINTS.has(step) || !Number.isInteger(progress))
-            return res.status(400).json({ error_code: 'CHECKPOINT_INVALID', error: 'step and progress_percent are invalid' });
+        if (!step || !CHECKPOINTS.has(step) || !Number.isInteger(progress) || (hasFinalAction && typeof finalAction !== 'boolean'))
+            return res.status(400).json({ error_code: 'CHECKPOINT_INVALID', error: 'step, progress_percent, and final_action are invalid' });
         try {
             const evidence = safeJson(req.body?.evidence);
-            const job = store.checkpoint(id, worker, new Date().toISOString(), { step: step, progressPercent: progress, finalAction, evidence: evidence ? JSON.parse(evidence) : undefined });
+            const job = store.checkpoint(id, worker, new Date().toISOString(), { step: step, progressPercent: progress, finalAction: finalAction === true, evidence: evidence ? JSON.parse(evidence) : undefined });
             res.json({ ok: true, job });
         }
         catch (error) {
