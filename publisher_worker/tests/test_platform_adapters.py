@@ -144,19 +144,18 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_cleanup_requires_verified_identity_and_restores_baseline(self):
         expected, baseline = "safe publishing test - play Short", {"older post - play Short", "expected.account"}
         device = Device("com.google.android.youtube", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older post - play Short"})],
-            [node(**{"content-desc": "More actions"})],
-            [node(text="Delete")],
-            [node(text="Delete")],
+            [node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,100][700,200]"}), node(**{"content-desc": "older post - play Short"})],
+            [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
+            [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
             [node(text="expected.account"), node(**{"content-desc": "older post - play Short"})],
         ])
         YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
-        self.assertEqual(len(device.taps), 4)
+        self.assertEqual(len(device.taps), 3)
 
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
         expected, baseline = "safe reel", {"older reel", "expected.account"}
         device = Device("com.instagram.android", [
-            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"content-desc": "More options"})], [node(text="Delete")], [node(text="Delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
         InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(len(device.taps), 4)
@@ -176,6 +175,14 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
         self.assertEqual(raised.exception.code, "CLEANUP_IDENTITY_MISMATCH")
+        self.assertEqual(device.taps, [])
+
+    def test_youtube_cleanup_more_actions_from_other_card_never_deletes(self):
+        expected, baseline = "safe publishing test - play Short", {"older post - play Short", "expected.account"}
+        device = Device("com.google.android.youtube", [[node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,300][700,400]"}), node(**{"content-desc": "older post - play Short"})]])
+        with self.assertRaises(PublisherError) as raised:
+            YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
+        self.assertEqual(raised.exception.code, "CLEANUP_MENU_COLLISION")
         self.assertEqual(device.taps, [])
 
     def test_cleanup_missing_confirmation_never_taps_delete_action(self):

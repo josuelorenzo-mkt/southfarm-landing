@@ -79,9 +79,9 @@ class InstagramPublisher(GuardedPublisher):
     def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
         nodes = self._cleanup_preflight(expected_identity, baseline, device)
         target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
-        menu = self.tap_and_wait(device, target, error="REEL_MENU", content_desc="More options")
-        delete = self.tap_and_wait(device, menu, error="DELETE_ACTION", text="Delete")
-        confirm = self.tap_and_wait(device, delete, error="DELETE_CONFIRMATION", text="Delete")
+        menu = self.tap_and_wait(device, target, error="REEL_MENU", resource_id="com.instagram.android:id/reel_more_options")
+        delete = self.tap_and_wait(device, menu, error="DELETE_ACTION", resource_id="com.instagram.android:id/delete")
+        confirm = self.tap_and_wait(device, delete, error="DELETE_CONFIRMATION", resource_id="com.instagram.android:id/delete")
         self.tap_and_wait(device, confirm, error="BASELINE_RELOAD", predicate=lambda screen: next((item for item in screen if (item.get("content-desc") or item.get("text")) in baseline), None))
         restored = {value for node in self._last_nodes for value in (node.get("content-desc"), node.get("text")) if value}
         if expected_identity in restored or restored != baseline: raise PublisherError("BASELINE_NOT_RESTORED", "Instagram cleanup did not restore exact baseline")

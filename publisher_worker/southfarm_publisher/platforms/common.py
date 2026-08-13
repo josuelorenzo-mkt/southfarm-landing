@@ -157,7 +157,7 @@ class GuardedPublisher:
         if not expected_identity or expected_identity in baseline:
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup identity must be a new verified item")
         nodes = self._nodes(device); self._account(nodes)
-        identities = {node.get("content-desc") or node.get("text") for node in nodes if node.get("content-desc") or node.get("text")}
+        identities = {node.get("content-desc") or node.get("text") for node in nodes if (node.get("content-desc") or node.get("text")) and (node.get("content-desc") or node.get("text")) not in {"More actions", "More options"}}
         if identities != baseline | {expected_identity}:
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup screen must contain exactly baseline plus verified item")
         return nodes

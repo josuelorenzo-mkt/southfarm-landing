@@ -49,9 +49,16 @@ class YouTubeShortPublisher(GuardedPublisher):
     def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
         nodes = self._cleanup_preflight(expected_identity, baseline, device)
         target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
-        menu = self.tap_and_wait(device, target, error="MORE_ACTIONS", content_desc="More actions")
-        delete = self.tap_and_wait(device, menu, error="DELETE_ACTION", text="Delete")
-        confirm = self.tap_and_wait(device, delete, error="DELETE_CONFIRMATION", text="Delete")
+        _, top, _, bottom = self._bounds(target)
+        associated = [node for node in nodes if node.get("content-desc") == "More actions" and self._bounds(node)[1] <= bottom and self._bounds(node)[3] >= top]
+        if len(associated) != 1: raise PublisherError("CLEANUP_MENU_COLLISION", "YouTube More actions must be geometrically associated with the verified card")
+        menu = self.tap_and_wait(device, associated[0], error="DELETE_ACTION", resource_id="com.google.android.youtube:id/delete")
+        confirm = self.tap_and_wait(device, menu, error="DELETE_CONFIRMATION", resource_id="com.google.android.youtube:id/delete")
         self.tap_and_wait(device, confirm, error="BASELINE_RELOAD", predicate=lambda screen: next((item for item in screen if (item.get("content-desc") or item.get("text")) in baseline), None))
         restored = {value for node in self._last_nodes for value in (node.get("content-desc"), node.get("text")) if value}
         if expected_identity in restored or restored != baseline: raise PublisherError("BASELINE_NOT_RESTORED", "YouTube cleanup did not restore exact baseline")
+
+    @staticmethod
+    def _bounds(node: dict[str, str]) -> tuple[int, int, int, int]:
+        from ..adb_device import SafeAdb
+        return SafeAdb.bounds(node)
