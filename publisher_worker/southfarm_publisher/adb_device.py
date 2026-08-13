@@ -26,11 +26,23 @@ class SafeAdb:
         except (OSError, subprocess.TimeoutExpired): raise PublisherError("ADB_UNAVAILABLE", "ADB command failed", retryable=True) from None
         if result.returncode != 0: raise PublisherError("ADB_COMMAND_FAILED", "ADB command failed", retryable=True)
         return result.stdout or ""
+    def binary_command(self, *args: str, timeout: float | None = None) -> bytes:
+        try:
+            result = self._run([self.adb_path, "-s", self.serial, *args], shell=False, capture_output=True, timeout=timeout or self.timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired): raise PublisherError("ADB_UNAVAILABLE", "ADB command failed", retryable=True) from None
+        if result.returncode != 0: raise PublisherError("ADB_COMMAND_FAILED", "ADB command failed", retryable=True)
+        return bytes(result.stdout or b"")
     def android_id(self) -> str: return self.command("shell", "settings", "get", "secure", "android_id").strip()
     @staticmethod
     def parse_ui(xml: str) -> list[dict[str, str]]:
         try: return [dict(node.attrib) for node in ET.fromstring(xml).iter("node")]
         except ET.ParseError: raise PublisherError("UI_XML_INVALID", "Device UI dump was invalid", retryable=True) from None
+    def dump_ui(self) -> list[dict[str, str]]:
+        return self.parse_ui(self.command("exec-out", "uiautomator", "dump", "/dev/tty", timeout=15))
+    def screenshot(self, target: str) -> None:
+        image = self.binary_command("exec-out", "screencap", "-p", "/dev/stdout", timeout=30)
+        if not image: raise PublisherError("SCREENSHOT_EMPTY", "Device screenshot was empty", retryable=True)
+        with open(target, "wb") as handle: handle.write(image)
     @staticmethod
     def find_exact(nodes: list[dict[str, str]], *, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None) -> dict[str, str] | None:
         for node in nodes:

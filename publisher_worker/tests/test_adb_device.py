@@ -38,6 +38,23 @@ class AdbDeviceTests(unittest.TestCase):
         self.assertEqual(fake.calls[-1][0], ["adb-test", "-s", "serial-1", "shell", "input", "tap", "15", "21"])
         self.assertFalse(fake.calls[-1][1]["shell"])
 
+    def test_dump_and_screenshot_use_bounded_argv_commands(self):
+        class DeviceRun(FakeRun):
+            def __call__(self, argv, **kwargs):
+                self.calls.append((argv, kwargs))
+                if argv[-3:] == ["uiautomator", "dump", "/dev/tty"]:
+                    return subprocess.CompletedProcess(argv, 0, '<hierarchy><node text="Ready" bounds="[0,0][1,1]"/></hierarchy>', "")
+                if argv[-3:] == ["screencap", "-p", "/dev/stdout"]:
+                    return subprocess.CompletedProcess(argv, 0, b"PNG", b"")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+        fake = DeviceRun(); adb = SafeAdb("serial-1", run=fake, adb_path="adb-test")
+        self.assertEqual(adb.dump_ui()[0]["text"], "Ready")
+        with self.subTest("screenshot"):
+            import tempfile
+            with tempfile.NamedTemporaryFile() as target:
+                adb.screenshot(target.name)
+                self.assertEqual(open(target.name, "rb").read(), b"PNG")
+
     def test_remote_path_is_sanitized(self):
         self.assertEqual(SafeAdb.safe_remote_name("../../clip name.mp4"), "clip_name.mp4")
         with self.assertRaises(ValueError): SafeAdb.safe_remote_name("..").__str__()
