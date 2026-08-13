@@ -112,9 +112,11 @@ def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int,
     if not device_id.isdigit() or int(device_id) <= 0: raise PublisherError("CONFIG_INVALID", "SOUTHFARM_PUBLISHER_DEVICE_ID must be a positive integer")
     adb = env.get("SOUTHFARM_ADB", DEFAULT_ADB)
     if not os.path.isfile(adb) or not os.access(adb, os.X_OK): raise PublisherError("CONFIG_INVALID", "Configured ADB executable is unavailable")
+    expected_serial, expected_android_id = env.get("SOUTHFARM_ADB_SERIAL", "").strip(), env.get("SOUTHFARM_EXPECTED_ANDROID_ID", "").strip()
+    if not expected_serial or not expected_android_id: raise PublisherError("CONFIG_INVALID", "Exact ADB serial and Android identity must be configured")
     raw_forbidden, allow_all = env.get("SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS"), env.get("SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS", "").strip().lower()
     if raw_forbidden is None and allow_all != "true": raise PublisherError("CONFIG_INVALID", "Instagram forbidden-account policy must be configured")
-    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb), int(device_id), _normalized_accounts(raw_forbidden or "")
+    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb, expected_serial=expected_serial, expected_android_id=expected_android_id), int(device_id), _normalized_accounts(raw_forbidden or "")
 
 def platform_adapters(*, forbidden_instagram_accounts: set[str] | None = None) -> dict[str, Any]:
     from .platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher

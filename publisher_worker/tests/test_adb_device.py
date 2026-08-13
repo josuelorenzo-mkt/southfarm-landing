@@ -5,6 +5,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from southfarm_publisher.adb_device import AdbDevice, AdbDeviceRegistry, SafeAdb
+from southfarm_publisher.models import PublisherError
 
 
 class FakeRun:
@@ -28,6 +29,14 @@ class AdbDeviceTests(unittest.TestCase):
         self.assertEqual(found, AdbDevice(serial="usb", android_id="android-1"))
         self.assertEqual([call[0] for call in fake.calls][0], ["adb-test", "-s", "usb", "shell", "settings", "get", "secure", "android_id"])
         self.assertTrue(all(call[1]["shell"] is False for call in fake.calls))
+
+    def test_strict_registry_never_substitutes_another_serial_or_backend_identity(self):
+        fake = FakeRun(); registry = AdbDeviceRegistry(run=fake, adb_path="adb-test", expected_serial="wifi", expected_android_id="android-1")
+        registry.list_output = lambda: "List of devices attached\nusb\tdevice product:x\nwifi\tdevice product:x\n"
+        self.assertEqual(registry.find("android-1"), AdbDevice(serial="wifi", android_id="android-1"))
+        with self.assertRaises(PublisherError) as raised: registry.find("android-2")
+        self.assertEqual(raised.exception.code, "DEVICE_IDENTITY_MISMATCH")
+        self.assertTrue(all(call[0][2] == "wifi" for call in fake.calls))
 
     def test_safe_adb_uses_argv_and_parses_exact_semantic_nodes(self):
         fake = FakeRun(); adb = SafeAdb("serial-1", run=fake, adb_path="adb-test")

@@ -23,29 +23,51 @@ if ($CreateTemporaryFixture) {
   $temporaryRoot = Join-Path $env:TEMP ("southfarm-publisher-test-" + [guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
   $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-  $mediaRoot = Join-Path $temporaryRoot "media"; $evidenceRoot = Join-Path $temporaryRoot "evidence"; $logRoot = Join-Path $temporaryRoot "logs"
-  New-Item -ItemType Directory -Force -Path $mediaRoot, $evidenceRoot, $logRoot | Out-Null
+  $mediaRoot = Join-Path $temporaryRoot "media"; $evidenceRoot = Join-Path $temporaryRoot "evidence"; $logRoot = Join-Path $temporaryRoot "logs"; $toolRoot = Join-Path $temporaryRoot "tools\ffmpeg"; $fixtureFfprobe = Join-Path $toolRoot "ffprobe.exe"
+  New-Item -ItemType Directory -Force -Path $mediaRoot, $evidenceRoot, $logRoot, $toolRoot | Out-Null
+  Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\cmd.exe") -Destination $fixtureFfprobe
   $fixtureSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  $fixture = [ordered]@{ python_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); worker_path=$temporaryRoot; adb_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); ffprobe_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); api_url="http://127.0.0.1:1"; worker_id="test-worker"; run_as_user=[Security.Principal.WindowsIdentity]::GetCurrent().Name; run_as_sid=$fixtureSid; device_id=1; device_serial="fixture-serial"; android_id="0123456789abcdef"; worker_token=[Convert]::ToBase64String($bytes); media_root=$mediaRoot; evidence_root=$evidenceRoot; log_root=$logRoot; forbidden_instagram_accounts="fixture-account"; allow_all_instagram_accounts=$false }
+  $fixture = [ordered]@{ python_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); worker_path=$temporaryRoot; adb_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); ffprobe_path=$fixtureFfprobe; api_url="http://127.0.0.1:1"; worker_id="test-worker"; run_as_user=[Security.Principal.WindowsIdentity]::GetCurrent().Name; run_as_sid=$fixtureSid; device_id=1; device_serial="fixture-serial"; android_id="0123456789abcdef"; worker_token=[Convert]::ToBase64String($bytes); media_root=$mediaRoot; evidence_root=$evidenceRoot; log_root=$logRoot; forbidden_instagram_accounts="fixture-account"; allow_all_instagram_accounts=$false }
   $ConfigPath = Join-Path $temporaryRoot "publisher-worker.json"
   [IO.File]::WriteAllText($ConfigPath, ($fixture | ConvertTo-Json -Compress))
   $acl = New-Object System.Security.AccessControl.FileSecurity; $acl.SetAccessRuleProtection($true, $false)
   foreach ($sid in @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
   Set-Acl -LiteralPath $ConfigPath -AclObject $acl
-  foreach ($directory in @($mediaRoot, $evidenceRoot, $logRoot)) {
+  foreach ($directory in @($mediaRoot, $evidenceRoot, $logRoot, $toolRoot)) {
     $directoryAcl = New-Object System.Security.AccessControl.DirectorySecurity; $directoryAcl.SetAccessRuleProtection($true, $false)
     $directorySids = @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
     foreach ($sid in $directorySids) { $directoryAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))) }
     Set-Acl -LiteralPath $directory -AclObject $directoryAcl
   }
+  $toolFileAcl = New-Object System.Security.AccessControl.FileSecurity; $toolFileAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $fixtureSid)) { $toolFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  Set-Acl -LiteralPath $fixtureFfprobe -AclObject $toolFileAcl
   $fakeAdb = Join-Path $temporaryRoot "fake-adb.cmd"
   [IO.File]::WriteAllText($fakeAdb, "@echo off`r`nif `%3==get-state (echo device) else (echo 0123456789abcdef)`r`nexit /b 0`r`n")
+  $fixture.adb_path = $fakeAdb
+  [IO.File]::WriteAllText($ConfigPath, ($fixture | ConvertTo-Json -Compress))
   $backendConfig = Join-Path $temporaryRoot "backend-runtime.json"
   [IO.File]::WriteAllText($backendConfig, '{"jwt_secret":"fixture-only"}')
   $installer = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "install-southfarm-publisher-worker.ps1"
-  $validationOutput = & $installer -RunAsUser ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -DeviceId 1 -DeviceSerial "fixture-serial" -PythonPath (Join-Path $env:WINDIR "System32\cmd.exe") -AdbPath $fakeAdb -FfprobeSourcePath (Join-Path $env:WINDIR "System32\cmd.exe") -RuntimeRoot (Join-Path $temporaryRoot "runtime") -BackendRuntimeConfigPath $backendConfig -ForbiddenInstagramAccounts "fixture-account" -ValidationOnly -WhatIf
+  $backendPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\backend"))
+  $nodePath = (Get-Command node.exe -ErrorAction Stop).Source; $fixtureDatabase = Join-Path $temporaryRoot "southfarm.db"
+  $createDeviceDb = 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,lifecycle_status TEXT)");d.prepare("INSERT INTO devices VALUES(?,?,?)").run(1,"0123456789abcdef","active");d.close()'
+  Push-Location -LiteralPath $backendPath
+  try { & $nodePath -e $createDeviceDb $fixtureDatabase }
+  finally { Pop-Location }
+  $validationArgs = @{ RunAsUser=[Security.Principal.WindowsIdentity]::GetCurrent().Name; DeviceId=1; DeviceSerial="fixture-serial"; PythonPath=(Join-Path $env:WINDIR "System32\cmd.exe"); AdbPath=$fakeAdb; FfprobeSourcePath=(Join-Path $env:WINDIR "System32\cmd.exe"); RuntimeRoot=(Join-Path $temporaryRoot "runtime"); BackendRuntimeConfigPath=$backendConfig; BackendPath=$backendPath; NodePath=$nodePath; DatabasePath=$fixtureDatabase; ForbiddenInstagramAccounts="fixture-account"; ValidationOnly=$true; WhatIf=$true }
+  $validationOutput = & $installer @validationArgs
   Assert-WorkerCondition (($validationOutput -join "`n") -eq "Validated publisher worker installation inputs; no config or task was changed.") "Installer ValidationOnly fixture did not pass exactly"
   Assert-WorkerCondition (!(Test-Path -LiteralPath (Join-Path $temporaryRoot "runtime\config\publisher-worker.json"))) "ValidationOnly wrote a worker config"
+  Push-Location -LiteralPath $backendPath
+  try { & $nodePath -e 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.prepare("UPDATE devices SET device_id=? WHERE id=1").run("fedcba9876543210");d.close()' $fixtureDatabase }
+  finally { Pop-Location }
+  $failedAsExpected = $false
+  try { & $installer @validationArgs | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "DeviceId is registered to a different Android ID than DeviceSerial." }
+  Assert-WorkerCondition $failedAsExpected "DeviceId/DeviceSerial mismatch was not rejected"
+  Push-Location -LiteralPath $backendPath
+  try { & $nodePath -e 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.prepare("UPDATE devices SET device_id=? WHERE id=1").run("0123456789abcdef");d.close()' $fixtureDatabase }
+  finally { Pop-Location }
   [IO.File]::WriteAllText($backendConfig, (@{ jwt_secret="fixture-only"; publisher_worker_token=$fixture.worker_token; publisher_worker_enabled=$true; publication_media_root=$mediaRoot; ffprobe_path=$fixture.ffprobe_path } | ConvertTo-Json -Compress))
   $backendFileAcl = New-Object System.Security.AccessControl.FileSecurity; $backendFileAcl.SetAccessRuleProtection($true, $false)
   foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $fixtureSid)) { $backendFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
@@ -105,6 +127,15 @@ foreach ($directory in @([string]$config.media_root, [string]$config.evidence_ro
   if ($directory -eq [string]$config.media_root) { if (!$temporaryRoot) { Assert-WorkerCondition (-not (Has-AllowSid $directoryAcl $runAsSid)) "Media root unnecessarily grants the worker user" } }
   else { Assert-WorkerCondition (Has-AllowSid $directoryAcl $runAsSid) "Worker user cannot write required logs/evidence: $directory" }
 }
+$toolFile = [IO.Path]::GetFullPath([string]$config.ffprobe_path); $toolDirectory = Split-Path -Parent $toolFile
+foreach ($toolTarget in @($toolDirectory, $toolFile)) {
+  $toolAcl = Get-Acl -LiteralPath $toolTarget
+  Assert-WorkerCondition ($toolAcl.AreAccessRulesProtected) "Publisher tool inherits broad ACLs: $toolTarget"
+  foreach ($ordinarySid in $ordinarySids) { Assert-WorkerCondition (-not (Has-AllowSid $toolAcl $ordinarySid)) "Ordinary users can replace publisher tools: $toolTarget" }
+  Assert-WorkerCondition (Has-AllowSid $toolAcl $systemSid) "Publisher tool does not grant SYSTEM: $toolTarget"
+  Assert-WorkerCondition (Has-AllowSid $toolAcl $adminsSid) "Publisher tool does not grant Administrators: $toolTarget"
+  Assert-WorkerCondition (Has-AllowSid $toolAcl $runAsSid) "Publisher worker cannot execute ffprobe: $toolTarget"
+}
 
 if (!$SkipTaskLookup) {
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -140,6 +171,16 @@ if ($temporaryRoot) {
   $failedAsExpected = $false
   try { & $selfPath -ConfigPath $ConfigPath -BackendRuntimeConfigPath $BackendRuntimeConfigPath -SkipTaskLookup -SkipHealthProbe | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Publisher device serial is unsafe" }
   Assert-WorkerCondition $failedAsExpected "Negative unsafe serial fixture was not rejected"
+  [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
+
+  $supervisor = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "southfarm-publisher-supervisor.ps1"
+  $supervisorOutput = & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly
+  Assert-WorkerCondition (($supervisorOutput -join "`n") -eq "Publisher worker supervisor identity validation passed.") "Supervisor did not validate the exact configured serial/Android identity"
+  $badConfig = $originalConfigText | ConvertFrom-Json; $badConfig.android_id = "fedcba9876543210"
+  [IO.File]::WriteAllText($ConfigPath, ($badConfig | ConvertTo-Json -Compress))
+  $failedAsExpected = $false
+  try { & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Configured ADB serial no longer matches the expected Android ID." }
+  Assert-WorkerCondition $failedAsExpected "Supervisor accepted a different live Android identity"
   [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
 }
 

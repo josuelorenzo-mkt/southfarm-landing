@@ -89,7 +89,8 @@ class SafeAdb:
         return value
 
 class AdbDeviceRegistry:
-    def __init__(self, *, adb_path: str = DEFAULT_ADB, run: Callable[..., Any] = subprocess.run): self.adb_path, self._run = adb_path, run
+    def __init__(self, *, adb_path: str = DEFAULT_ADB, run: Callable[..., Any] = subprocess.run, expected_serial: str | None = None, expected_android_id: str | None = None):
+        self.adb_path, self._run, self.expected_serial, self.expected_android_id = adb_path, run, expected_serial, expected_android_id
     def list_output(self) -> str:
         result = self._run([self.adb_path, "devices", "-l"], shell=False, capture_output=True, text=True, timeout=20, check=False)
         if result.returncode != 0: raise PublisherError("ADB_UNAVAILABLE", "ADB device listing failed", retryable=True)
@@ -98,15 +99,17 @@ class AdbDeviceRegistry:
         endpoints = []
         for line in self.list_output().splitlines()[1:]:
             parts = line.split()
-            if len(parts) >= 2 and parts[1] == "device": endpoints.append(parts[0])
+            if len(parts) >= 2 and parts[1] == "device" and (self.expected_serial is None or parts[0] == self.expected_serial): endpoints.append(parts[0])
         found = []
         for serial in sorted(endpoints):
             android_id = SafeAdb(serial, adb_path=self.adb_path, run=self._run).android_id()
-            if android_id: found.append(AdbDevice(serial, android_id))
+            if android_id and (self.expected_android_id is None or android_id == self.expected_android_id): found.append(AdbDevice(serial, android_id))
         unique: dict[str, AdbDevice] = {}
         for item in found: unique.setdefault(item.android_id, item)
         return list(unique.values())
     def find(self, android_id: str) -> AdbDevice:
+        if self.expected_android_id is not None and android_id != self.expected_android_id:
+            raise PublisherError("DEVICE_IDENTITY_MISMATCH", "Backend device identity does not match configured Android device")
         for item in self.devices():
             if item.android_id == android_id: return item
         raise PublisherError("DEVICE_NOT_CONNECTED", "The assigned Android device is unavailable", retryable=True)

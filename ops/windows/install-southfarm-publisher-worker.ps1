@@ -12,6 +12,9 @@ param(
   [string]$MediaRoot = (Join-Path $env:ProgramData "SouthFarm\publish-media"),
   [string]$RuntimeRoot = (Join-Path $env:ProgramData "SouthFarm"),
   [string]$BackendRuntimeConfigPath = (Join-Path $env:ProgramData "SouthFarm\config\backend-runtime.json"),
+  [string]$BackendPath = (Join-Path $env:LOCALAPPDATA "SouthFarm\runtime\backend"),
+  [string]$NodePath = (Join-Path $env:LOCALAPPDATA "SouthFarm\node-v22.23.1-win-x64\node.exe"),
+  [string]$DatabasePath = (Join-Path $env:LOCALAPPDATA "SouthFarm\data\southfarm.db"),
   [string]$ForbiddenInstagramAccounts,
   [switch]$AllowAllInstagramAccounts,
   [string]$WorkerToken,
@@ -48,10 +51,11 @@ if ([string]::IsNullOrWhiteSpace($FfprobeSourcePath)) {
   }
   if ([string]::IsNullOrWhiteSpace($FfprobeSourcePath)) { throw "ffprobe.exe was not found on PATH or under the current user's WinGet packages; pass FfprobeSourcePath explicitly." }
 }
-$WorkerPath = FullPath $WorkerPath; $AdbPath = FullPath $AdbPath; $FfprobeSourcePath = FullPath $FfprobeSourcePath; $MediaRoot = FullPath $MediaRoot; $RuntimeRoot = FullPath $RuntimeRoot; $BackendRuntimeConfigPath = FullPath $BackendRuntimeConfigPath
+$WorkerPath = FullPath $WorkerPath; $AdbPath = FullPath $AdbPath; $FfprobeSourcePath = FullPath $FfprobeSourcePath; $MediaRoot = FullPath $MediaRoot; $RuntimeRoot = FullPath $RuntimeRoot; $BackendRuntimeConfigPath = FullPath $BackendRuntimeConfigPath; $BackendPath = FullPath $BackendPath; $NodePath = FullPath $NodePath; $DatabasePath = FullPath $DatabasePath
 if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = (Get-Command python.exe -ErrorAction Stop).Source }
 $PythonPath = FullPath $PythonPath
-Assert-Path $PythonPath "Python executable"; Assert-Path $AdbPath "ADB executable"; Assert-Path $FfprobeSourcePath "ffprobe executable"
+Assert-Path $PythonPath "Python executable"; Assert-Path $AdbPath "ADB executable"; Assert-Path $FfprobeSourcePath "ffprobe executable"; Assert-Path $NodePath "Node executable"; Assert-Path $DatabasePath "SouthFarm database"
+if (!(Test-Path -LiteralPath (Join-Path $BackendPath "node_modules\better-sqlite3") -PathType Container)) { throw "Backend better-sqlite3 runtime not found: $BackendPath" }
 if (!(Test-Path -LiteralPath (Join-Path $WorkerPath "southfarm_publisher\runner.py"))) { throw "Publisher worker module not found: $WorkerPath" }
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent(); $requested = New-Object Security.Principal.NTAccount($RunAsUser); $requestedSid = $requested.Translate([Security.Principal.SecurityIdentifier]).Value
 if ($requestedSid -ne $currentIdentity.User.Value) { throw "Run this script while signed in as RunAsUser; validation from an administrator's different profile is rejected." }
@@ -61,6 +65,13 @@ $adbState = (& $AdbPath -s $DeviceSerial get-state 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $adbState -ne "device") { throw "The exact DeviceSerial is not authorized for ADB in the RunAsUser profile." }
 $androidId = (& $AdbPath -s $DeviceSerial shell settings get secure android_id 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $androidId -notmatch '^[A-Fa-f0-9]{8,32}$') { throw "Could not verify android_id for the exact DeviceSerial." }
+$deviceLookup = "const D=require('better-sqlite3');const d=new D(process.argv[1],{readonly:true});const r=d.prepare('SELECT id, device_id FROM devices WHERE id=? AND lifecycle_status != ?').get(Number(process.argv[2]),'revoked');d.close();if(!r){process.exit(4)};process.stdout.write(JSON.stringify(r));"
+Push-Location -LiteralPath $BackendPath
+try { $deviceRowJson = & $NodePath -e $deviceLookup $DatabasePath $DeviceId 2>$null; $deviceLookupExit = $LASTEXITCODE }
+finally { Pop-Location }
+if ($deviceLookupExit -ne 0 -or [string]::IsNullOrWhiteSpace(($deviceRowJson -join ""))) { throw "DeviceId does not identify an active SouthFarm device." }
+$deviceRow = ($deviceRowJson -join "") | ConvertFrom-Json
+if ([string]$deviceRow.device_id -cne $androidId) { throw "DeviceId is registered to a different Android ID than DeviceSerial." }
 
 $configDir = Join-Path $RuntimeRoot "config"; $logDir = Join-Path $RuntimeRoot "logs"; $evidenceRoot = Join-Path $RuntimeRoot "publish-evidence"; $toolPath = Join-Path $RuntimeRoot "tools\ffmpeg\ffprobe.exe"; $workerConfigPath = Join-Path $configDir "publisher-worker.json"; $supervisorPath = FullPath (Join-Path $scriptRoot "southfarm-publisher-supervisor.ps1")
 if ([string]::IsNullOrWhiteSpace($WorkerToken)) { $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $WorkerToken = [Convert]::ToBase64String($bytes) }
@@ -76,7 +87,9 @@ Set-ProtectedDirectoryAcl $configDir @{ $systemSid="FullControl"; $adminsSid="Fu
 Set-ProtectedDirectoryAcl $logDir @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="Modify" }
 Set-ProtectedDirectoryAcl $MediaRoot @{ $systemSid="FullControl"; $adminsSid="FullControl" }
 Set-ProtectedDirectoryAcl $evidenceRoot @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="Modify" }
+Set-ProtectedDirectoryAcl (Split-Path -Parent $toolPath) @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 Copy-Item -LiteralPath $FfprobeSourcePath -Destination $toolPath -Force
+Set-ProtectedFileAcl $toolPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 $workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
 [IO.File]::WriteAllText($workerConfigPath, ($workerConfig | ConvertTo-Json -Compress))
 Set-ProtectedFileAcl $workerConfigPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }

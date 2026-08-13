@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import threading
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from southfarm_publisher.models import ClaimedJob, JobCancelled, PublicationJob
@@ -245,5 +246,13 @@ class RunnerTests(unittest.TestCase):
 
     def test_config_rejects_missing_or_invalid_adb_without_secret_echo(self):
         with self.assertRaises(Exception) as raised:
-            _config({"SOUTHFARM_API_URL": "https://api.test", "SOUTHFARM_PUBLISHER_WORKER_TOKEN": "very-secret", "SOUTHFARM_PUBLISHER_WORKER_ID": "worker", "SOUTHFARM_PUBLISHER_DEVICE_ID": "5", "SOUTHFARM_ADB": "C:/not-present/adb.exe"})
+            _config({"SOUTHFARM_API_URL": "https://api.test", "SOUTHFARM_PUBLISHER_WORKER_TOKEN": "very-secret", "SOUTHFARM_PUBLISHER_WORKER_ID": "worker", "SOUTHFARM_PUBLISHER_DEVICE_ID": "5", "SOUTHFARM_ADB": "C:/not-present/adb.exe", "SOUTHFARM_ADB_SERIAL": "serial", "SOUTHFARM_EXPECTED_ANDROID_ID": "android-id"})
         self.assertNotIn("very-secret", str(raised.exception))
+
+    def test_config_binds_registry_to_exact_serial_and_android_identity(self):
+        env = {"SOUTHFARM_API_URL": "https://api.test", "SOUTHFARM_PUBLISHER_WORKER_TOKEN": "secret", "SOUTHFARM_PUBLISHER_WORKER_ID": "worker", "SOUTHFARM_PUBLISHER_DEVICE_ID": "5", "SOUTHFARM_ADB": "C:/adb.exe", "SOUTHFARM_ADB_SERIAL": "usb-exact", "SOUTHFARM_EXPECTED_ANDROID_ID": "0123456789abcdef", "SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS": "protected"}
+        with patch("southfarm_publisher.runner.os.path.isfile", return_value=True), patch("southfarm_publisher.runner.os.access", return_value=True):
+            _api, registry, device_id, _forbidden = _config(env)
+        self.assertEqual(device_id, 5)
+        self.assertEqual(registry.expected_serial, "usb-exact")
+        self.assertEqual(registry.expected_android_id, "0123456789abcdef")
