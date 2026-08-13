@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+import threading
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from southfarm_publisher.models import ClaimedJob, JobCancelled, PublicationJob
@@ -108,6 +109,25 @@ class RunnerTests(unittest.TestCase):
             def finish(self, *args, **kwargs): raise RuntimeError("finish unavailable")
         runner = PublicationRunner(BrokenFinish(self.job()), FakeRegistry(), {"instagram": Adapter()}, heartbeat_interval=999)
         with self.assertRaisesRegex(RuntimeError, "finish unavailable"): runner.run_once(5)
+
+    def test_terminal_finish_waits_for_inflight_heartbeat(self):
+        entered, release, complete, finished = threading.Event(), threading.Event(), threading.Event(), threading.Event()
+        class BlockingApi(FakeApi):
+            def __init__(self, job): super().__init__(job); self.heartbeats = 0
+            def heartbeat(self, job_id, token):
+                self.heartbeats += 1
+                if self.heartbeats == 2:
+                    entered.set(); release.wait(2)
+                return {"cancel_requested": False}
+            def finish(self, *args, **kwargs):
+                finished.set(); return super().finish(*args, **kwargs)
+        class WaitAdapter(Adapter):
+            def prepare(self, job, device): entered.wait(2); raise RuntimeError("pre-final failure")
+        api = BlockingApi(self.job()); runner = PublicationRunner(api, FakeRegistry(), {"youtube": WaitAdapter()}, heartbeat_interval=1)
+        thread = threading.Thread(target=lambda: (runner.run_once(5), complete.set()))
+        thread.start(); self.assertTrue(entered.wait(2)); self.assertFalse(finished.wait(1.25), "finish raced the in-flight heartbeat")
+        release.set(); thread.join(3)
+        self.assertTrue(complete.is_set()); self.assertIn(("finish", "failed"), api.calls); self.assertFalse(thread.is_alive())
 
     def test_run_forever_uses_bounded_idle_backoff(self):
         runner = PublicationRunner(FakeApi(self.job()), FakeRegistry(), {"youtube": Adapter()})

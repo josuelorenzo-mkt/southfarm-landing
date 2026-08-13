@@ -46,7 +46,17 @@ class PublicationRunner:
             while not stop.wait(self.heartbeat_interval):
                 try: self._heartbeat_once(job.id, token)
                 except Exception as error: heartbeat_error.append(error); stop.set()
-        thread = threading.Thread(target=heartbeat_loop, daemon=True); thread.start()
+        thread = threading.Thread(target=heartbeat_loop); thread.start()
+        heartbeat_stopped = False
+        def stop_heartbeat() -> None:
+            nonlocal heartbeat_stopped
+            if heartbeat_stopped: return
+            stop.set()
+            if threading.current_thread() is not thread: thread.join()
+            heartbeat_stopped = True
+        def terminal_finish(status: str, **metadata: Any) -> None:
+            stop_heartbeat()
+            self.api.finish(job.id, token, status, **metadata)
         try:
             if adapter is None: raise PublisherError("CONFIG_ADAPTER_MISSING", "No publisher adapter is configured")
             identity = self._available_identity(self.api.availability(job.device_id), job.id); device = self.registry.open(identity); self._heartbeat_once(job.id, token)
@@ -68,14 +78,14 @@ class PublicationRunner:
                 adapter.publish(job, device, checkpoint)
                 if not state["final_persisted"]: raise PublisherError("FINAL_ACTION_MISSING", "Adapter did not checkpoint final publishing action")
                 checkpoint("verifying", 95); identity = adapter.verify(job, device)
-                self.api.finish(job.id, token, "completed", remote_post_identity=identity)
+                terminal_finish("completed", remote_post_identity=identity)
         except JobCancelled:
-            self.api.finish(job.id, token, "review_required" if state["final_intent"] else "cancelled", error_code="JOB_CANCELLED")
+            terminal_finish("review_required" if state["final_intent"] else "cancelled", error_code="JOB_CANCELLED")
         except Exception as error:
             uncertain = state["final_intent"] or isinstance(error, PublisherError) and error.final_action_uncertain
-            self.api.finish(job.id, token, "review_required" if uncertain else "failed", error_code=getattr(error, "code", "WORKER_ERROR"))
+            terminal_finish("review_required" if uncertain else "failed", error_code=getattr(error, "code", "WORKER_ERROR"))
         finally:
-            stop.set(); thread.join(timeout=1)
+            stop_heartbeat()
             if device is not None:
                 try: adapter.cleanup(job, device)
                 except Exception: pass
