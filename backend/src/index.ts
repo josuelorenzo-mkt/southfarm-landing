@@ -10,6 +10,8 @@ import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
 import { applyPublicationMigrations } from './publications-migrations.js';
+import { PublicationStore } from './publications-domain.js';
+import { registerPublicationRoutes } from './publications-routes.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
@@ -33,6 +35,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
 const TASK_LEASE_SECONDS = Math.max(30, Number(process.env.SOUTHFARM_TASK_LEASE_SECONDS || 45));
 const LEGACY_WARMUP_DEDUPE_WINDOW_MS = Math.max(
   60_000,
@@ -355,6 +358,8 @@ db.exec(`
   applyAuthMigrations(db);
   applyPublicationMigrations(db);
   cleanupRefreshSessions(db, new Date().toISOString());
+
+const publicationStore = new PublicationStore(db);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -2230,6 +2235,15 @@ function requireRole(...roles: TeamRole[]) {
     next();
   };
 }
+
+registerPublicationRoutes({
+  app,
+  db,
+  store: publicationStore,
+  auth,
+  requireRole,
+  mediaRoot: PUBLICATION_MEDIA_ROOT,
+});
 
 function authUserView(userId: number): any | null {
   const user = db.prepare('SELECT id, email, name, created_at FROM users WHERE id = ?').get(userId) as any;

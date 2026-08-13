@@ -10,6 +10,8 @@ import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
 import { applyPublicationMigrations } from './publications-migrations.js';
+import { PublicationStore } from './publications-domain.js';
+import { registerPublicationRoutes } from './publications-routes.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import { BUENOS_AIRES_TIMEZONE, DAILY_MAX_WARMUP_SECONDS, DAILY_MIN_WARMUP_SECONDS, DEFAULT_FIXED_WARMUP_SECONDS, chooseDailyTargetSeconds, chooseSessionCount, expiresAtIso, isTaskExpired, isTaskOverdue, localDateTimeToIso, overdueAtIso, splitWarmupDurationSeconds, } from './scheduler.js';
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +19,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
+const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
 const TASK_LEASE_SECONDS = Math.max(30, Number(process.env.SOUTHFARM_TASK_LEASE_SECONDS || 45));
 const LEGACY_WARMUP_DEDUPE_WINDOW_MS = Math.max(60000, Number(process.env.SOUTHFARM_LEGACY_WARMUP_DEDUPE_WINDOW_MS || 10 * 60 * 1000));
 const DEVICE_ONLINE_WINDOW_SECONDS = Math.max(30, Number(process.env.SOUTHFARM_DEVICE_ONLINE_WINDOW_SECONDS || 90));
@@ -303,6 +306,7 @@ applySchedulerMigrations(db);
 applyAuthMigrations(db);
 applyPublicationMigrations(db);
 cleanupRefreshSessions(db, new Date().toISOString());
+const publicationStore = new PublicationStore(db);
 function nowIso() {
     return new Date().toISOString();
 }
@@ -1805,6 +1809,14 @@ function requireRole(...roles) {
         next();
     };
 }
+registerPublicationRoutes({
+    app,
+    db,
+    store: publicationStore,
+    auth,
+    requireRole,
+    mediaRoot: PUBLICATION_MEDIA_ROOT,
+});
 function authUserView(userId) {
     const user = db.prepare('SELECT id, email, name, created_at FROM users WHERE id = ?').get(userId);
     const membership = workspaceMembership(userId);
