@@ -66,7 +66,13 @@ if ($CreateTemporaryFixture) {
   $toolFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($fixtureSid)), "ReadAndExecute", "Allow")))
   Set-Acl -LiteralPath $fixtureFfprobe -AclObject $toolFileAcl
   $fakeAdb = Join-Path $temporaryRoot "fake-adb.cmd"
-  [IO.File]::WriteAllText($fakeAdb, "@echo off`r`nif `%3==get-state (echo device) else (echo 0123456789abcdef)`r`nexit /b 0`r`n")
+  [IO.File]::WriteAllText($fakeAdb, @'
+@echo off
+if "%3"=="get-state" echo device& exit /b 0
+if "%4"=="settings" echo 0123456789abcdef& exit /b 0
+echo ^<map^>^<string name="device_id"^>legacy-device-id^</string^>^<string name="installation_id"^>legacy-installation-id^</string^>^</map^>
+exit /b 0
+'@)
   $fixture.adb_path = $fakeAdb
   [IO.File]::WriteAllText($ConfigPath, ($fixture | ConvertTo-Json -Compress))
   $backendConfig = Join-Path $temporaryRoot "backend-runtime.json"
@@ -90,8 +96,8 @@ const Database = require("better-sqlite3");
 const db = new Database(process.argv[2]);
 const action = process.argv[3];
 if (action === "create") {
-  db.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,lifecycle_status TEXT)");
-  db.prepare("INSERT INTO devices VALUES(?,?,?)").run(1, "0123456789abcdef", "active");
+  db.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,installation_id TEXT,lifecycle_status TEXT)");
+  db.prepare("INSERT INTO devices VALUES(?,?,?,?)").run(1, "0123456789abcdef", "legacy-installation-id", "active");
 } else if (action === "set-id") {
   db.prepare("UPDATE devices SET device_id=? WHERE id=1").run(process.argv[4]);
 } else {
@@ -119,6 +125,15 @@ db.close();
   try { & $installer @validationArgs | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "DeviceId is registered to a different Android ID than DeviceSerial." }
   Assert-WorkerCondition $failedAsExpected "DeviceId/DeviceSerial mismatch was not rejected"
   Push-Location -LiteralPath $backendPath
+  try { & $nodePath $fixtureDbScript $fixtureDatabase set-id "legacy-device-id" }
+  finally { Pop-Location }
+  $failedAsExpected = $false
+  try { & $installer @validationArgs | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "DeviceId is registered to a different Android ID than DeviceSerial." }
+  Assert-WorkerCondition $failedAsExpected "Legacy device identity was accepted without explicit opt-in"
+  $legacyValidationArgs = @{} + $validationArgs; $legacyValidationArgs.LegacyAppIdentity = $true
+  $legacyValidationOutput = & $installer @legacyValidationArgs
+  Assert-WorkerCondition (($legacyValidationOutput -join "`n") -eq "Validated publisher worker installation inputs; no config or task was changed.") "Legacy device identity fixture did not pass with explicit opt-in"
+  Push-Location -LiteralPath $backendPath
   try { & $nodePath $fixtureDbScript $fixtureDatabase set-id "0123456789abcdef" }
   finally { Pop-Location }
   [IO.File]::WriteAllText($backendConfig, (@{ jwt_secret="fixture-only"; publisher_worker_token=$fixture.worker_token; publisher_worker_enabled=$true; publication_media_root=$mediaRoot; ffprobe_path=$fixture.ffprobe_path } | ConvertTo-Json -Compress))
@@ -145,6 +160,11 @@ Assert-WorkerCondition ([IO.Path]::IsPathRooted([string]$config.media_root)) "Pu
 Assert-WorkerCondition ([IO.Path]::IsPathRooted([string]$config.evidence_root)) "Publisher evidence root must be absolute"
 Assert-WorkerCondition ([string]$config.device_serial -match '^[A-Za-z0-9._:-]+$') "Publisher device serial is unsafe"
 Assert-WorkerCondition ([string]$config.android_id -match '^[A-Fa-f0-9]{8,32}$') "Publisher Android ID is invalid"
+if ([bool]$config.legacy_app_identity) {
+  foreach ($name in @("southfarm_package", "legacy_device_id", "legacy_installation_id")) {
+    Assert-WorkerCondition (![string]::IsNullOrWhiteSpace([string]$config.$name)) "Legacy publisher worker config is missing $name"
+  }
+}
 
 $acl = Get-Acl -LiteralPath $ConfigPath
 Assert-WorkerCondition ($acl.AreAccessRulesProtected) "Publisher worker config inherits broad ACLs"
@@ -231,6 +251,21 @@ if ($temporaryRoot) {
   $failedAsExpected = $false
   try { & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Configured ADB serial no longer matches the expected Android ID." }
   Assert-WorkerCondition $failedAsExpected "Supervisor accepted a different live Android identity"
+  [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
+
+  $legacyConfig = $originalConfigText | ConvertFrom-Json
+  $legacyConfig | Add-Member -NotePropertyName legacy_app_identity -NotePropertyValue $true
+  $legacyConfig | Add-Member -NotePropertyName southfarm_package -NotePropertyValue "com.example.southfarm_app"
+  $legacyConfig | Add-Member -NotePropertyName legacy_device_id -NotePropertyValue "legacy-device-id"
+  $legacyConfig | Add-Member -NotePropertyName legacy_installation_id -NotePropertyValue "legacy-installation-id"
+  [IO.File]::WriteAllText($ConfigPath, ($legacyConfig | ConvertTo-Json -Compress))
+  $supervisorOutput = & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly
+  Assert-WorkerCondition (($supervisorOutput -join "`n") -eq "Publisher worker supervisor identity validation passed.") "Supervisor did not validate legacy private identity"
+  $legacyConfig.legacy_installation_id = "different-installation"
+  [IO.File]::WriteAllText($ConfigPath, ($legacyConfig | ConvertTo-Json -Compress))
+  $failedAsExpected = $false
+  try { & $supervisor -ConfigPath $ConfigPath -LogDirectory $logRoot -ValidateOnly | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Configured SouthFarm private identity no longer matches the expected device." }
+  Assert-WorkerCondition $failedAsExpected "Supervisor accepted a different legacy private identity"
   [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
 
   $badToolAcl = New-Object System.Security.AccessControl.FileSecurity; $badToolAcl.SetAccessRuleProtection($true, $false)

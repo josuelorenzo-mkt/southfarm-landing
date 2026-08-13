@@ -17,6 +17,8 @@ param(
   [string]$DatabasePath = (Join-Path $env:LOCALAPPDATA "SouthFarm\data\southfarm.db"),
   [string]$ForbiddenInstagramAccounts,
   [switch]$AllowAllInstagramAccounts,
+  [switch]$LegacyAppIdentity,
+  [string]$SouthFarmPackage = "com.example.southfarm_app",
   [string]$WorkerToken,
   [switch]$ValidationOnly
 )
@@ -35,9 +37,18 @@ function Set-ProtectedDirectoryAcl([string]$Path, [hashtable]$AccountRights) {
   foreach ($sid in $AccountRights.Keys) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), $AccountRights[$sid], "ContainerInherit,ObjectInherit", "None", "Allow"))) }
   Set-Acl -LiteralPath $Path -AclObject $acl
 }
+function Get-AppPrivateIdentity([string]$Adb, [string]$Serial, [string]$PackageName) {
+  $prefs = (& $Adb -s $Serial shell run-as $PackageName cat "shared_prefs/FlutterSharedPreferences.xml" 2>$null | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($prefs)) { throw "Could not read SouthFarm private identity for the exact DeviceSerial." }
+  $device = [regex]::Match($prefs, '<string name="(?:flutter\\.)?device_id">([^<]+)</string>')
+  $installation = [regex]::Match($prefs, '<string name="(?:flutter\\.)?installation_id">([^<]+)</string>')
+  if (!$device.Success -or !$installation.Success) { throw "SouthFarm private identity is incomplete for the exact DeviceSerial." }
+  return [pscustomobject]@{ device_id=$device.Groups[1].Value; installation_id=$installation.Groups[1].Value }
+}
 
 if ($DeviceId -le 0) { throw "DeviceId must be positive." }
 if ([string]::IsNullOrWhiteSpace($DeviceSerial) -or $DeviceSerial -notmatch '^[A-Za-z0-9._:-]+$') { throw "DeviceSerial must be an exact safe ADB serial." }
+if ([string]::IsNullOrWhiteSpace($SouthFarmPackage) -or $SouthFarmPackage -notmatch '^[A-Za-z0-9._]+$') { throw "SouthFarmPackage must be an exact safe Android package name." }
 if ([string]::IsNullOrWhiteSpace($ForbiddenInstagramAccounts) -and !$AllowAllInstagramAccounts) { throw "Provide ForbiddenInstagramAccounts or explicitly set AllowAllInstagramAccounts." }
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($WorkerPath)) { $WorkerPath = Join-Path $scriptRoot "..\..\publisher_worker" }
@@ -67,13 +78,17 @@ $adbState = (& $AdbPath -s $DeviceSerial get-state 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $adbState -ne "device") { throw "The exact DeviceSerial is not authorized for ADB in the RunAsUser profile." }
 $androidId = (& $AdbPath -s $DeviceSerial shell settings get secure android_id 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $androidId -notmatch '^[A-Fa-f0-9]{8,32}$') { throw "Could not verify android_id for the exact DeviceSerial." }
-$deviceLookup = "const D=require('better-sqlite3');const d=new D(process.argv[1],{readonly:true});const r=d.prepare('SELECT id, device_id FROM devices WHERE id=? AND lifecycle_status != ?').get(Number(process.argv[2]),'revoked');d.close();if(!r){process.exit(4)};process.stdout.write(JSON.stringify(r));"
+$deviceLookup = "const D=require('better-sqlite3');const d=new D(process.argv[1],{readonly:true});const r=d.prepare('SELECT id, device_id, installation_id FROM devices WHERE id=? AND lifecycle_status != ?').get(Number(process.argv[2]),'revoked');d.close();if(!r){process.exit(4)};process.stdout.write(JSON.stringify(r));"
 Push-Location -LiteralPath $BackendPath
 try { $deviceRowJson = & $NodePath -e $deviceLookup $DatabasePath $DeviceId 2>$null; $deviceLookupExit = $LASTEXITCODE }
 finally { Pop-Location }
 if ($deviceLookupExit -ne 0 -or [string]::IsNullOrWhiteSpace(($deviceRowJson -join ""))) { throw "DeviceId does not identify an active SouthFarm device." }
 $deviceRow = ($deviceRowJson -join "") | ConvertFrom-Json
-if ([string]$deviceRow.device_id -cne $androidId) { throw "DeviceId is registered to a different Android ID than DeviceSerial." }
+if ($LegacyAppIdentity) {
+  $appIdentity = Get-AppPrivateIdentity $AdbPath $DeviceSerial $SouthFarmPackage
+  if ([string]$deviceRow.device_id -cne [string]$appIdentity.device_id -or [string]$deviceRow.installation_id -cne [string]$appIdentity.installation_id) { throw "SouthFarm private identity does not match the requested backend device." }
+}
+if ([string]$deviceRow.device_id -cne $androidId -and !$LegacyAppIdentity) { throw "DeviceId is registered to a different Android ID than DeviceSerial." }
 
 $configDir = Join-Path $RuntimeRoot "config"; $logDir = Join-Path $RuntimeRoot "logs"; $evidenceRoot = Join-Path $RuntimeRoot "publish-evidence"; $toolPath = Join-Path $RuntimeRoot "tools\ffmpeg\ffprobe.exe"; $workerConfigPath = Join-Path $configDir "publisher-worker.json"; $supervisorPath = FullPath (Join-Path $scriptRoot "southfarm-publisher-supervisor.ps1")
 if ([string]::IsNullOrWhiteSpace($WorkerToken)) { $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $WorkerToken = [Convert]::ToBase64String($bytes) }
@@ -92,7 +107,7 @@ Set-ProtectedDirectoryAcl $evidenceRoot @{ $systemSid="FullControl"; $adminsSid=
 Set-ProtectedDirectoryAcl (Split-Path -Parent $toolPath) @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 Copy-Item -LiteralPath $FfprobeSourcePath -Destination $toolPath -Force
 Set-ProtectedFileAcl $toolPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
-$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
+$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; legacy_app_identity=[bool]$LegacyAppIdentity; southfarm_package=$SouthFarmPackage; legacy_device_id=if ($LegacyAppIdentity) { [string]$appIdentity.device_id } else { "" }; legacy_installation_id=if ($LegacyAppIdentity) { [string]$appIdentity.installation_id } else { "" }; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
 [IO.File]::WriteAllText($workerConfigPath, ($workerConfig | ConvertTo-Json -Compress))
 Set-ProtectedFileAcl $workerConfigPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 
