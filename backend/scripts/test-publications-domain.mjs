@@ -106,6 +106,8 @@ const steps = [
   ['preparing', 10], ['transferring', 20], ['selecting_media', 35], ['editing', 50],
   ['captioning', 65], ['ready_to_publish', 80], ['publishing', 90],
 ];
+assert.throws(() => store.checkpoint(job.id, worker, now, { step: 'publishing', progressPercent: 90 }), /finalAction/);
+assert.throws(() => store.checkpoint(job.id, worker, now, { step: 'preparing', progressPercent: 10, finalAction: true }), /finalAction/);
 for (const [step, progressPercent] of steps) {
   const checkpoint = store.checkpoint(job.id, worker, now, { step, progressPercent, finalAction: step === 'publishing' });
   assert.equal(checkpoint.status, step);
