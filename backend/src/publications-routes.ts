@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
@@ -192,8 +192,8 @@ function mediaForJob(db: SqliteDatabase, job: any): any | null {
 }
 
 export function registerPublicationRoutes({
-  app, db, store, auth, requireRole, mediaRoot, testHooks, inspectVideo = inspectPublicationVideo,
-}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string; inspectVideo?: typeof inspectPublicationVideo; testHooks?: { afterRename?: (req: any, res: Response) => Promise<void> | void; beforeReschedule?: () => void; beforeCancel?: () => void } }): void {
+  app, db, store, auth, requireRole, mediaRoot, workerTokenHash, testHooks, inspectVideo = inspectPublicationVideo,
+}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string; workerTokenHash?: Buffer | string; inspectVideo?: typeof inspectPublicationVideo; testHooks?: { afterRename?: (req: any, res: Response) => Promise<void> | void; beforeReschedule?: () => void; beforeCancel?: () => void } }): void {
   const root = path.resolve(mediaRoot);
   const tempRoot = path.join(root, '.tmp');
   fs.mkdirSync(tempRoot, { recursive: true });
@@ -217,6 +217,8 @@ export function registerPublicationRoutes({
     if (req.user?.authType !== 'user') { res.status(403).json({ error_code: 'USER_SESSION_REQUIRED', error: 'A user session is required for publications' }); return; }
     next();
   };
+  const cleanupTokenHash = workerTokenHash ? (Buffer.isBuffer(workerTokenHash) ? workerTokenHash : Buffer.from(workerTokenHash, 'hex')) : null;
+  const cleanupMac = (nonce: string): string => createHmac('sha256', cleanupTokenHash!).update(`southfarm-test-cleanup-v1.${nonce}`).digest('base64url');
   const upload = multer({
     storage: multer.diskStorage({
       destination: (_req, _file, callback) => callback(null, tempRoot),
@@ -357,6 +359,24 @@ export function registerPublicationRoutes({
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
       if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
+    }
+  });
+
+  app.post('/api/publications/:id/test-cleanup-authorizations', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req: any, res: Response) => {
+    try {
+      if (!cleanupTokenHash || cleanupTokenHash.length !== 32) routeError(503, 'CLEANUP_UNAVAILABLE', 'Cleanup worker is not configured');
+      const id = parseId(req.params.id, 'publication_id'); const body = req.body || {}; const workspaceId = Number(req.user.workspaceId);
+      const platform = typeof body.platform === 'string' ? body.platform.trim() : ''; const serial = typeof body.serial === 'string' ? body.serial.trim() : ''; const androidId = typeof body.android_id === 'string' ? body.android_id.trim() : ''; const account = typeof body.account === 'string' ? body.account.trim() : ''; const identity = typeof body.expected_identity === 'string' ? body.expected_identity.trim() : ''; const workerId = typeof body.worker_id === 'string' ? body.worker_id.trim() : ''; const deviceId = Number(body.device_id); const baseline = body.baseline;
+      if (!platform || !serial || !androidId || !account || !identity || !workerId || !Number.isInteger(deviceId) || deviceId <= 0 || !Array.isArray(baseline) || !baseline.length || baseline.some((item: unknown) => typeof item !== 'string' || !item.trim()) || baseline.includes(identity)) routeError(400, 'CLEANUP_AUTH_INVALID', 'Cleanup authorization proof is invalid');
+      const job: any = db.prepare(`SELECT job.*, account.username, device.device_id AS android_id FROM publication_jobs job JOIN social_accounts account ON account.id = job.social_account_id JOIN devices device ON device.id = job.device_id WHERE job.id = ? AND job.workspace_id = ? AND job.device_id = ?`).get(id, workspaceId, deviceId);
+      if (!job || Number(job.test_mode) !== 1 || job.status !== 'completed' || !job.verified_at || !job.remote_post_identity || job.platform !== platform || job.username !== account || job.android_id !== androidId || job.remote_post_identity !== identity) routeError(409, 'CLEANUP_AUTH_INELIGIBLE', 'Job is not an eligible verified test publication');
+      const payload = { schema: 1, marker: 'SOUTHFARM_AUTHORIZED_TEST_POST', job_id: id, job_status: 'completed', platform, serial, android_id: androidId, account, expected_identity: identity, baseline, test_mode: true };
+      const nonce = randomUUID(); const now = new Date(); const expiresAt = new Date(now.getTime() + 5 * 60 * 1000).toISOString();
+      db.prepare('INSERT INTO publication_cleanup_authorizations (nonce, job_id, workspace_id, device_id, social_account_id, worker_id, issued_by_user_id, payload, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(nonce, id, workspaceId, deviceId, job.social_account_id, workerId, Number(req.user.userId), JSON.stringify(payload), expiresAt, now.toISOString());
+      res.status(201).json({ authorization: `${nonce}.${cleanupMac(nonce)}`, expires_at: expiresAt, cleanup: payload });
+    } catch (error: any) {
+      if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+      return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to authorize cleanup' });
     }
   });
 }

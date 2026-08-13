@@ -34,10 +34,10 @@ class Adapter:
 
 class AuthorizationClient:
     def __init__(self, authorization): self.authorization, self.calls = authorization, []
-    def validate_cleanup_authorization(self, authorization):
-        self.calls.append(("validate", authorization)); return self.authorization
-    def consume_cleanup_authorization(self, authorization):
-        self.calls.append(("consume", authorization)); return self.authorization
+    def validate_cleanup_authorization(self, authorization, device_id):
+        self.calls.append(("validate", authorization, device_id)); return self.authorization
+    def consume_cleanup_authorization(self, authorization, device_id):
+        self.calls.append(("consume", authorization, device_id)); return self.authorization
 
 
 def manifest(**overrides):
@@ -51,7 +51,7 @@ class CleanupCliTests(unittest.TestCase):
             path = Path(directory) / "manifest.json"; path.write_text(json.dumps(value), encoding="utf-8")
             adapter = Adapter(); device = Device("com.instagram.android", nodes or [{"text": "safe.account"}, {"content-desc": "new reel"}, {"content-desc": "old reel"}]); registry = Registry(device); output = []
             client = AuthorizationClient(authorized or value)
-            result = execute_cleanup(["--manifest", str(path), "--platform", "instagram", "--serial", "USB-1", "--android-id", "android-1", "--account", "safe.account", *args], registry_factory=lambda **kwargs: registry, adapter_factory=lambda platform, account: adapter, authorization_client=client, emit=output.append)
+            result = execute_cleanup(["--manifest", str(path), "--platform", "instagram", "--serial", "USB-1", "--android-id", "android-1", "--account", "safe.account", "--device-id", "42", *args], registry_factory=lambda **kwargs: registry, adapter_factory=lambda platform, account: adapter, authorization_client=client, emit=output.append)
             return result, adapter, device, registry, output, client
 
     def test_no_arguments_rejected(self):
@@ -63,7 +63,7 @@ class CleanupCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "validated")
         self.assertEqual(adapter.cleaned, []); self.assertEqual(device.taps, [])
         self.assertNotIn("safe.account", json.dumps(output)); self.assertNotIn("new reel", json.dumps(output))
-        self.assertEqual(client.calls, [("validate", "signed-server-token")])
+        self.assertEqual(client.calls, [("validate", "signed-server-token", 42)])
 
     def test_forged_local_manifest_is_rejected_before_adb(self):
         signed = manifest()
@@ -97,7 +97,7 @@ class CleanupCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "deleted")
         self.assertEqual(adapter.cleaned, [("new reel", ["safe.account", "old reel"])])
         self.assertEqual(registry.opens, ["android-1"])
-        self.assertEqual(client.calls, [("validate", "signed-server-token"), ("consume", "signed-server-token")])
+        self.assertEqual(client.calls, [("validate", "signed-server-token", 42), ("consume", "signed-server-token", 42)])
 
 
 if __name__ == "__main__": unittest.main()

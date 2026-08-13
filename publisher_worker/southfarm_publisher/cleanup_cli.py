@@ -26,6 +26,7 @@ def _arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--serial", required=True)
     parser.add_argument("--android-id", required=True)
     parser.add_argument("--account", required=True)
+    parser.add_argument("--device-id", required=True, type=int)
     parser.add_argument("--adb", default=DEFAULT_ADB)
     parser.add_argument("--api-url")
     parser.add_argument("--worker-token")
@@ -67,7 +68,9 @@ def execute_cleanup(argv: list[str], *, registry_factory: Callable[..., Any] = A
         if not args.api_url or not args.worker_token or not args.worker_id:
             raise PublisherError("CLEANUP_AUTHORIZATION_REQUIRED", "Cleanup requires a live backend authorization client")
         authorization_client = PublisherApiClient(args.api_url, args.worker_token, args.worker_id)
-    authorized = authorization_client.validate_cleanup_authorization(manifest["authorization"])
+    if args.device_id <= 0:
+        raise PublisherError("CLEANUP_ARGS_INVALID", "Cleanup arguments are incomplete or invalid")
+    authorized = authorization_client.validate_cleanup_authorization(manifest["authorization"], args.device_id)
     if not isinstance(authorized, dict) or any(authorized.get(key) != manifest[key] for key in manifest if key != "authorization"):
         raise PublisherError("CLEANUP_PROVENANCE_MISMATCH", "Backend authorization does not match cleanup provenance")
     registry = registry_factory(adb_path=args.adb, expected_serial=args.serial, expected_android_id=args.android_id)
@@ -78,7 +81,7 @@ def execute_cleanup(argv: list[str], *, registry_factory: Callable[..., Any] = A
     adapter._cleanup_preflight(manifest["expected_identity"], manifest["baseline"], device)
     result = {"status": "validated", "job_id": manifest["job_id"], "platform": args.platform, "applied": False}
     if args.apply:
-        consumed = authorization_client.consume_cleanup_authorization(manifest["authorization"])
+        consumed = authorization_client.consume_cleanup_authorization(manifest["authorization"], args.device_id)
         if not isinstance(consumed, dict) or any(consumed.get(key) != manifest[key] for key in manifest if key != "authorization"):
             raise PublisherError("CLEANUP_AUTHORIZATION_INVALID", "Backend cleanup authorization could not be consumed")
         adapter.cleanup_test_post(manifest["expected_identity"], manifest["baseline"], device)

@@ -61,13 +61,13 @@ class PublisherApiClient:
         body = {"worker_id": self.worker_id, "claim_token": claim_token, "status": status, **metadata}
         return self._json("POST", f"/api/publication-worker/jobs/{job_id}/finish", body, claim_token)
     def availability(self, device_id: int) -> dict[str, Any]: return self._json("GET", f"/api/publication-worker/devices/{device_id}/availability")
-    def validate_cleanup_authorization(self, authorization: str) -> dict[str, Any]:
-        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/validate")
+    def validate_cleanup_authorization(self, authorization: str, device_id: int) -> dict[str, Any]:
+        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/validate", {"device_id": device_id})
         cleanup = value.get("cleanup")
         if not isinstance(cleanup, dict): raise PublisherError("CLEANUP_AUTHORIZATION_INVALID", "Backend cleanup authorization is invalid")
         return cleanup
-    def consume_cleanup_authorization(self, authorization: str) -> dict[str, Any]:
-        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/consume")
+    def consume_cleanup_authorization(self, authorization: str, device_id: int) -> dict[str, Any]:
+        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/consume", {"device_id": device_id})
         cleanup = value.get("cleanup")
         if not isinstance(cleanup, dict): raise PublisherError("CLEANUP_AUTHORIZATION_INVALID", "Backend cleanup authorization is invalid")
         return cleanup

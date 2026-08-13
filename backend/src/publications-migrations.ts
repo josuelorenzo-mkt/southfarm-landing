@@ -135,4 +135,8 @@ export function applyPublicationMigrations(db: SqliteDatabase): void {
     FOREIGN KEY (job_id) REFERENCES publication_jobs(id)
   );
   CREATE INDEX IF NOT EXISTS idx_publication_cleanup_authorizations_expiry ON publication_cleanup_authorizations(expires_at);`);
+  for (const [name, definition] of [
+    ['workspace_id', 'INTEGER'], ['device_id', 'INTEGER'], ['social_account_id', 'INTEGER'],
+    ['worker_id', 'TEXT'], ['issued_by_user_id', 'INTEGER'],
+  ] as const) addColumnIfMissing(db, 'publication_cleanup_authorizations', name, definition);
 }

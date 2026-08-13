@@ -1825,6 +1825,7 @@ registerPublicationRoutes({
     auth,
     requireRole,
     mediaRoot: PUBLICATION_MEDIA_ROOT,
+    workerTokenHash: PUBLISHER_WORKER_TOKEN_HASH || undefined,
 });
 if (PUBLISHER_WORKER_TOKEN_HASH) {
     registerPublicationWorkerRoutes({
