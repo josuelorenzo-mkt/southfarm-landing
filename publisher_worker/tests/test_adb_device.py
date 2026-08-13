@@ -51,9 +51,13 @@ class AdbDeviceTests(unittest.TestCase):
         self.assertEqual(adb.dump_ui()[0]["text"], "Ready")
         with self.subTest("screenshot"):
             import tempfile
-            with tempfile.NamedTemporaryFile() as target:
-                adb.screenshot(target.name)
-                self.assertEqual(open(target.name, "rb").read(), b"PNG")
+            target = tempfile.mktemp(suffix=".png")
+            try:
+                adb.screenshot(target)
+                with open(target, "rb") as handle: self.assertEqual(handle.read(), b"PNG")
+            finally:
+                import os
+                if os.path.exists(target): os.unlink(target)
 
     def test_remote_path_is_sanitized(self):
         self.assertEqual(SafeAdb.safe_remote_name("../../clip name.mp4"), "clip_name.mp4")
