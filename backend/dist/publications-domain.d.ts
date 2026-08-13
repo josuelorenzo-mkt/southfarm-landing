@@ -17,6 +17,9 @@ export declare const PUBLICATION_STATE_TRANSITIONS: {
     readonly failed: readonly [];
     readonly review_required: readonly [];
 };
+export declare class PublicationTransitionError extends Error {
+    constructor(message: string);
+}
 type PublicationStatus = keyof typeof PUBLICATION_STATE_TRANSITIONS;
 type SqliteDatabase = Database.Database;
 export type ValidatedPublicationInput = {

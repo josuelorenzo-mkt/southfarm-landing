@@ -6,6 +6,9 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
+import express from 'express';
+import { PublicationStore } from '../dist/publications-domain.js';
+import { registerPublicationRoutes } from '../dist/publications-routes.js';
 
 const port = 3321;
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'southfarm-publications-api-'));
@@ -43,7 +46,7 @@ startBackend();
 
 const mp4Header = Buffer.from('000000186674797069736f6d0000020069736f6d6d703431', 'hex');
 const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
-const webmHeader = Buffer.from('1a45dfa39f4282847765626d', 'hex');
+const webmHeader = Buffer.from('1a45dfa3874282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
 async function waitForHealth() {
@@ -167,6 +170,8 @@ try {
     { type: 'video/webm', contents: mp4Header },
     { type: 'video/webm', contents: Buffer.from('1a45dfa39f4282846d6174726f736b61', 'hex') },
     { type: 'video/webm', contents: Buffer.from('1a45dfa39f4282846e6f747765626d', 'hex') },
+    { type: 'video/webm', contents: Buffer.from('1a45dfa38aec884282847765626d', 'hex') },
+    { type: 'video/webm', contents: Buffer.from('1a45dfa3ff4282847765626d', 'hex') },
   ]) {
     const result = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, ...options }) });
     assert.equal(result.response.status, 400, `${JSON.stringify(options)} ${JSON.stringify(result.body)}`);
@@ -180,16 +185,26 @@ try {
 
   const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
   const mediaBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count;
-  process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER = abortMarker;
-  await stopBackend();
-  startBackend();
-  await waitForHealth();
+  const abortRoot = path.join(tempDir, 'abort-media');
+  const abortPort = port + 1;
+  const abortApp = express();
+  abortApp.use(express.json());
+  registerPublicationRoutes({
+    app: abortApp, db, store: new PublicationStore(db), mediaRoot: abortRoot,
+    auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
+    requireRole: () => (_req, _res, next) => next(),
+    testHooks: { afterRename: (req, res) => {
+      fs.writeFileSync(abortMarker, 'renamed');
+      return new Promise((resolve) => { const done = () => resolve(); req.once('aborted', done); res.once('close', done); });
+    } },
+  });
+  const abortServer = await new Promise((resolve) => { const server = abortApp.listen(abortPort, () => resolve(server)); });
   const abortBoundary = `abort-${crypto.randomUUID()}`;
   const abortBody = Buffer.concat([
     Buffer.from(`--${abortBoundary}\r\nContent-Disposition: form-data; name="video"; filename="abort.mp4"\r\nContent-Type: video/mp4\r\n\r\n`), mp4Header,
     Buffer.from(`\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="platform"\r\n\r\nyoutube\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="device_id"\r\n\r\n${deviceId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="social_account_id"\r\n\r\n${accountId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\nAbort cleanup proves no publication survives\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="scheduled_for"\r\n\r\n${futureIso}\r\n--${abortBoundary}--\r\n`),
   ]);
-  const abortRequest = http.request({ hostname: '127.0.0.1', port, path: '/api/publications', method: 'POST', headers: { Authorization: `Bearer ${owner.token}`, 'Content-Type': `multipart/form-data; boundary=${abortBoundary}`, 'Content-Length': abortBody.length } });
+  const abortRequest = http.request({ hostname: '127.0.0.1', port: abortPort, path: '/api/publications', method: 'POST', headers: { Authorization: `Bearer ${owner.token}`, 'Content-Type': `multipart/form-data; boundary=${abortBoundary}`, 'Content-Length': abortBody.length } });
   abortRequest.on('error', () => {});
   abortRequest.end(abortBody);
   await waitForPath(abortMarker);
@@ -197,18 +212,40 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count, jobsBeforeAbort, 'aborted upload after rename must not enqueue a job');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count, mediaBeforeAbort, 'aborted upload after rename must not retain media metadata');
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'aborted upload after rename must remove final media');
-  assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'aborted upload after rename must remove temp media');
-  delete process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER;
+  assert.equal(fs.readdirSync(abortRoot).filter((name) => name !== '.tmp').length, 0, 'aborted upload after rename must remove final media');
+  assert.equal(fs.readdirSync(path.join(abortRoot, '.tmp')).length, 0, 'aborted upload after rename must remove temp media');
+  await new Promise((resolve) => abortServer.close(resolve));
 
+  const racePort = port + 2;
+  const raceApp = express();
+  raceApp.use(express.json());
+  registerPublicationRoutes({
+    app: raceApp, db, store: new PublicationStore(db), mediaRoot: path.join(tempDir, 'race-media'),
+    auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
+    requireRole: () => (_req, _res, next) => next(),
+    testHooks: {
+      beforeReschedule: () => db.prepare("UPDATE publication_jobs SET status = 'claimed' WHERE id = ?").run(webm.body.publication.id),
+      beforeCancel: () => db.prepare("UPDATE publication_jobs SET final_action_at = ? WHERE id = ?").run(futureIso, quicktime.body.publication.id),
+    },
+  });
+  const raceServer = await new Promise((resolve) => { const server = raceApp.listen(racePort, () => resolve(server)); });
+  const raceScheduleResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${webm.body.publication.id}/schedule`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }) });
+  assert.equal(raceScheduleResponse.status, 409, 'store transition race must remain a 409');
+  const raceCancelResponse = await fetch(`http://127.0.0.1:${racePort}/api/publications/${quicktime.body.publication.id}/cancel`, { method: 'POST' });
+  assert.equal(raceCancelResponse.status, 409, 'store cancellation race must remain a 409');
+  await new Promise((resolve) => raceServer.close(resolve));
+
+  const errorJobId = Number(db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, created_at, updated_at)
+    VALUES (?, ?, ?, 'youtube', 'Database error mapping test', 4, ?, 'queued', 'queued', ?, ?)`).run(ownerWorkspace, deviceId, accountId, futureIso, futureIso, futureIso).lastInsertRowid);
   db.exec(`CREATE TRIGGER publication_test_failure BEFORE UPDATE ON publication_jobs
-    WHEN OLD.id = ${quicktime.body.publication.id} BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
-  const internalSchedule = await request(`/api/publications/${quicktime.body.publication.id}/schedule`, {
+    WHEN OLD.id = ${errorJobId} BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
+  const internalSchedule = await request(`/api/publications/${errorJobId}/schedule`, {
     method: 'PATCH', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduled_for: futureIso }),
   });
   assert.equal(internalSchedule.response.status, 500);
   assert.equal(internalSchedule.body.error_code, 'INTERNAL_ERROR');
-  const internalCancel = await request(`/api/publications/${quicktime.body.publication.id}/cancel`, { method: 'POST', headers: ownerHeaders });
+  const internalCancel = await request(`/api/publications/${errorJobId}/cancel`, { method: 'POST', headers: ownerHeaders });
   assert.equal(internalCancel.response.status, 500);
   assert.equal(internalCancel.body.error_code, 'INTERNAL_ERROR');
   db.exec('DROP TRIGGER publication_test_failure');

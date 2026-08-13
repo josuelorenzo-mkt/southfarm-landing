@@ -4,7 +4,7 @@ import path from 'node:path';
 import type Database from 'better-sqlite3';
 import type { Express, NextFunction, Request, Response } from 'express';
 import multer, { MulterError } from 'multer';
-import { PublicationStore, validatePublicationInput } from './publications-domain.js';
+import { PublicationStore, PublicationTransitionError, validatePublicationInput } from './publications-domain.js';
 
 type SqliteDatabase = Database.Database;
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
@@ -53,16 +53,38 @@ function compensateUpload(db: SqliteDatabase, req: any, state: UploadState): voi
   state.cleaning = false;
 }
 
-async function testPauseAfterRename(req: any, res: Response): Promise<void> {
-  const marker = String(process.env.SOUTHFARM_PUBLICATION_TEST_AFTER_RENAME_MARKER || '').trim();
-  if (!marker) return;
-  fs.writeFileSync(marker, 'renamed');
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(resolve, 5_000);
-    const done = () => { clearTimeout(timeout); resolve(); };
-    req.once('aborted', done);
-    res.once('close', done);
-  });
+function parseEbmlVint(buffer: Buffer, offset: number, preserveMarker: boolean): { value: number; length: number; unknown: boolean } | null {
+  if (offset >= buffer.length) return null;
+  const first = buffer[offset];
+  let length = 1;
+  while (length <= 8 && (first & (0x80 >> (length - 1))) === 0) length += 1;
+  if (length > 8 || offset + length > buffer.length) return null;
+  let value = preserveMarker ? first : first & ((1 << (8 - length)) - 1);
+  for (let index = 1; index < length; index += 1) value = value * 256 + buffer[offset + index];
+  const unknown = !preserveMarker && Array.from(buffer.subarray(offset, offset + length)).every((byte, index) => index === 0 ? byte === ((0xff >> (length - 1)) | (0x80 >> (length - 1))) : byte === 0xff);
+  return { value, length, unknown };
+}
+
+function isExactWebmEbmlHeader(buffer: Buffer): boolean {
+  const rootId = parseEbmlVint(buffer, 0, true);
+  if (!rootId || rootId.value !== 0x1a45dfa3) return false;
+  const rootSize = parseEbmlVint(buffer, rootId.length, false);
+  if (!rootSize || rootSize.unknown) return false;
+  let offset = rootId.length + rootSize.length;
+  const end = offset + rootSize.value;
+  if (end > buffer.length) return false;
+  while (offset < end) {
+    const elementId = parseEbmlVint(buffer, offset, true);
+    if (!elementId) return false;
+    const elementSize = parseEbmlVint(buffer, offset + elementId.length, false);
+    if (!elementSize || elementSize.unknown) return false;
+    const valueStart = offset + elementId.length + elementSize.length;
+    const valueEnd = valueStart + elementSize.value;
+    if (valueEnd > end) return false;
+    if (elementId.value === 0x4282) return elementSize.value === 4 && buffer.subarray(valueStart, valueEnd).toString('ascii') === 'webm';
+    offset = valueEnd;
+  }
+  return false;
 }
 
 function cleanFilename(name: unknown): string {
@@ -76,20 +98,7 @@ function validSignature(filePath: string, mimeType: string): boolean {
     const header = Buffer.alloc(64);
     const bytes = fs.readSync(fd, header, 0, header.length, 0);
     if (mimeType === 'video/webm') {
-      if (bytes < 8 || !header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return false;
-      for (let offset = 4; offset + 3 < bytes; offset += 1) {
-        if (header[offset] !== 0x42 || header[offset + 1] !== 0x82) continue;
-        const firstLengthByte = header[offset + 2];
-        let lengthBytes = 1;
-        while (lengthBytes <= 8 && (firstLengthByte & (0x80 >> (lengthBytes - 1))) === 0) lengthBytes += 1;
-        if (lengthBytes > 8 || offset + 2 + lengthBytes > bytes) return false;
-        let valueLength = firstLengthByte & ((1 << (8 - lengthBytes)) - 1);
-        for (let index = 1; index < lengthBytes; index += 1) valueLength = valueLength * 256 + header[offset + 2 + index];
-        const valueStart = offset + 2 + lengthBytes;
-        if (valueLength !== 4 || valueStart + valueLength > bytes) return false;
-        return header.subarray(valueStart, valueStart + valueLength).toString('ascii') === 'webm';
-      }
-      return false;
+      return isExactWebmEbmlHeader(header.subarray(0, bytes));
     }
     if (bytes < 16 || header.subarray(4, 8).toString('ascii') !== 'ftyp') return false;
     const boxSize = header.readUInt32BE(0);
@@ -102,8 +111,8 @@ function validSignature(filePath: string, mimeType: string): boolean {
     const quicktimeBrands = new Set(['qt  ']);
     const imageOrHevcBrands = new Set(['avif', 'avis', 'heic', 'heix', 'hevc', 'hevx', 'mif1', 'msf1']);
     if (brands.some((brand) => imageOrHevcBrands.has(brand))) return false;
-    if (mimeType === 'video/quicktime') return majorBrand === 'qt  ';
-    return mp4Brands.has(majorBrand);
+    if (mimeType === 'video/quicktime') return majorBrand === 'qt  ' && !brands.some((brand) => mp4Brands.has(brand));
+    return mp4Brands.has(majorBrand) && !brands.some((brand) => quicktimeBrands.has(brand));
   } finally { fs.closeSync(fd); }
 }
 
@@ -182,8 +191,8 @@ function mediaForJob(db: SqliteDatabase, job: any): any | null {
 }
 
 export function registerPublicationRoutes({
-  app, db, store, auth, requireRole, mediaRoot,
-}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string }): void {
+  app, db, store, auth, requireRole, mediaRoot, testHooks,
+}: { app: Express; db: SqliteDatabase; store: PublicationStore; auth: Middleware; requireRole: (...roles: any[]) => Middleware; mediaRoot: string; testHooks?: { afterRename?: (req: any, res: Response) => Promise<void> | void; beforeReschedule?: () => void; beforeCancel?: () => void } }): void {
   const root = path.resolve(mediaRoot);
   const tempRoot = path.join(root, '.tmp');
   fs.mkdirSync(tempRoot, { recursive: true });
@@ -262,7 +271,7 @@ export function registerPublicationRoutes({
         db.prepare('UPDATE publication_media SET private_path = ?, updated_at = ? WHERE id = ? AND upload_status = ?')
           .run(mediaKey, createdAt, state.mediaId, 'staging');
         fs.renameSync(state.uploadedPath!, state.finalPath);
-        await testPauseAfterRename(req, res);
+        await testHooks?.afterRename?.(req, res);
         if (state.aborted || req.aborted) routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
         const transaction = db.transaction(() => {
           db.prepare("UPDATE publication_media SET private_path = ?, upload_status = 'stored', updated_at = ? WHERE id = ? AND upload_status = 'staging'").run(mediaKey, createdAt, state.mediaId);
@@ -320,12 +329,14 @@ export function registerPublicationRoutes({
     try {
       const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
       if (job.status !== 'queued') routeError(409, 'UNSAFE_TRANSITION', 'Only queued publications can be rescheduled');
+      testHooks?.beforeReschedule?.();
       const scheduledFor = parseSchedule(req.body?.scheduled_for);
       const publication = store.rescheduleJob(Number(job.id), scheduledFor, { type: 'user', id: String(req.user.userId) });
       const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id) as any;
       res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+      if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to reschedule publication' });
     }
   });
@@ -334,11 +345,13 @@ export function registerPublicationRoutes({
     try {
       const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
       if (job.final_action_at) routeError(409, 'UNSAFE_TRANSITION', 'Publication cannot be cancelled after final action');
+      testHooks?.beforeCancel?.();
       const publication = store.requestCancellation(Number(job.id), { type: 'user', id: String(req.user.userId) });
       const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id) as any;
       res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+      if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
     }
   });

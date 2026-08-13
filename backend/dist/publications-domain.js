@@ -14,6 +14,9 @@ export const PUBLICATION_STATE_TRANSITIONS = {
     cancellation_requested: ['cancelled'],
     completed: [], cancelled: [], failed: [], review_required: [],
 };
+export class PublicationTransitionError extends Error {
+    constructor(message) { super(message); this.name = 'PublicationTransitionError'; }
+}
 function isoAfter(now, seconds) { return new Date(new Date(now).getTime() + seconds * 1000).toISOString(); }
 function requireIso(value, label) { if (Number.isNaN(new Date(value).getTime()))
     throw new Error(`${label} must be an ISO timestamp`); }
@@ -55,9 +58,9 @@ export class PublicationStore {
     }
     transition(row, to, actor, at, payload) {
         if (row.final_action_at && !['publishing', 'verifying', 'completed', 'review_required'].includes(to))
-            throw new Error('Cannot transition publication job after final action');
+            throw new PublicationTransitionError('Cannot transition publication job after final action');
         if (!canTransition(row.status, to))
-            throw new Error(`Cannot transition publication job from ${row.status} to ${to}`);
+            throw new PublicationTransitionError(`Cannot transition publication job from ${row.status} to ${to}`);
         this.db.prepare('UPDATE publication_jobs SET status = ?, current_step = ?, updated_at = ? WHERE id = ?').run(to, to, at, row.id);
         this.event(row.id, row.status, to, actor, at, payload);
         return this.row(row.id);
@@ -79,11 +82,11 @@ export class PublicationStore {
     listJobs(workspaceId) { const rows = workspaceId === undefined ? this.db.prepare('SELECT * FROM publication_jobs ORDER BY scheduled_for, id').all() : this.db.prepare('SELECT * FROM publication_jobs WHERE workspace_id = ? ORDER BY scheduled_for, id').all(workspaceId); return rows.map((row) => publicationJobView(row, this.db)); }
     getJob(id) { return publicationJobView(this.row(id), this.db); }
     rescheduleJob(id, scheduledFor, actor) { requireIso(scheduledFor, 'scheduledFor'); return this.transaction(() => { const row = this.row(id); if (row.status !== 'queued')
-        throw new Error('Only queued publication jobs can be rescheduled'); this.db.prepare('UPDATE publication_jobs SET scheduled_for = ?, updated_at = ? WHERE id = ?').run(scheduledFor, scheduledFor, id); this.event(id, 'queued', 'queued', actor, scheduledFor, { scheduled_for: scheduledFor }); return this.getJob(id); }); }
+        throw new PublicationTransitionError('Only queued publication jobs can be rescheduled'); this.db.prepare('UPDATE publication_jobs SET scheduled_for = ?, updated_at = ? WHERE id = ?').run(scheduledFor, scheduledFor, id); this.event(id, 'queued', 'queued', actor, scheduledFor, { scheduled_for: scheduledFor }); return this.getJob(id); }); }
     requestCancellation(id, actor, at = new Date().toISOString()) { return this.transaction(() => { const row = this.row(id); if (row.final_action_at)
-        throw new Error('Cannot cancel publication job after final action'); if (row.status === 'queued')
+        throw new PublicationTransitionError('Cannot cancel publication job after final action'); if (row.status === 'queued')
         return publicationJobView(this.transition(row, 'cancelled', actor, at), this.db); if (!Object.prototype.hasOwnProperty.call(PUBLICATION_STATE_TRANSITIONS, row.status) || row.status === 'cancellation_requested')
-        throw new Error(`Cannot cancel publication job in ${row.status}`); this.db.prepare('UPDATE publication_jobs SET cancel_requested_at = ? WHERE id = ?').run(at, id); return publicationJobView(this.transition(row, 'cancellation_requested', actor, at), this.db); }); }
+        throw new PublicationTransitionError(`Cannot cancel publication job in ${row.status}`); this.db.prepare('UPDATE publication_jobs SET cancel_requested_at = ? WHERE id = ?').run(at, id); return publicationJobView(this.transition(row, 'cancellation_requested', actor, at), this.db); }); }
     claimDueJob(worker, now) { requireIso(now, 'now'); return this.transaction(() => { this.db.prepare('DELETE FROM device_automation_locks WHERE expires_at <= ?').run(now); const candidate = this.db.prepare(`SELECT job.* FROM publication_jobs job WHERE job.device_id = ? AND job.status = 'queued' AND job.scheduled_for <= ? AND NOT EXISTS (SELECT 1 FROM publication_jobs review WHERE review.social_account_id = job.social_account_id AND review.status = 'review_required') AND NOT EXISTS (SELECT 1 FROM task_runs run WHERE run.device_id = job.device_id AND ((run.status IN ('running', 'paused') AND (run.lease_expires_at IS NULL OR run.lease_expires_at > ?)) OR (run.status IN ('pending', 'overdue') AND (run.scheduled_for IS NULL OR run.scheduled_for <= ?) AND (run.expires_at IS NULL OR run.expires_at > ?)))) AND NOT EXISTS (SELECT 1 FROM device_automation_locks lock WHERE lock.device_id = job.device_id AND lock.expires_at > ?) ORDER BY job.scheduled_for, job.id LIMIT 1`).get(worker.deviceId, now, now, now, now, now); if (!candidate)
         return { claimed: false, job: null }; const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const claimToken = randomUUID(); this.db.prepare("UPDATE publication_jobs SET status = 'claimed', current_step = 'claimed', claimed_by = ?, claim_token = ?, claimed_at = ?, lease_expires_at = ?, last_heartbeat_at = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?").run(worker.id, claimToken, now, expiresAt, now, now, candidate.id); this.db.prepare('INSERT INTO device_automation_locks (device_id, publication_job_id, worker_id, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET publication_job_id = excluded.publication_job_id, worker_id = excluded.worker_id, expires_at = excluded.expires_at, updated_at = excluded.updated_at').run(candidate.device_id, candidate.id, worker.id, expiresAt, now, now); this.event(candidate.id, 'queued', 'claimed', { type: 'worker', id: worker.id }, now); return { claimed: true, job: this.getJob(candidate.id) }; }); }
     heartbeat(id, worker, now) { return this.transaction(() => { const row = this.row(id); this.requireLiveWorkerLock(row, worker, now); const expiresAt = isoAfter(now, Math.max(1, worker.leaseSeconds)); const lockUpdate = this.db.prepare('UPDATE device_automation_locks SET expires_at = ?, updated_at = ? WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(expiresAt, now, row.device_id, id, worker.id, now); if (lockUpdate.changes !== 1)
