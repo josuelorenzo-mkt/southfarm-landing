@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Express, Request, Response } from 'express';
 import type Database from 'better-sqlite3';
-import { PublicationStore, PublicationTransitionError } from './publications-domain.js';
+import { PublicationStore } from './publications-domain.js';
 
 type SqliteDatabase = Database.Database;
-type WorkerIdentity = { id: string; deviceId: number; leaseSeconds: number };
+type WorkerIdentity = { id: string; deviceId: number; leaseSeconds: number; claimToken?: string };
 const LEASE_SECONDS = 45;
 const CHECKPOINTS = new Set(['preparing', 'transferring', 'selecting_media', 'editing', 'captioning', 'ready_to_publish', 'publishing', 'verifying']);
 const FINISH_STATES = new Set(['completed', 'cancelled', 'failed', 'review_required']);
@@ -20,7 +20,7 @@ function workerFrom(req: Request): WorkerIdentity | null {
   return id && Number.isInteger(deviceId) && deviceId > 0 ? { id, deviceId, leaseSeconds: LEASE_SECONDS } : null;
 }
 
-export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, workerTokenHash }: { app: Express; db: SqliteDatabase; store: PublicationStore; mediaRoot: string; workerTokenHash: Buffer | string }): void {
+export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, workerTokenHash, onlineWindowSeconds = 90 }: { app: Express; db: SqliteDatabase; store: PublicationStore; mediaRoot: string; workerTokenHash: Buffer | string; onlineWindowSeconds?: number }): void {
   const expectedHash = Buffer.isBuffer(workerTokenHash) ? workerTokenHash : Buffer.from(workerTokenHash, 'hex');
   if (expectedHash.length !== 32) throw new Error('Publisher worker token digest must be SHA-256');
   const authenticate = (req: Request, res: Response, next: () => void) => {
@@ -30,12 +30,10 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
     next();
   };
   const claimToken = (req: Request): string | null => value(req.body?.claim_token) || value(req.header('X-SouthFarm-Claim-Token'));
-  const owner = (req: Request, id: number): WorkerIdentity | null => {
+  const mutationWorker = (req: Request): WorkerIdentity | null => {
     const workerId = value(req.body?.worker_id) || value(req.header('X-SouthFarm-Worker-Id'));
     const token = claimToken(req);
-    if (!workerId || !token) return null;
-    const row: any = db.prepare('SELECT device_id FROM publication_jobs WHERE id = ? AND claimed_by = ? AND claim_token = ? AND lease_expires_at > ?').get(id, workerId, token, new Date().toISOString());
-    return row ? { id: workerId, deviceId: Number(row.device_id), leaseSeconds: LEASE_SECONDS } : null;
+    return workerId && token ? { id: workerId, deviceId: 0, leaseSeconds: LEASE_SECONDS, claimToken: token } : null;
   };
   const conflict = (res: Response, error: unknown) => res.status(409).json({ error_code: 'WORKER_CLAIM_INVALID', error: error instanceof Error ? error.message : 'Worker claim is invalid or expired' });
 
@@ -51,42 +49,39 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
   });
 
   app.post('/api/publication-worker/jobs/:id/heartbeat', authenticate, (req, res) => {
-    const id = jobId(req.params.id); const worker = id ? owner(req, id) : null;
+    const id = jobId(req.params.id); const worker = mutationWorker(req);
     if (!id || !worker) return conflict(res, new Error('Worker claim is invalid or expired'));
-    try { const job: any = store.heartbeat(id, worker, new Date().toISOString()); res.json({ ok: true, job, cancel_requested: Boolean(job.cancel_requested_at), server_time: new Date().toISOString() }); } catch (error) { conflict(res, error); }
+    try { const job: any = store.heartbeat(id, worker as Required<WorkerIdentity>, new Date().toISOString()); res.json({ ok: true, job, cancel_requested: Boolean(job.cancel_requested_at), server_time: new Date().toISOString() }); } catch (error) { conflict(res, error); }
   });
 
   app.post('/api/publication-worker/jobs/:id/checkpoint', authenticate, (req, res) => {
-    const id = jobId(req.params.id); const worker = id ? owner(req, id) : null; const step = value(req.body?.step);
+    const id = jobId(req.params.id); const worker = mutationWorker(req); const step = value(req.body?.step);
     const progress = Number(req.body?.progress_percent); const finalAction = Boolean(req.body?.final_action);
     if (!id || !worker) return conflict(res, new Error('Worker claim is invalid or expired'));
     if (!step || !CHECKPOINTS.has(step) || !Number.isInteger(progress)) return res.status(400).json({ error_code: 'CHECKPOINT_INVALID', error: 'step and progress_percent are invalid' });
     try {
-      const job = store.checkpoint(id, worker, new Date().toISOString(), { step: step as any, progressPercent: progress, finalAction });
       const evidence = safeJson(req.body?.evidence);
-      if (evidence) db.prepare('UPDATE publication_events SET payload = ? WHERE id = (SELECT MAX(id) FROM publication_events WHERE publication_job_id = ?)').run(evidence, id);
+      const job = store.checkpoint(id, worker as any, new Date().toISOString(), { step: step as any, progressPercent: progress, finalAction, evidence: evidence ? JSON.parse(evidence) : undefined });
       res.json({ ok: true, job });
     } catch (error) { conflict(res, error); }
   });
 
   app.post('/api/publication-worker/jobs/:id/finish', authenticate, (req, res) => {
-    const id = jobId(req.params.id); const worker = id ? owner(req, id) : null; const target = value(req.body?.status);
+    const id = jobId(req.params.id); const worker = mutationWorker(req); const target = value(req.body?.status);
     if (!id || !worker) return conflict(res, new Error('Worker claim is invalid or expired'));
     if (!target || !FINISH_STATES.has(target)) return res.status(400).json({ error_code: 'FINISH_INVALID', error: 'status is invalid' });
     try {
-      const current: any = db.prepare('SELECT final_action_at FROM publication_jobs WHERE id = ?').get(id);
-      if (current?.final_action_at && (target === 'failed' || target === 'cancelled')) return res.status(409).json({ error_code: 'FINAL_ACTION_UNCERTAIN', error: 'Final action requires review_required or completed' });
       if (target === 'failed' && Boolean(req.body?.final_action_uncertain)) return res.status(400).json({ error_code: 'FINISH_INVALID', error: 'Uncertain final action must finish as review_required' });
-      const job = store.finish(id, worker, target as any, new Date().toISOString());
-      db.prepare('UPDATE publication_jobs SET result = ?, error_code = ?, error_message = ?, remote_post_identity = COALESCE(?, remote_post_identity), updated_at = ? WHERE id = ?').run(safeJson(req.body?.result), value(req.body?.error_code), value(req.body?.error_message), value(req.body?.remote_post_identity), new Date().toISOString(), id);
-      res.json({ ok: true, job: store.getJob(id) });
+      const timestamp = new Date().toISOString();
+      const job = store.finish(id, worker as any, target as any, timestamp, { result: safeJson(req.body?.result), errorCode: value(req.body?.error_code), errorMessage: value(req.body?.error_message), remotePostIdentity: value(req.body?.remote_post_identity), publishedAt: target === 'completed' ? timestamp : null, verifiedAt: target === 'completed' ? timestamp : null });
+      res.json({ ok: true, job });
     } catch (error) { conflict(res, error); }
   });
 
   app.get('/api/publication-worker/media/:id', authenticate, (req, res) => {
     const mediaId = jobId(req.params.id); const workerId = value(req.header('X-SouthFarm-Worker-Id')); const token = claimToken(req);
     if (!mediaId || !workerId || !token) return conflict(res, new Error('Worker claim is invalid or expired'));
-    const row: any = db.prepare(`SELECT media.* FROM publication_media media JOIN publication_jobs job ON job.media_id = media.id WHERE media.id = ? AND job.claimed_by = ? AND job.claim_token = ? AND job.lease_expires_at > ? AND media.upload_status = 'stored'`).get(mediaId, workerId, token, new Date().toISOString());
+    const row: any = db.prepare(`SELECT media.* FROM publication_media media JOIN publication_jobs job ON job.media_id = media.id WHERE media.id = ? AND job.claimed_by = ? AND job.claim_token = ? AND job.lease_expires_at > ? AND job.status NOT IN ('completed', 'cancelled', 'failed', 'review_required') AND media.upload_status = 'stored' AND EXISTS (SELECT 1 FROM device_automation_locks lock WHERE lock.device_id = job.device_id AND lock.publication_job_id = job.id AND lock.worker_id = job.claimed_by AND lock.expires_at > ?)`).get(mediaId, workerId, token, new Date().toISOString(), new Date().toISOString());
     if (!row) return res.status(404).json({ error_code: 'MEDIA_NOT_FOUND', error: 'Media is not available for this claim' });
     const root = path.resolve(mediaRoot); const filePath = path.resolve(root, String(row.private_path));
     if (path.relative(root, filePath).startsWith('..') || path.isAbsolute(path.relative(root, filePath)) || !fs.existsSync(filePath)) return res.status(404).json({ error_code: 'MEDIA_NOT_FOUND', error: 'Media file is not available' });
@@ -100,7 +95,9 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
     const now = new Date().toISOString(); const device: any = db.prepare('SELECT id, device_id, device_name, lifecycle_status, last_seen_at FROM devices WHERE id = ?').get(deviceId);
     if (!device) return res.status(404).json({ error_code: 'DEVICE_NOT_FOUND', error: 'Device not found' });
     const lock: any = db.prepare('SELECT publication_job_id, worker_id, expires_at FROM device_automation_locks WHERE device_id = ? AND expires_at > ?').get(deviceId, now);
-    const task: any = db.prepare("SELECT id FROM task_runs WHERE device_id = ? AND status IN ('running', 'paused') AND (lease_expires_at IS NULL OR lease_expires_at > ?) LIMIT 1").get(deviceId, now);
-    res.json({ device, available: !lock && !task, publication_lock: lock || null, active_task: Boolean(task), server_time: now });
+    const task: any = db.prepare("SELECT id FROM task_runs WHERE device_id = ? AND ((status IN ('running', 'paused') AND (lease_expires_at IS NULL OR lease_expires_at > ?)) OR (status IN ('pending', 'overdue') AND (scheduled_for IS NULL OR scheduled_for <= ?) AND (expires_at IS NULL OR expires_at > ?))) LIMIT 1").get(deviceId, now, now, now);
+    const online = device.lifecycle_status === 'active' && typeof device.last_seen_at === 'string' && Date.parse(device.last_seen_at) >= Date.now() - onlineWindowSeconds * 1_000;
+    const reasons = [!online ? 'device_offline' : null, lock ? 'device_busy_publication' : null, task ? 'device_busy_task' : null].filter(Boolean);
+    res.json({ device, online, available: reasons.length === 0, reasons, publication_lock: lock || null, active_task: Boolean(task), server_time: now });
   });
 }

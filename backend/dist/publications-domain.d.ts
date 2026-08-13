@@ -31,10 +31,21 @@ export type PublicationActor = {
     type: string;
     id: string;
 };
-export type PublicationWorker = {
+export type PublicationClaimWorker = {
     id: string;
     deviceId: number;
     leaseSeconds: number;
+};
+export type PublicationWorker = PublicationClaimWorker & {
+    claimToken: string;
+};
+export type PublicationFinishMetadata = {
+    result?: string | null;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+    remotePostIdentity?: string | null;
+    publishedAt?: string | null;
+    verifiedAt?: string | null;
 };
 export type CreatePublicationJobInput = ValidatedPublicationInput & {
     workspaceId: number;
@@ -73,7 +84,7 @@ export declare class PublicationStore {
     getJob(id: number): PublicationJobView;
     rescheduleJob(id: number, scheduledFor: string, actor: PublicationActor): PublicationJobView;
     requestCancellation(id: number, actor: PublicationActor, at?: string): PublicationJobView;
-    claimDueJob(worker: PublicationWorker, now: string): {
+    claimDueJob(worker: PublicationClaimWorker, now: string): {
         claimed: boolean;
         job: PublicationJobView | null;
     };
@@ -82,7 +93,8 @@ export declare class PublicationStore {
         step: PublicationStatus;
         progressPercent: number;
         finalAction?: boolean;
+        evidence?: unknown;
     }): PublicationJobView;
-    finish(id: number, worker: PublicationWorker, target: Extract<PublicationStatus, 'completed' | 'cancelled' | 'failed' | 'review_required'>, now: string, actor?: PublicationActor): PublicationJobView;
+    finish(id: number, worker: PublicationWorker, target: Extract<PublicationStatus, 'completed' | 'cancelled' | 'failed' | 'review_required'>, now: string, metadata?: PublicationFinishMetadata, actor?: PublicationActor): PublicationJobView;
 }
 export {};

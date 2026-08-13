@@ -39,6 +39,7 @@ try {
   const deviceToken = `sfd-worker-device-${crypto.randomUUID()}`;
   db.prepare('UPDATE devices SET device_token_hash = ? WHERE id = ?').run(crypto.createHash('sha256').update(deviceToken).digest('hex'), deviceId);
   const ownerHeaders = { Authorization: `Bearer ${owner.token}` };
+  db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), deviceId);
   const first = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: form(deviceId, accountId) }); assert.equal(first.response.status, 201, JSON.stringify(first.body));
 
   for (const headers of [{}, { Authorization: 'Bearer incorrect' }]) { const denied = await request('/api/publication-worker/claim', { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ worker_id: 'worker-a', device_id: deviceId }) }); assert.equal(denied.response.status, 401); }
@@ -49,9 +50,16 @@ try {
   const taskClaim = await request('/api/tasks/claim', { method: 'POST', headers: { Authorization: `Bearer ${deviceToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ device_id: 'worker-test-android', installation_id: 'worker-test-android' }) });
   assert.equal(taskClaim.response.status, 200); assert.equal(taskClaim.body.claimed, false); assert.equal(taskClaim.body.reason, 'device_busy_publication');
   const badHeartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: 'wrong' }) }); assert.equal(badHeartbeat.response.status, 409);
+  const originalClaim = claim.claim_token;
+  db.prepare("UPDATE publication_jobs SET claim_token = 'swapped-token' WHERE id = ?").run(job.id);
+  const swapped = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: originalClaim }) }); assert.equal(swapped.response.status, 409, 'ownership changes after route parsing cannot mutate');
+  db.prepare('UPDATE publication_jobs SET claim_token = ? WHERE id = ?').run(originalClaim, job.id);
+  db.prepare('UPDATE publication_jobs SET lease_expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1_000).toISOString(), job.id);
+  const expired = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: originalClaim }) }); assert.equal(expired.response.status, 409, 'expired job lease is rejected');
+  db.prepare('UPDATE publication_jobs SET lease_expires_at = ? WHERE id = ?').run(new Date(Date.now() + 60_000).toISOString(), job.id);
   const before = db.prepare('SELECT lease_expires_at FROM publication_jobs WHERE id = ?').get(job.id).lease_expires_at;
   const heartbeat = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token }) }); assert.equal(heartbeat.response.status, 200); assert.equal(heartbeat.body.cancel_requested, false);
-  const after = db.prepare('SELECT lease_expires_at FROM publication_jobs WHERE id = ?').get(job.id).lease_expires_at; assert.ok(after >= before); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE device_id = ? AND expires_at > ?').get(deviceId, new Date().toISOString()).count, 1);
+  const after = db.prepare('SELECT lease_expires_at FROM publication_jobs WHERE id = ?').get(job.id).lease_expires_at; assert.ok(after > new Date().toISOString()); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE device_id = ? AND expires_at > ?').get(deviceId, new Date().toISOString()).count, 1);
   db.prepare('UPDATE publication_jobs SET cancel_requested_at = ? WHERE id = ?').run(new Date().toISOString(), job.id);
   const cancelled = await request(`/api/publication-worker/jobs/${job.id}/heartbeat`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token }) }); assert.equal(cancelled.body.cancel_requested, true);
   const media = await request(`/api/publication-worker/media/${job.media_id}`, { headers: { Authorization: `Bearer ${token}`, 'X-SouthFarm-Worker-Id': claim.worker_id, 'X-SouthFarm-Claim-Token': claim.claim_token } }); assert.equal(media.response.status, 200); assert.match(media.response.headers.get('content-disposition'), /attachment/);
@@ -59,7 +67,19 @@ try {
   const checkpoint = await request(`/api/publication-worker/jobs/${job.id}/checkpoint`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token, step: 'preparing', progress_percent: 10 }) }); assert.equal(checkpoint.response.status, 200);
   db.prepare("UPDATE publication_jobs SET status = 'cancellation_requested', current_step = 'cancellation_requested' WHERE id = ?").run(job.id);
   const finish = await request(`/api/publication-worker/jobs/${job.id}/finish`, { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: claim.worker_id, claim_token: claim.claim_token, status: 'cancelled' }) }); assert.equal(finish.response.status, 200); assert.equal(db.prepare('SELECT COUNT(*) AS count FROM device_automation_locks WHERE publication_job_id = ?').get(job.id).count, 0);
+  const afterFinishMedia = await request(`/api/publication-worker/media/${job.media_id}`, { headers: { Authorization: `Bearer ${token}`, 'X-SouthFarm-Worker-Id': claim.worker_id, 'X-SouthFarm-Claim-Token': claim.claim_token } }); assert.equal(afterFinishMedia.response.status, 404, 'terminal jobs may not download media');
+  const available = await request(`/api/publication-worker/devices/${deviceId}/availability`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(available.body.available, true);
+  db.prepare("UPDATE devices SET lifecycle_status = 'revoked' WHERE id = ?").run(deviceId);
+  const inactive = await request(`/api/publication-worker/devices/${deviceId}/availability`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(inactive.body.available, false); assert.ok(inactive.body.reasons.includes('device_offline'));
+  db.prepare("UPDATE devices SET lifecycle_status = 'active', last_seen_at = ? WHERE id = ?").run(new Date(Date.now() - 120_000).toISOString(), deviceId);
+  const stale = await request(`/api/publication-worker/devices/${deviceId}/availability`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(stale.body.available, false);
+  db.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').run(new Date().toISOString(), deviceId);
   const taskBlocked = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: form(deviceId, accountId, 'Task lock blocks publication claim') }); assert.equal(taskBlocked.response.status, 201);
+  db.prepare("INSERT INTO task_runs (user_id, device_id, task_type, status, scheduled_for, expires_at) VALUES (?, ?, 'warmup_youtube', 'pending', ?, ?)").run(owner.user.id, deviceId, new Date(Date.now() + 60_000).toISOString(), new Date(Date.now() + 120_000).toISOString());
+  const futureTaskAvailable = await request(`/api/publication-worker/devices/${deviceId}/availability`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(futureTaskAvailable.body.available, true, 'future pending task is not busy');
+  db.prepare("UPDATE task_runs SET scheduled_for = ? WHERE device_id = ? AND status = 'pending'").run(new Date(Date.now() - 1_000).toISOString(), deviceId);
+  const dueTaskBusy = await request(`/api/publication-worker/devices/${deviceId}/availability`, { headers: { Authorization: `Bearer ${token}` } }); assert.equal(dueTaskBusy.body.available, false); assert.ok(dueTaskBusy.body.reasons.includes('device_busy_task'));
+  db.prepare("DELETE FROM task_runs WHERE device_id = ? AND status = 'pending'").run(deviceId);
   db.prepare("INSERT INTO task_runs (user_id, device_id, task_type, status, lease_expires_at) VALUES (?, ?, 'warmup_youtube', 'running', ?)").run(owner.user.id, deviceId, new Date(Date.now() + 60_000).toISOString());
   const blockedClaim = await request('/api/publication-worker/claim', { method: 'POST', headers: workerHeaders, body: JSON.stringify({ worker_id: 'worker-c', device_id: deviceId }) }); assert.equal(blockedClaim.body.claimed, false, 'live task lease blocks a publication claim');
   db.prepare("DELETE FROM task_runs WHERE device_id = ? AND status = 'running'").run(deviceId);

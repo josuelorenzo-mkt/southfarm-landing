@@ -2260,6 +2260,7 @@ if (PUBLISHER_WORKER_TOKEN_HASH) {
     store: publicationStore,
     mediaRoot: PUBLICATION_MEDIA_ROOT,
     workerTokenHash: PUBLISHER_WORKER_TOKEN_HASH,
+    onlineWindowSeconds: DEVICE_ONLINE_WINDOW_SECONDS,
   });
 }
 

@@ -74,8 +74,8 @@ const now = '2026-08-13T12:00:00.000Z';
 const later = '2026-08-13T12:00:31.000Z';
 const future = '2026-08-13T13:00:00.000Z';
 const actor = { type: 'user', id: 'owner-1' };
-const worker = { id: 'worker-1', deviceId: 1, leaseSeconds: 30 };
-const replacementWorker = { id: 'worker-2', deviceId: 1, leaseSeconds: 30 };
+const worker = { id: 'worker-1', deviceId: 1, leaseSeconds: 30, claimToken: '' };
+const replacementWorker = { id: 'worker-2', deviceId: 1, leaseSeconds: 30, claimToken: '' };
 const jobInput = {
   workspaceId: 1, deviceId: 1, socialAccountId: 1, platform: 'youtube',
   caption: 'SouthFarm publishes this test video safely today', scheduledFor: now,
@@ -84,7 +84,7 @@ const eventCount = (jobId) => db.prepare('SELECT COUNT(*) AS count FROM publicat
 const assertLockRejectsWithoutMutation = (jobId, action) => {
   const before = store.getJob(jobId);
   const beforeEvents = eventCount(jobId);
-  assert.throws(action, /live device automation lock/);
+  assert.throws(action, /(active publication job|live device automation lock)/);
   const after = store.getJob(jobId);
   assert.deepEqual(
     [after.status, after.current_step, after.progress_percent, after.final_action_at],
@@ -98,6 +98,7 @@ db.prepare("INSERT INTO task_runs (id, device_id, status, scheduled_for, expires
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (3, 1, 'running', ?)").run(now);
 const job = store.createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).job.id, job.id, 'future and expired task runs do not block a claim');
+worker.claimToken = store.getJob(job.id).claim_token;
 assert.equal(store.claimDueJob(worker, now).claimed, false);
 assert.throws(() => store.rescheduleJob(job.id, future, actor), /queued/);
 
@@ -126,6 +127,7 @@ store.rescheduleJob(blockedJob.id, future, actor);
 
 const lockJob = store.createJob(jobInput, actor);
 assert.equal(store.claimDueJob(worker, now).job.id, lockJob.id);
+worker.claimToken = store.getJob(lockJob.id).claim_token;
 db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(lockJob.id);
 assert.throws(() => store.heartbeat(lockJob.id, worker, now), /lock/);
 assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, now, { step: 'preparing', progressPercent: 10 }));
@@ -141,6 +143,7 @@ assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, work
 
 const replacementJob = store.createJob(jobInput, actor);
 assert.equal(store.claimDueJob(replacementWorker, later).job.id, replacementJob.id);
+replacementWorker.claimToken = store.getJob(replacementJob.id).claim_token;
 assertLockRejectsWithoutMutation(lockJob.id, () => store.checkpoint(lockJob.id, worker, later, { step: 'preparing', progressPercent: 10 }));
 assertLockRejectsWithoutMutation(lockJob.id, () => store.finish(lockJob.id, worker, 'failed', later, actor));
 db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(replacementJob.id);
