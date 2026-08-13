@@ -109,7 +109,12 @@ def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int]
     adb = env.get("SOUTHFARM_ADB", DEFAULT_ADB)
     if not os.path.isfile(adb) or not os.access(adb, os.X_OK): raise PublisherError("CONFIG_INVALID", "Configured ADB executable is unavailable")
     return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb), int(device_id)
+
+def platform_adapters() -> dict[str, Any]:
+    from .platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
+    return {"instagram": InstagramPublisher(), "tiktok": TikTokPublisher(), "youtube": YouTubeShortPublisher()}
+
 def main() -> None:
     api, registry, device_id = _config()
-    raise SystemExit("No platform adapters configured; install the complete worker package")
+    PublicationRunner(api, registry, platform_adapters()).run_forever(device_id, stop=threading.Event())
 if __name__ == "__main__": main()
