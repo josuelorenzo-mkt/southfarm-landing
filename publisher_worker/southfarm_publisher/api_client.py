@@ -61,6 +61,16 @@ class PublisherApiClient:
         body = {"worker_id": self.worker_id, "claim_token": claim_token, "status": status, **metadata}
         return self._json("POST", f"/api/publication-worker/jobs/{job_id}/finish", body, claim_token)
     def availability(self, device_id: int) -> dict[str, Any]: return self._json("GET", f"/api/publication-worker/devices/{device_id}/availability")
+    def validate_cleanup_authorization(self, authorization: str) -> dict[str, Any]:
+        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/validate")
+        cleanup = value.get("cleanup")
+        if not isinstance(cleanup, dict): raise PublisherError("CLEANUP_AUTHORIZATION_INVALID", "Backend cleanup authorization is invalid")
+        return cleanup
+    def consume_cleanup_authorization(self, authorization: str) -> dict[str, Any]:
+        value = self._json("POST", f"/api/publication-worker/test-cleanup-authorizations/{authorization}/consume")
+        cleanup = value.get("cleanup")
+        if not isinstance(cleanup, dict): raise PublisherError("CLEANUP_AUTHORIZATION_INVALID", "Backend cleanup authorization is invalid")
+        return cleanup
 
     def download_media(self, media_id: int, claim_token: str, target: str | Path, metadata: dict[str, Any]) -> Path:
         target = Path(target); target.parent.mkdir(parents=True, exist_ok=True); partial = target.with_suffix(target.suffix + ".part")

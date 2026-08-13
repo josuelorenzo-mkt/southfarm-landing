@@ -244,6 +244,7 @@ export function registerPublicationRoutes({
           routeError(400, 'VALIDATION_ERROR', 'platform or caption is invalid');
         }
         const scheduledFor = parseSchedule(req.body?.scheduled_for);
+        const testMode = req.body?.test_mode === 'true' || req.body?.test_mode === true;
         const deviceId = parseId(req.body?.device_id, 'device_id');
         const accountId = parseId(req.body?.social_account_id, 'social_account_id');
         const workspaceId = Number(req.user.workspaceId);
@@ -279,10 +280,10 @@ export function registerPublicationRoutes({
         const transaction = db.transaction(() => {
           db.prepare("UPDATE publication_media SET private_path = ?, upload_status = 'stored', updated_at = ? WHERE id = ? AND upload_status = 'staging'").run(mediaKey, createdAt, state.mediaId);
           const jobInsert = db.prepare(`INSERT INTO publication_jobs
-            (workspace_id, created_by_user_id, device_id, social_account_id, media_id, platform, caption, word_count, scheduled_for,
+            (workspace_id, created_by_user_id, device_id, social_account_id, media_id, platform, caption, word_count, test_mode, scheduled_for,
              status, current_step, created_by_type, created_by_id, account_snapshot, device_snapshot, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 'user', ?, ?, ?, ?, ?)`)
-            .run(workspaceId, Number(req.user.userId), deviceId, accountId, state.mediaId, input.platform, input.caption, input.wordCount, scheduledFor,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 'user', ?, ?, ?, ?, ?)`)
+            .run(workspaceId, Number(req.user.userId), deviceId, accountId, state.mediaId, input.platform, input.caption, input.wordCount, testMode ? 1 : 0, scheduledFor,
               String(req.user.userId), JSON.stringify({ id: Number(account.id), username: String(account.username), display_name: String(account.display_name || account.username), platform: String(account.platform) }), JSON.stringify({ id: Number(device.id), device_id: String(device.device_id) }), createdAt, createdAt);
           state.jobId = Number(jobInsert.lastInsertRowid);
           db.prepare(`INSERT INTO publication_events (publication_job_id, from_status, to_status, current_step, actor_type, actor_id, created_at)

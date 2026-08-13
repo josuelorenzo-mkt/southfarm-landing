@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Express, Request, Response } from 'express';
@@ -36,6 +36,17 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
     return workerId && token ? { id: workerId, deviceId: 0, leaseSeconds: LEASE_SECONDS, claimToken: token } : null;
   };
   const conflict = (res: Response, error: unknown) => res.status(409).json({ error_code: 'WORKER_CLAIM_INVALID', error: error instanceof Error ? error.message : 'Worker claim is invalid or expired' });
+  const authorizationMac = (nonce: string) => createHmac('sha256', expectedHash).update(`southfarm-test-cleanup-v1.${nonce}`).digest('base64url');
+  const authorizationPayload = (token: unknown, consume: boolean): { nonce: string; payload: any } | null => {
+    if (typeof token !== 'string') return null;
+    const parts = token.split('.'); const [nonce, signature] = parts;
+    const expected = nonce ? Buffer.from(authorizationMac(nonce)) : Buffer.alloc(0); const received = Buffer.from(signature || '');
+    if (!nonce || !signature || parts.length !== 2 || received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
+    const row: any = db.prepare('SELECT payload, expires_at, consumed_at FROM publication_cleanup_authorizations WHERE nonce = ?').get(nonce);
+    if (!row || row.consumed_at || Date.parse(row.expires_at) <= Date.now()) return null;
+    if (consume && db.prepare('UPDATE publication_cleanup_authorizations SET consumed_at = ? WHERE nonce = ? AND consumed_at IS NULL AND expires_at > ?').run(new Date().toISOString(), nonce, new Date().toISOString()).changes !== 1) return null;
+    try { return { nonce, payload: JSON.parse(row.payload) }; } catch { return null; }
+  };
 
   app.post('/api/publication-worker/claim', authenticate, (req, res) => {
     const worker = workerFrom(req);
@@ -76,6 +87,23 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
       const job = store.finish(id, worker as any, target as any, timestamp, { result: safeJson(req.body?.result), errorCode: value(req.body?.error_code), errorMessage: value(req.body?.error_message), remotePostIdentity: value(req.body?.remote_post_identity), publishedAt: target === 'completed' ? timestamp : null, verifiedAt: target === 'completed' ? timestamp : null });
       res.json({ ok: true, job });
     } catch (error) { conflict(res, error); }
+  });
+
+  app.post('/api/publication-worker/test-cleanup-authorizations', authenticate, (req, res) => {
+    const body = req.body || {}; const id = jobId(body.job_id); const platform = value(body.platform); const serial = value(body.serial); const androidId = value(body.android_id); const account = value(body.account); const identity = value(body.expected_identity); const baseline = body.baseline;
+    if (!id || !platform || !serial || !androidId || !account || !identity || !Array.isArray(baseline) || !baseline.length || baseline.some((item: unknown) => typeof item !== 'string' || !item.trim()) || baseline.includes(identity)) return res.status(400).json({ error_code: 'CLEANUP_AUTH_INVALID', error: 'Cleanup authorization proof is invalid' });
+    const job: any = db.prepare(`SELECT job.*, account.username, device.device_id AS android_id FROM publication_jobs job JOIN social_accounts account ON account.id = job.social_account_id JOIN devices device ON device.id = job.device_id WHERE job.id = ?`).get(id);
+    if (!job || Number(job.test_mode) !== 1 || job.status !== 'completed' || !job.verified_at || !job.remote_post_identity || job.platform !== platform || job.username !== account || job.android_id !== androidId || job.remote_post_identity !== identity) return res.status(409).json({ error_code: 'CLEANUP_AUTH_INELIGIBLE', error: 'Job is not an eligible verified test publication' });
+    const payload = { schema: 1, marker: 'SOUTHFARM_AUTHORIZED_TEST_POST', job_id: id, job_status: 'completed', platform, serial, android_id: androidId, account, expected_identity: identity, baseline, test_mode: true };
+    const nonce = randomUUID(); const now = new Date(); const expiresAt = new Date(now.getTime() + 5 * 60 * 1000).toISOString();
+    db.prepare('INSERT INTO publication_cleanup_authorizations (nonce, job_id, payload, expires_at, created_at) VALUES (?, ?, ?, ?, ?)').run(nonce, id, JSON.stringify(payload), expiresAt, now.toISOString());
+    res.status(201).json({ authorization: `${nonce}.${authorizationMac(nonce)}`, expires_at: expiresAt, cleanup: payload });
+  });
+
+  for (const [suffix, consume] of [['validate', false], ['consume', true]] as const) app.post(`/api/publication-worker/test-cleanup-authorizations/:authorization/${suffix}`, authenticate, (req, res) => {
+    const authorized = authorizationPayload(req.params.authorization, consume);
+    if (!authorized) return res.status(409).json({ error_code: 'CLEANUP_AUTH_INVALID', error: 'Cleanup authorization is invalid, expired, or already used' });
+    res.json({ cleanup: authorized.payload });
   });
 
   app.get('/api/publication-worker/media/:id', authenticate, (req, res) => {

@@ -135,6 +135,16 @@ try {
     const invalidEvent = db.prepare('SELECT payload FROM publication_events WHERE publication_job_id = ? ORDER BY id DESC LIMIT 1').get(invalid.body.publication.id);
     assert.equal(JSON.parse(invalidEvent.payload).reason, 'MEDIA_UNAVAILABLE');
   }
+  const cleanupJobId = Number(db.prepare(`INSERT INTO publication_jobs (workspace_id, created_by_user_id, device_id, social_account_id, platform, caption, word_count, test_mode, scheduled_for, status, current_step, progress_percent, remote_post_identity, verified_at, completed_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'youtube', 'Test cleanup only', 3, 1, ?, 'completed', 'completed', 100, 'verified-test-short', ?, ?, ?, ?)`).run(workspaceId, owner.user.id, deviceId, accountId, new Date().toISOString(), new Date().toISOString(), new Date().toISOString(), new Date().toISOString(), new Date().toISOString()).lastInsertRowid);
+  const cleanupProof = { job_id: cleanupJobId, platform: 'youtube', serial: 'USB-1', android_id: 'worker-test-android', account: 'worker-test-channel', expected_identity: 'verified-test-short', baseline: ['old short'] };
+  const issuedCleanup = await request('/api/publication-worker/test-cleanup-authorizations', { method: 'POST', headers: workerHeaders, body: JSON.stringify(cleanupProof) });
+  assert.equal(issuedCleanup.response.status, 201, JSON.stringify(issuedCleanup.body)); assert.match(issuedCleanup.body.authorization, /^[0-9a-f-]+\.[A-Za-z0-9_-]+$/);
+  const validatedCleanup = await request(`/api/publication-worker/test-cleanup-authorizations/${issuedCleanup.body.authorization}/validate`, { method: 'POST', headers: workerHeaders });
+  assert.equal(validatedCleanup.response.status, 200); assert.deepEqual(validatedCleanup.body.cleanup, { schema: 1, marker: 'SOUTHFARM_AUTHORIZED_TEST_POST', ...cleanupProof, job_status: 'completed', test_mode: true });
+  const forgedCleanup = await request(`/api/publication-worker/test-cleanup-authorizations/${issuedCleanup.body.authorization}x/validate`, { method: 'POST', headers: workerHeaders }); assert.equal(forgedCleanup.response.status, 409);
+  const consumedCleanup = await request(`/api/publication-worker/test-cleanup-authorizations/${issuedCleanup.body.authorization}/consume`, { method: 'POST', headers: workerHeaders }); assert.equal(consumedCleanup.response.status, 200);
+  const replayCleanup = await request(`/api/publication-worker/test-cleanup-authorizations/${issuedCleanup.body.authorization}/consume`, { method: 'POST', headers: workerHeaders }); assert.equal(replayCleanup.response.status, 409, 'cleanup authorization is one use');
   console.log('publication-worker-api test passed: auth, atomic claim, shared lock, lease, media, cancellation, finish');
   db.close();
 } finally { await stop(); try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {} }

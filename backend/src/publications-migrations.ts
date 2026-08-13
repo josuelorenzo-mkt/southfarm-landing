@@ -45,6 +45,7 @@ export function applyPublicationMigrations(db: SqliteDatabase): void {
       platform TEXT NOT NULL,
       caption TEXT NOT NULL,
       word_count INTEGER NOT NULL,
+      test_mode INTEGER NOT NULL DEFAULT 0,
       scheduled_for TEXT NOT NULL,
       priority INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'queued',
@@ -110,7 +111,7 @@ export function applyPublicationMigrations(db: SqliteDatabase): void {
   `);
 
   for (const [name, definition] of [
-    ['created_by_user_id', 'INTEGER'], ['media_id', 'INTEGER'], ['priority', 'INTEGER NOT NULL DEFAULT 0'],
+    ['created_by_user_id', 'INTEGER'], ['media_id', 'INTEGER'], ['priority', 'INTEGER NOT NULL DEFAULT 0'], ['test_mode', 'INTEGER NOT NULL DEFAULT 0'],
     ['current_step', 'TEXT'], ['progress_percent', 'INTEGER NOT NULL DEFAULT 0'], ['claim_token', 'TEXT'],
     ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'], ['published_at', 'TEXT'], ['verified_at', 'TEXT'],
     ['remote_post_identity', 'TEXT'], ['result', 'TEXT'], ['error_code', 'TEXT'], ['error_message', 'TEXT'],
@@ -123,4 +124,15 @@ export function applyPublicationMigrations(db: SqliteDatabase): void {
     ['width', 'INTEGER'], ['height', 'INTEGER'], ['video_codec', 'TEXT'], ['audio_codec', 'TEXT'],
     ['upload_status', "TEXT NOT NULL DEFAULT 'stored'"], ['retention_until', 'TEXT'], ['updated_at', 'TEXT'],
   ] as const) addColumnIfMissing(db, 'publication_media', name, definition);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS publication_cleanup_authorizations (
+    nonce TEXT PRIMARY KEY,
+    job_id INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (job_id) REFERENCES publication_jobs(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_publication_cleanup_authorizations_expiry ON publication_cleanup_authorizations(expires_at);`);
 }
