@@ -17,6 +17,7 @@ MIME_EXTENSIONS = {"video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "
 
 class PublicationRunner:
     def __init__(self, api: Any, registry: Any, adapters: dict[str, Any], *, temp_dir: str | None = None, heartbeat_interval: float = 20.0):
+        if not adapters: raise PublisherError("CONFIG_ADAPTERS_EMPTY", "No publisher adapters are configured")
         self.api, self.registry, self.adapters = api, registry, adapters; self.temp_dir = temp_dir; self.heartbeat_interval = min(max(1.0, heartbeat_interval), 44.0)
     @staticmethod
     def backoff_seconds(random_value=random.random) -> float: return min(30.0, max(2.0, 2.0 + float(random_value()) * 28.0))
@@ -40,7 +41,6 @@ class PublicationRunner:
         claim = self.api.claim(device_id)
         if not claim: return False
         job, token, adapter = claim.job, claim.claim_token, self.adapters.get(claim.job.platform)
-        if adapter is None: raise PublisherError("CONFIG_ADAPTER_MISSING", "No publisher adapter is configured")
         state = {"final_intent": False, "final_persisted": False, "index": -1}; stop = threading.Event(); heartbeat_error: list[Exception] = []; device = None; remote_path = None
         def heartbeat_loop():
             while not stop.wait(self.heartbeat_interval):
@@ -48,6 +48,7 @@ class PublicationRunner:
                 except Exception as error: heartbeat_error.append(error); stop.set()
         thread = threading.Thread(target=heartbeat_loop, daemon=True); thread.start()
         try:
+            if adapter is None: raise PublisherError("CONFIG_ADAPTER_MISSING", "No publisher adapter is configured")
             identity = self._available_identity(self.api.availability(job.device_id), job.id); device = self.registry.open(identity); self._heartbeat_once(job.id, token)
             extension = self._media_extension(job.media)
             with tempfile.TemporaryDirectory(dir=self.temp_dir) as directory:

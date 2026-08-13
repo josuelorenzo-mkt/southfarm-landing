@@ -94,6 +94,21 @@ class RunnerTests(unittest.TestCase):
         runner.run_once(5)
         self.assertIn(("finish", "failed"), api.calls)
 
+    def test_missing_platform_adapter_finishes_claim_once_without_heartbeat_leak(self):
+        api = FakeApi(self.job()); runner = PublicationRunner(api, FakeRegistry(), {"instagram": Adapter()}, heartbeat_interval=999)
+        runner.run_once(5)
+        self.assertEqual([call for call in api.calls if call == ("finish", "failed")], [("finish", "failed")])
+        self.assertEqual([call for call in api.calls if call[0] == "heartbeat"], [])
+
+    def test_empty_adapter_registry_fails_before_any_claim(self):
+        with self.assertRaises(Exception): PublicationRunner(FakeApi(self.job()), FakeRegistry(), {})
+
+    def test_terminal_finish_failure_propagates_after_heartbeat_shutdown(self):
+        class BrokenFinish(FakeApi):
+            def finish(self, *args, **kwargs): raise RuntimeError("finish unavailable")
+        runner = PublicationRunner(BrokenFinish(self.job()), FakeRegistry(), {"instagram": Adapter()}, heartbeat_interval=999)
+        with self.assertRaisesRegex(RuntimeError, "finish unavailable"): runner.run_once(5)
+
     def test_run_forever_uses_bounded_idle_backoff(self):
         runner = PublicationRunner(FakeApi(self.job()), FakeRegistry(), {"youtube": Adapter()})
         runner.run_once = lambda device_id: False
