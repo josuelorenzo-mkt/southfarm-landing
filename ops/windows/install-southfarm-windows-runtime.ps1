@@ -6,6 +6,7 @@ param(
   [switch]$InstallPublisherWorker,
   [string]$PublisherRunAsUser,
   [int]$PublisherDeviceId,
+  [string]$PublisherDeviceSerial,
   [string]$ForbiddenInstagramAccounts,
   [switch]$AllowAllInstagramAccounts,
   [switch]$StartNow
@@ -73,8 +74,8 @@ Invoke-RequiredPowerShellScript `
   -FailureMessage "Windows Cloudflare Tunnel installation failed"
 
 if ($InstallPublisherWorker) {
-  if ([string]::IsNullOrWhiteSpace($PublisherRunAsUser) -or $PublisherDeviceId -le 0) { throw "PublisherRunAsUser and PublisherDeviceId are required with InstallPublisherWorker." }
-  $publisherArgs = @{ RunAsUser = $PublisherRunAsUser; DeviceId = $PublisherDeviceId; RuntimeRoot = $RuntimeSystemRoot; ForbiddenInstagramAccounts = $ForbiddenInstagramAccounts; AllowAllInstagramAccounts = $AllowAllInstagramAccounts }
+  if ([string]::IsNullOrWhiteSpace($PublisherRunAsUser) -or $PublisherDeviceId -le 0 -or [string]::IsNullOrWhiteSpace($PublisherDeviceSerial)) { throw "PublisherRunAsUser, PublisherDeviceId, and PublisherDeviceSerial are required with InstallPublisherWorker." }
+  $publisherArgs = @{ RunAsUser = $PublisherRunAsUser; DeviceId = $PublisherDeviceId; DeviceSerial = $PublisherDeviceSerial; RuntimeRoot = $RuntimeSystemRoot; ForbiddenInstagramAccounts = $ForbiddenInstagramAccounts; AllowAllInstagramAccounts = $AllowAllInstagramAccounts }
   Invoke-RequiredPowerShellScript `
     -Path $publisherInstallerPath `
     -Arguments $publisherArgs `

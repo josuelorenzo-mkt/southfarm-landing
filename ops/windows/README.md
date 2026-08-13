@@ -33,15 +33,15 @@ The installer migrates the existing tunnel credential from the old WSL path. Onc
 Publish the backend first, then install only after verifying the exact non-Santiago Instagram account that must be protected. Run the following from the same interactive Windows account that has authorized ADB; this is intentionally separate from the SYSTEM API installer:
 
 ~~~powershell
-.\ops\windows\install-southfarm-publisher-worker.ps1 -RunAsUser "$env:USERDOMAIN\$env:USERNAME" -DeviceId 123 -ForbiddenInstagramAccounts "protected_account"
+.\ops\windows\install-southfarm-publisher-worker.ps1 -RunAsUser "$env:USERDOMAIN\$env:USERNAME" -DeviceId 123 -DeviceSerial "ADB_SERIAL" -ForbiddenInstagramAccounts "protected_account"
 ~~~
 
-The installer copies `ffprobe.exe` from its explicit source into `%PROGRAMDATA%\SouthFarm\tools\ffmpeg`, generates a 32-byte worker secret if necessary, and stores it only in protected backend/worker config files. It refuses an empty Instagram safety policy unless `-AllowAllInstagramAccounts` is deliberately supplied. It must be launched by the intended interactive account so it can confirm ADB authorization. It preserves manual-only planning (`SOUTHFARM_AUTO_PLANNER_ENABLED=false`).
+The installer resolves `ffprobe.exe` from `PATH` or the current user's WinGet packages (or accepts an explicit `-FfprobeSourcePath`), copies it into `%PROGRAMDATA%\SouthFarm\tools\ffmpeg`, generates a 32-byte worker secret if necessary, and stores it only in protected backend/worker config files. It refuses an empty Instagram safety policy unless `-AllowAllInstagramAccounts` is deliberately supplied. `-DeviceSerial` is mandatory and validation probes only that serial plus its Android ID. First run validation normally from the target Windows account. For the real registration, reopen PowerShell with **Run as administrator in that same account**; a different administrator profile is rejected, because its ADB key is not evidence for the scheduled task user. It preserves manual-only planning (`SOUTHFARM_AUTO_PLANNER_ENABLED=false`).
 
 Preview its inputs without writing config or registering a task:
 
 ~~~powershell
-.\ops\windows\install-southfarm-publisher-worker.ps1 -RunAsUser "$env:USERDOMAIN\$env:USERNAME" -DeviceId 123 -ForbiddenInstagramAccounts "protected_account" -ValidationOnly -WhatIf
+.\ops\windows\install-southfarm-publisher-worker.ps1 -RunAsUser "$env:USERDOMAIN\$env:USERNAME" -DeviceId 123 -DeviceSerial "ADB_SERIAL" -ForbiddenInstagramAccounts "protected_account" -ValidationOnly -WhatIf
 .\ops\windows\test-southfarm-publisher-worker.ps1 -CreateTemporaryFixture
 ~~~
 

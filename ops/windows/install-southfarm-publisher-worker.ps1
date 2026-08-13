@@ -2,11 +2,12 @@
 param(
   [Parameter(Mandatory = $true)] [string]$RunAsUser,
   [Parameter(Mandatory = $true)] [int]$DeviceId,
+  [Parameter(Mandatory = $true)] [string]$DeviceSerial,
   [string]$TaskName = "SouthFarm Publisher Worker",
-  [string]$WorkerPath = (Join-Path $PSScriptRoot "..\..\publisher_worker"),
+  [string]$WorkerPath = "",
   [string]$PythonPath = "",
   [string]$AdbPath = "C:\SouthFarm\toolchain\android-sdk\platform-tools\adb.exe",
-  [string]$FfprobeSourcePath = "C:\Users\josu_\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-essentials_build\bin\ffprobe.exe",
+  [string]$FfprobeSourcePath = "",
   [string]$ApiUrl = "http://127.0.0.1:3001",
   [string]$MediaRoot = (Join-Path $env:ProgramData "SouthFarm\publish-media"),
   [string]$RuntimeRoot = (Join-Path $env:ProgramData "SouthFarm"),
@@ -21,40 +22,69 @@ $ErrorActionPreference = "Stop"
 function FullPath([string]$Path) { [IO.Path]::GetFullPath($Path) }
 function Quote-Argument([string]$Value) { '"' + $Value.Replace('"', '\"') + '"' }
 function Assert-Path([string]$Path, [string]$Label) { if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label not found: $Path" } }
-function Set-ProtectedAcl([string]$Path, [string[]]$AccountSids) {
+function Set-ProtectedFileAcl([string]$Path, [hashtable]$AccountRights) {
   $acl = New-Object System.Security.AccessControl.FileSecurity; $acl.SetAccessRuleProtection($true, $false)
-  foreach ($sid in $AccountSids | Select-Object -Unique) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  foreach ($sid in $AccountRights.Keys) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), $AccountRights[$sid], "Allow"))) }
+  Set-Acl -LiteralPath $Path -AclObject $acl
+}
+function Set-ProtectedDirectoryAcl([string]$Path, [hashtable]$AccountRights) {
+  $acl = New-Object System.Security.AccessControl.DirectorySecurity; $acl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in $AccountRights.Keys) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), $AccountRights[$sid], "ContainerInherit,ObjectInherit", "None", "Allow"))) }
   Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 if ($DeviceId -le 0) { throw "DeviceId must be positive." }
+if ([string]::IsNullOrWhiteSpace($DeviceSerial) -or $DeviceSerial -notmatch '^[A-Za-z0-9._:-]+$') { throw "DeviceSerial must be an exact safe ADB serial." }
 if ([string]::IsNullOrWhiteSpace($ForbiddenInstagramAccounts) -and !$AllowAllInstagramAccounts) { throw "Provide ForbiddenInstagramAccounts or explicitly set AllowAllInstagramAccounts." }
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($WorkerPath)) { $WorkerPath = Join-Path $scriptRoot "..\..\publisher_worker" }
+if ([string]::IsNullOrWhiteSpace($FfprobeSourcePath)) {
+  $ffprobeCommand = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
+  if ($ffprobeCommand) { $FfprobeSourcePath = $ffprobeCommand.Source }
+  else {
+    $wingetPackages = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+    $candidate = Get-ChildItem -LiteralPath $wingetPackages -Filter ffprobe.exe -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($candidate) { $FfprobeSourcePath = $candidate.FullName }
+  }
+  if ([string]::IsNullOrWhiteSpace($FfprobeSourcePath)) { throw "ffprobe.exe was not found on PATH or under the current user's WinGet packages; pass FfprobeSourcePath explicitly." }
+}
 $WorkerPath = FullPath $WorkerPath; $AdbPath = FullPath $AdbPath; $FfprobeSourcePath = FullPath $FfprobeSourcePath; $MediaRoot = FullPath $MediaRoot; $RuntimeRoot = FullPath $RuntimeRoot; $BackendRuntimeConfigPath = FullPath $BackendRuntimeConfigPath
 if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = (Get-Command python.exe -ErrorAction Stop).Source }
 $PythonPath = FullPath $PythonPath
 Assert-Path $PythonPath "Python executable"; Assert-Path $AdbPath "ADB executable"; Assert-Path $FfprobeSourcePath "ffprobe executable"
 if (!(Test-Path -LiteralPath (Join-Path $WorkerPath "southfarm_publisher\runner.py"))) { throw "Publisher worker module not found: $WorkerPath" }
 $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent(); $requested = New-Object Security.Principal.NTAccount($RunAsUser); $requestedSid = $requested.Translate([Security.Principal.SecurityIdentifier]).Value
-if (!$ValidationOnly -and $requestedSid -ne $currentIdentity.User.Value) { throw "Run this installer from the requested interactive account so ADB authorization is verified in that account." }
-if (!$ValidationOnly) { $adbDevices = & $AdbPath devices 2>&1; if ($LASTEXITCODE -ne 0 -or -not (($adbDevices -join "`n") -match "\tdevice$")) { throw "ADB has no authorized device for the requested interactive account." } }
+if ($requestedSid -ne $currentIdentity.User.Value) { throw "Run this script while signed in as RunAsUser; validation from an administrator's different profile is rejected." }
+$principalCheck = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+if (!$ValidationOnly -and !$principalCheck.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Real installation must be run elevated from the exact RunAsUser account. First run ValidationOnly normally, then reopen PowerShell as Administrator in the same account." }
+$adbState = (& $AdbPath -s $DeviceSerial get-state 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $adbState -ne "device") { throw "The exact DeviceSerial is not authorized for ADB in the RunAsUser profile." }
+$androidId = (& $AdbPath -s $DeviceSerial shell settings get secure android_id 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $androidId -notmatch '^[A-Fa-f0-9]{8,32}$') { throw "Could not verify android_id for the exact DeviceSerial." }
 
-$configDir = Join-Path $RuntimeRoot "config"; $logDir = Join-Path $RuntimeRoot "logs"; $toolPath = Join-Path $RuntimeRoot "tools\ffmpeg\ffprobe.exe"; $workerConfigPath = Join-Path $configDir "publisher-worker.json"; $supervisorPath = FullPath (Join-Path $PSScriptRoot "southfarm-publisher-supervisor.ps1")
+$configDir = Join-Path $RuntimeRoot "config"; $logDir = Join-Path $RuntimeRoot "logs"; $evidenceRoot = Join-Path $RuntimeRoot "publish-evidence"; $toolPath = Join-Path $RuntimeRoot "tools\ffmpeg\ffprobe.exe"; $workerConfigPath = Join-Path $configDir "publisher-worker.json"; $supervisorPath = FullPath (Join-Path $scriptRoot "southfarm-publisher-supervisor.ps1")
 if ([string]::IsNullOrWhiteSpace($WorkerToken)) { $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); $WorkerToken = [Convert]::ToBase64String($bytes) }
 if ([Convert]::FromBase64String($WorkerToken).Length -ne 32) { throw "WorkerToken must be a Base64 encoding of exactly 32 bytes." }
+if (!(Test-Path -LiteralPath $BackendRuntimeConfigPath -PathType Leaf)) { throw "Backend runtime config not found: $BackendRuntimeConfigPath" }
+$backendConfig = Get-Content -LiteralPath $BackendRuntimeConfigPath -Raw | ConvertFrom-Json
+if ([string]::IsNullOrWhiteSpace([string]$backendConfig.jwt_secret)) { throw "Backend runtime config is invalid." }
 if ($ValidationOnly -or $WhatIfPreference) { Write-Output "Validated publisher worker installation inputs; no config or task was changed."; return }
 
-New-Item -ItemType Directory -Force -Path $configDir, $logDir, $MediaRoot, (Split-Path -Parent $toolPath) | Out-Null
+New-Item -ItemType Directory -Force -Path $configDir, $logDir, $MediaRoot, $evidenceRoot, (Split-Path -Parent $toolPath) | Out-Null
+$systemSid = "S-1-5-18"; $adminsSid = "S-1-5-32-544"
+Set-ProtectedDirectoryAcl $configDir @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
+Set-ProtectedDirectoryAcl $logDir @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="Modify" }
+Set-ProtectedDirectoryAcl $MediaRoot @{ $systemSid="FullControl"; $adminsSid="FullControl" }
+Set-ProtectedDirectoryAcl $evidenceRoot @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="Modify" }
 Copy-Item -LiteralPath $FfprobeSourcePath -Destination $toolPath -Force
-$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); device_id=$DeviceId; worker_token=$WorkerToken; media_root=$MediaRoot; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
+$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
 [IO.File]::WriteAllText($workerConfigPath, ($workerConfig | ConvertTo-Json -Compress))
-Set-ProtectedAcl $workerConfigPath @("S-1-5-18", "S-1-5-32-544", $requestedSid)
+Set-ProtectedFileAcl $workerConfigPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 
-if (!(Test-Path -LiteralPath $BackendRuntimeConfigPath)) { throw "Backend runtime config not found: $BackendRuntimeConfigPath" }
-$backendConfig = Get-Content -LiteralPath $BackendRuntimeConfigPath -Raw | ConvertFrom-Json
 $backendValues = [ordered]@{}; foreach ($property in $backendConfig.PSObject.Properties) { $backendValues[$property.Name] = $property.Value }
 $backendValues["publisher_worker_token"] = $WorkerToken; $backendValues["publisher_worker_enabled"] = $true; $backendValues["publication_media_root"] = $MediaRoot; $backendValues["ffprobe_path"] = $toolPath
 [IO.File]::WriteAllText($BackendRuntimeConfigPath, ($backendValues | ConvertTo-Json -Compress))
-Set-ProtectedAcl $BackendRuntimeConfigPath @("S-1-5-18", "S-1-5-32-544")
+Set-ProtectedFileAcl $BackendRuntimeConfigPath @{ $systemSid="FullControl"; $adminsSid="FullControl" }
 
 $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $(Quote-Argument $supervisorPath) -ConfigPath $(Quote-Argument $workerConfigPath) -LogDirectory $(Quote-Argument $logDir)"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$ConfigPath = (Join-Path $env:ProgramData "SouthFarm\config\publisher-worker.json"),
+  [string]$BackendRuntimeConfigPath = (Join-Path $env:ProgramData "SouthFarm\config\backend-runtime.json"),
   [string]$TaskName = "SouthFarm Publisher Worker",
   [string]$ExpectedRunAsUser,
   [switch]$SkipTaskLookup,
@@ -13,24 +14,50 @@ $ErrorActionPreference = "Stop"
 function Assert-WorkerCondition([bool]$Condition, [string]$Message) {
   if (!$Condition) { throw $Message }
 }
+function Has-AllowSid($Acl, [string]$Sid) {
+  return [bool]($Acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $Sid -and $_.AccessControlType -eq "Allow" })
+}
 
 $temporaryRoot = $null
 if ($CreateTemporaryFixture) {
   $temporaryRoot = Join-Path $env:TEMP ("southfarm-publisher-test-" + [guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
   $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-  $fixture = [ordered]@{ python_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); worker_path=$temporaryRoot; adb_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); ffprobe_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); api_url="http://127.0.0.1:1"; worker_id="test-worker"; device_id=1; worker_token=[Convert]::ToBase64String($bytes); media_root=$temporaryRoot; forbidden_instagram_accounts="fixture-account"; allow_all_instagram_accounts=$false }
+  $mediaRoot = Join-Path $temporaryRoot "media"; $evidenceRoot = Join-Path $temporaryRoot "evidence"; $logRoot = Join-Path $temporaryRoot "logs"
+  New-Item -ItemType Directory -Force -Path $mediaRoot, $evidenceRoot, $logRoot | Out-Null
+  $fixtureSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $fixture = [ordered]@{ python_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); worker_path=$temporaryRoot; adb_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); ffprobe_path=(Join-Path $env:WINDIR "System32\\cmd.exe"); api_url="http://127.0.0.1:1"; worker_id="test-worker"; run_as_user=[Security.Principal.WindowsIdentity]::GetCurrent().Name; run_as_sid=$fixtureSid; device_id=1; device_serial="fixture-serial"; android_id="0123456789abcdef"; worker_token=[Convert]::ToBase64String($bytes); media_root=$mediaRoot; evidence_root=$evidenceRoot; log_root=$logRoot; forbidden_instagram_accounts="fixture-account"; allow_all_instagram_accounts=$false }
   $ConfigPath = Join-Path $temporaryRoot "publisher-worker.json"
   [IO.File]::WriteAllText($ConfigPath, ($fixture | ConvertTo-Json -Compress))
   $acl = New-Object System.Security.AccessControl.FileSecurity; $acl.SetAccessRuleProtection($true, $false)
   foreach ($sid in @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) { $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
   Set-Acl -LiteralPath $ConfigPath -AclObject $acl
+  foreach ($directory in @($mediaRoot, $evidenceRoot, $logRoot)) {
+    $directoryAcl = New-Object System.Security.AccessControl.DirectorySecurity; $directoryAcl.SetAccessRuleProtection($true, $false)
+    $directorySids = @("S-1-5-18", "S-1-5-32-544", [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    foreach ($sid in $directorySids) { $directoryAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"))) }
+    Set-Acl -LiteralPath $directory -AclObject $directoryAcl
+  }
+  $fakeAdb = Join-Path $temporaryRoot "fake-adb.cmd"
+  [IO.File]::WriteAllText($fakeAdb, "@echo off`r`nif `%3==get-state (echo device) else (echo 0123456789abcdef)`r`nexit /b 0`r`n")
+  $backendConfig = Join-Path $temporaryRoot "backend-runtime.json"
+  [IO.File]::WriteAllText($backendConfig, '{"jwt_secret":"fixture-only"}')
+  $installer = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "install-southfarm-publisher-worker.ps1"
+  $validationOutput = & $installer -RunAsUser ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -DeviceId 1 -DeviceSerial "fixture-serial" -PythonPath (Join-Path $env:WINDIR "System32\cmd.exe") -AdbPath $fakeAdb -FfprobeSourcePath (Join-Path $env:WINDIR "System32\cmd.exe") -RuntimeRoot (Join-Path $temporaryRoot "runtime") -BackendRuntimeConfigPath $backendConfig -ForbiddenInstagramAccounts "fixture-account" -ValidationOnly -WhatIf
+  Assert-WorkerCondition (($validationOutput -join "`n") -eq "Validated publisher worker installation inputs; no config or task was changed.") "Installer ValidationOnly fixture did not pass exactly"
+  Assert-WorkerCondition (!(Test-Path -LiteralPath (Join-Path $temporaryRoot "runtime\config\publisher-worker.json"))) "ValidationOnly wrote a worker config"
+  [IO.File]::WriteAllText($backendConfig, (@{ jwt_secret="fixture-only"; publisher_worker_token=$fixture.worker_token; publisher_worker_enabled=$true; publication_media_root=$mediaRoot; ffprobe_path=$fixture.ffprobe_path } | ConvertTo-Json -Compress))
+  $backendFileAcl = New-Object System.Security.AccessControl.FileSecurity; $backendFileAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $fixtureSid)) { $backendFileAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier($sid)), "FullControl", "Allow"))) }
+  Set-Acl -LiteralPath $backendConfig -AclObject $backendFileAcl
+  $BackendRuntimeConfigPath = $backendConfig
   $SkipTaskLookup = $true; $SkipHealthProbe = $true
 }
 $ConfigPath = [IO.Path]::GetFullPath($ConfigPath)
+$BackendRuntimeConfigPath = [IO.Path]::GetFullPath($BackendRuntimeConfigPath)
 Assert-WorkerCondition (Test-Path -LiteralPath $ConfigPath) "Publisher worker config not found: $ConfigPath"
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-foreach ($name in @("python_path", "adb_path", "ffprobe_path", "api_url", "worker_id", "device_id", "worker_token", "media_root")) {
+foreach ($name in @("python_path", "adb_path", "ffprobe_path", "api_url", "worker_id", "run_as_user", "run_as_sid", "device_id", "device_serial", "android_id", "worker_token", "media_root", "evidence_root", "log_root")) {
   Assert-WorkerCondition (![string]::IsNullOrWhiteSpace([string]$config.$name)) "Publisher worker config is missing $name"
 }
 foreach ($pathName in @("python_path", "adb_path", "ffprobe_path")) {
@@ -40,11 +67,43 @@ Assert-WorkerCondition (([int]$config.device_id) -gt 0) "Publisher worker device
 Assert-WorkerCondition ([Convert]::FromBase64String([string]$config.worker_token).Length -eq 32) "Publisher worker token must contain exactly 32 bytes"
 Assert-WorkerCondition (![string]::IsNullOrWhiteSpace([string]$config.forbidden_instagram_accounts) -or [bool]$config.allow_all_instagram_accounts) "Instagram forbidden-account policy must be explicit"
 Assert-WorkerCondition ([IO.Path]::IsPathRooted([string]$config.media_root)) "Publisher media root must be absolute"
+Assert-WorkerCondition ([IO.Path]::IsPathRooted([string]$config.evidence_root)) "Publisher evidence root must be absolute"
+Assert-WorkerCondition ([string]$config.device_serial -match '^[A-Za-z0-9._:-]+$') "Publisher device serial is unsafe"
+Assert-WorkerCondition ([string]$config.android_id -match '^[A-Fa-f0-9]{8,32}$') "Publisher Android ID is invalid"
 
 $acl = Get-Acl -LiteralPath $ConfigPath
+Assert-WorkerCondition ($acl.AreAccessRulesProtected) "Publisher worker config inherits broad ACLs"
+$systemSid = "S-1-5-18"; $adminsSid = "S-1-5-32-544"; $runAsSid = [string]$config.run_as_sid
+Assert-WorkerCondition (Has-AllowSid $acl $systemSid) "Publisher worker config does not grant SYSTEM"
+Assert-WorkerCondition (Has-AllowSid $acl $adminsSid) "Publisher worker config does not grant Administrators"
+Assert-WorkerCondition (Has-AllowSid $acl $runAsSid) "Publisher worker config does not grant its RunAs user"
 $ordinarySids = @("S-1-1-0", "S-1-5-11", "S-1-5-32-545")
 foreach ($ordinarySid in $ordinarySids) {
   Assert-WorkerCondition (-not ($acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $ordinarySid -and $_.AccessControlType -eq "Allow" })) "Publisher worker config ACL grants ordinary users"
+}
+Assert-WorkerCondition (Test-Path -LiteralPath $BackendRuntimeConfigPath -PathType Leaf) "Backend runtime config not found"
+$backendConfig = Get-Content -LiteralPath $BackendRuntimeConfigPath -Raw | ConvertFrom-Json
+Assert-WorkerCondition ([string]$backendConfig.publisher_worker_token -ceq [string]$config.worker_token) "Backend and worker tokens do not match"
+Assert-WorkerCondition ([bool]$backendConfig.publisher_worker_enabled) "Backend publisher worker is not enabled"
+$backendAcl = Get-Acl -LiteralPath $BackendRuntimeConfigPath
+Assert-WorkerCondition ($backendAcl.AreAccessRulesProtected) "Backend runtime config inherits broad ACLs"
+Assert-WorkerCondition (Has-AllowSid $backendAcl $systemSid) "Backend runtime config does not grant SYSTEM"
+Assert-WorkerCondition (Has-AllowSid $backendAcl $adminsSid) "Backend runtime config does not grant Administrators"
+if (!$temporaryRoot) { Assert-WorkerCondition (-not (Has-AllowSid $backendAcl $runAsSid)) "Backend runtime config unnecessarily grants the worker user" }
+foreach ($ordinarySid in $ordinarySids) {
+  Assert-WorkerCondition (-not ($backendAcl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $ordinarySid -and $_.AccessControlType -eq "Allow" })) "Backend runtime config grants ordinary users"
+}
+foreach ($directory in @([string]$config.media_root, [string]$config.evidence_root, [string]$config.log_root)) {
+  Assert-WorkerCondition (Test-Path -LiteralPath $directory -PathType Container) "Protected publisher directory is missing: $directory"
+  $directoryAcl = Get-Acl -LiteralPath $directory
+  Assert-WorkerCondition ($directoryAcl.AreAccessRulesProtected) "Publisher directory inherits broad ACLs: $directory"
+  foreach ($ordinarySid in $ordinarySids) {
+    Assert-WorkerCondition (-not ($directoryAcl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $ordinarySid -and $_.AccessControlType -eq "Allow" })) "Publisher directory grants ordinary users: $directory"
+  }
+  Assert-WorkerCondition (Has-AllowSid $directoryAcl $systemSid) "Publisher directory does not grant SYSTEM: $directory"
+  Assert-WorkerCondition (Has-AllowSid $directoryAcl $adminsSid) "Publisher directory does not grant Administrators: $directory"
+  if ($directory -eq [string]$config.media_root) { if (!$temporaryRoot) { Assert-WorkerCondition (-not (Has-AllowSid $directoryAcl $runAsSid)) "Media root unnecessarily grants the worker user" } }
+  else { Assert-WorkerCondition (Has-AllowSid $directoryAcl $runAsSid) "Worker user cannot write required logs/evidence: $directory" }
 }
 
 if (!$SkipTaskLookup) {
@@ -63,6 +122,25 @@ if (!$SkipHealthProbe) {
   $headers = @{ Authorization = "Bearer $([string]$config.worker_token)" }
   try { Invoke-WebRequest -Uri (([string]$config.api_url).TrimEnd('/') + "/api/publication-worker/devices/" + [int]$config.device_id + "/availability") -Headers $headers -TimeoutSec 8 -UseBasicParsing | Out-Null }
   catch { if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 401) { throw "Publisher worker local health probe was not authenticated." }; throw "Publisher worker local health probe failed." }
+}
+
+if ($temporaryRoot) {
+  $selfPath = $MyInvocation.MyCommand.Path
+  $originalBackendText = Get-Content -LiteralPath $BackendRuntimeConfigPath -Raw
+  $badBackend = $originalBackendText | ConvertFrom-Json; $badBackend.publisher_worker_token = [Convert]::ToBase64String((New-Object byte[] 32))
+  [IO.File]::WriteAllText($BackendRuntimeConfigPath, ($badBackend | ConvertTo-Json -Compress))
+  $failedAsExpected = $false
+  try { & $selfPath -ConfigPath $ConfigPath -BackendRuntimeConfigPath $BackendRuntimeConfigPath -SkipTaskLookup -SkipHealthProbe | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Backend and worker tokens do not match" }
+  Assert-WorkerCondition $failedAsExpected "Negative token mismatch fixture was not rejected"
+  [IO.File]::WriteAllText($BackendRuntimeConfigPath, $originalBackendText)
+
+  $originalConfigText = Get-Content -LiteralPath $ConfigPath -Raw
+  $badConfig = $originalConfigText | ConvertFrom-Json; $badConfig.device_serial = "unsafe serial with spaces"
+  [IO.File]::WriteAllText($ConfigPath, ($badConfig | ConvertTo-Json -Compress))
+  $failedAsExpected = $false
+  try { & $selfPath -ConfigPath $ConfigPath -BackendRuntimeConfigPath $BackendRuntimeConfigPath -SkipTaskLookup -SkipHealthProbe | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "Publisher device serial is unsafe" }
+  Assert-WorkerCondition $failedAsExpected "Negative unsafe serial fixture was not rejected"
+  [IO.File]::WriteAllText($ConfigPath, $originalConfigText)
 }
 
 # Deliberately never print the configuration object: it contains the worker token.
