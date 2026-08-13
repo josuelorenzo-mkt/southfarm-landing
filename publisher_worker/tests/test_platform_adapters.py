@@ -185,6 +185,14 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "CLEANUP_MENU_COLLISION")
         self.assertEqual(device.taps, [])
 
+    def test_instagram_cleanup_wrong_menu_id_never_reaches_delete(self):
+        expected, baseline = "safe reel", {"older reel", "expected.account"}
+        device = Device("com.instagram.android", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"content-desc": "More options"})]])
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 1)
+
     def test_cleanup_missing_confirmation_never_taps_delete_action(self):
         expected, baseline = "safe video", {"older video", "expected.account"}
         device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], []])
