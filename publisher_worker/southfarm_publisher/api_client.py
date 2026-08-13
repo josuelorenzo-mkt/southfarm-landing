@@ -64,12 +64,12 @@ class PublisherApiClient:
 
     def download_media(self, media_id: int, claim_token: str, target: str | Path, metadata: dict[str, Any]) -> Path:
         target = Path(target); target.parent.mkdir(parents=True, exist_ok=True); partial = target.with_suffix(target.suffix + ".part")
+        response = None
         try:
             response = self._request("GET", f"/api/publication-worker/media/{media_id}", claim_token=claim_token)
             digest = hashlib.sha256(); count = 0
             with partial.open("wb") as handle:
                 while chunk := response.read(1024 * 1024): handle.write(chunk); digest.update(chunk); count += len(chunk)
-            response.close()
             if count != int(metadata["size_bytes"]) or digest.hexdigest().lower() != str(metadata["sha256"]).lower():
                 raise PublisherError("MEDIA_HASH_MISMATCH", "Downloaded media did not match its verified metadata")
             os.replace(partial, target); return target
@@ -78,4 +78,5 @@ class PublisherApiClient:
                 try: candidate.unlink()
                 except FileNotFoundError: pass
             raise
-
+        finally:
+            if response is not None: response.close()

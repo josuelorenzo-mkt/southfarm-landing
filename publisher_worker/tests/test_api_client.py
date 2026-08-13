@@ -33,3 +33,14 @@ class ApiClientTests(unittest.TestCase):
         client = PublisherApiClient("https://api.example.test", "secret-token", "worker-a", opener=fail)
         with self.assertRaises(PublisherError) as raised: client.claim(5)
         self.assertNotIn("secret-token", str(raised.exception))
+
+    def test_download_closes_response_when_disk_write_fails(self):
+        response = FakeResponse(body=b"video")
+        response.close = lambda: setattr(response, "closed", True)
+        client = PublisherApiClient("https://api.example.test", "secret-token", "worker-a", opener=lambda request, timeout: response)
+        with tempfile.TemporaryDirectory() as directory:
+            target = os.path.join(directory, "clip.mp4")
+            import unittest.mock
+            with unittest.mock.patch("pathlib.Path.open", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError): client.download_media(9, "claim-1", target, {"size_bytes": 5, "sha256": "0" * 64})
+        self.assertTrue(response.closed)

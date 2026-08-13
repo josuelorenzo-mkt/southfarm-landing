@@ -40,9 +40,11 @@ class SafeAdb:
     def dump_ui(self) -> list[dict[str, str]]:
         return self.parse_ui(self.command("exec-out", "uiautomator", "dump", "/dev/tty", timeout=15))
     def screenshot(self, target: str) -> None:
+        destination = os.path.abspath(target)
+        if not destination.lower().endswith(".png") or not os.path.isdir(os.path.dirname(destination)): raise ValueError("screenshot target must be an existing PNG path")
         image = self.binary_command("exec-out", "screencap", "-p", "/dev/stdout", timeout=30)
         if not image: raise PublisherError("SCREENSHOT_EMPTY", "Device screenshot was empty", retryable=True)
-        with open(target, "wb") as handle: handle.write(image)
+        with open(destination, "wb") as handle: handle.write(image)
     @staticmethod
     def find_exact(nodes: list[dict[str, str]], *, text: str | None = None, content_desc: str | None = None, resource_id: str | None = None) -> dict[str, str] | None:
         for node in nodes:
@@ -60,10 +62,18 @@ class SafeAdb:
         return values
     def tap_bounds(self, bounds: tuple[int, int, int, int], delay_seconds: float = 0.2) -> None:
         x1,y1,x2,y2 = bounds; self.command("shell", "input", "tap", str((x1+x2)//2), str((y1+y2)//2)); time.sleep(max(0.0, min(delay_seconds, 2.0)))
-    def text(self, value: str) -> None: self.command("shell", "input", "text", value.replace(" ", "%s"))
-    def push(self, local: str, remote: str) -> None: self.command("push", local, remote, timeout=120)
-    def scan_media(self, remote: str) -> None: self.command("shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{remote}")
-    def remove(self, remote: str) -> None: self.command("shell", "rm", "-f", remote)
+    def text(self, value: str) -> None:
+        if not value or any(char in value for char in "\x00\n\r;&|`$<>()\\\"") or not re.fullmatch(r"[\w .,!?'#@%:+\-]+", value, re.UNICODE): raise ValueError("text contains unsafe characters")
+        self.command("shell", "input", "text", value.replace(" ", "%s"))
+    @staticmethod
+    def safe_remote_path(remote: str) -> str:
+        root = "/sdcard/Movies/SouthFarm/"
+        if not remote.startswith(root): raise ValueError("remote path must stay in SouthFarm directory")
+        return root + SafeAdb.safe_remote_name(remote[len(root):])
+    def push(self, local: str, remote: str) -> None: self.command("push", local, self.safe_remote_path(remote), timeout=120)
+    def scan_media(self, remote: str) -> None:
+        safe = self.safe_remote_path(remote); self.command("shell", "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE", "-d", f"file://{safe}")
+    def remove(self, remote: str) -> None: self.command("shell", "rm", "-f", self.safe_remote_path(remote))
     def foreground_package(self) -> str | None:
         output = self.command("shell", "dumpsys", "activity", "activities")
         match = re.search(r"\bu\d+\s+([A-Za-z0-9_.]+)/", output); return match.group(1) if match else None

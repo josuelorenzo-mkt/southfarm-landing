@@ -62,3 +62,7 @@ class AdbDeviceTests(unittest.TestCase):
     def test_remote_path_is_sanitized(self):
         self.assertEqual(SafeAdb.safe_remote_name("../../clip name.mp4"), "clip_name.mp4")
         with self.assertRaises(ValueError): SafeAdb.safe_remote_name("..").__str__()
+    def test_text_and_remote_operations_reject_unsafe_inputs(self):
+        adb = SafeAdb("serial-1", run=FakeRun(), adb_path="adb-test")
+        with self.assertRaises(ValueError): adb.text("unsafe; rm")
+        with self.assertRaises(ValueError): adb.remove("/sdcard/Download/clip.mp4")
