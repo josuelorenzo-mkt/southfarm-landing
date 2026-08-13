@@ -41,12 +41,12 @@ class PublicationRunner:
         claim = self.api.claim(device_id)
         if not claim: return False
         job, token, adapter = claim.job, claim.claim_token, self.adapters.get(claim.job.platform)
-        state = {"final_intent": False, "final_persisted": False, "index": -1}; stop = threading.Event(); heartbeat_error: list[Exception] = []; device = None; remote_path = None
+        state = {"final_intent": False, "final_persisted": False, "terminal_attempted": False, "index": -1}; stop = threading.Event(); heartbeat_error: list[Exception] = []; device = None; remote_path = None
         def heartbeat_loop():
             while not stop.wait(self.heartbeat_interval):
                 try: self._heartbeat_once(job.id, token)
                 except Exception as error: heartbeat_error.append(error); stop.set()
-        thread = threading.Thread(target=heartbeat_loop); thread.start()
+        thread = threading.Thread(target=heartbeat_loop, name=f"southfarm-publisher-heartbeat-{job.id}"); thread.start()
         heartbeat_stopped = False
         def stop_heartbeat() -> None:
             nonlocal heartbeat_stopped
@@ -55,6 +55,8 @@ class PublicationRunner:
             if threading.current_thread() is not thread: thread.join()
             heartbeat_stopped = True
         def terminal_finish(status: str, **metadata: Any) -> None:
+            if state["terminal_attempted"]: return
+            state["terminal_attempted"] = True
             stop_heartbeat()
             self.api.finish(job.id, token, status, **metadata)
         try:
@@ -80,8 +82,10 @@ class PublicationRunner:
                 checkpoint("verifying", 95); identity = adapter.verify(job, device)
                 terminal_finish("completed", remote_post_identity=identity)
         except JobCancelled:
+            if state["terminal_attempted"]: raise
             terminal_finish("review_required" if state["final_intent"] else "cancelled", error_code="JOB_CANCELLED")
         except Exception as error:
+            if state["terminal_attempted"]: raise
             uncertain = state["final_intent"] or isinstance(error, PublisherError) and error.final_action_uncertain
             terminal_finish("review_required" if uncertain else "failed", error_code=getattr(error, "code", "WORKER_ERROR"))
         finally:

@@ -110,6 +110,35 @@ class RunnerTests(unittest.TestCase):
         runner = PublicationRunner(BrokenFinish(self.job()), FakeRegistry(), {"instagram": Adapter()}, heartbeat_interval=999)
         with self.assertRaisesRegex(RuntimeError, "finish unavailable"): runner.run_once(5)
 
+    def test_terminal_finish_transport_failures_are_not_retried_or_reclassified(self):
+        class RaisingFinishApi(FakeApi):
+            def __init__(self, job, failure, lose_final_checkpoint=False):
+                super().__init__(job); self.failure = failure; self.lose_final_checkpoint = lose_final_checkpoint; self.finish_attempts = 0; self.heartbeat_after_finish = False; self.finished = False
+            def heartbeat(self, job_id, token):
+                if self.finished: self.heartbeat_after_finish = True
+                return super().heartbeat(job_id, token)
+            def checkpoint(self, job_id, token, step, progress, final_action=False, evidence=None):
+                super().checkpoint(job_id, token, step, progress, final_action, evidence)
+                if self.lose_final_checkpoint and final_action: raise OSError("final checkpoint response lost")
+            def finish(self, job_id, token, status, **kwargs):
+                self.finish_attempts += 1; self.calls.append(("finish", status)); self.finished = True
+                raise self.failure
+        cases = [
+            (ConnectionError("finish not sent"), False, "completed"),
+            (OSError("finish response lost"), True, "review_required"),
+        ]
+        for failure, lose_final_checkpoint, expected_status in cases:
+            with self.subTest(failure=failure):
+                adapter = Adapter(); api = RaisingFinishApi(self.job(), failure, lose_final_checkpoint)
+                runner = PublicationRunner(api, FakeRegistry(), {"youtube": adapter}, heartbeat_interval=999)
+                with self.assertRaisesRegex(type(failure), str(failure)):
+                    runner.run_once(5)
+                self.assertEqual(api.finish_attempts, 1)
+                self.assertEqual([call for call in api.calls if call[0] == "finish"], [("finish", expected_status)])
+                self.assertFalse(api.heartbeat_after_finish)
+                self.assertFalse(any(thread.name == "southfarm-publisher-heartbeat-7" and thread.is_alive() for thread in threading.enumerate()))
+                self.assertTrue(adapter.cleaned)
+
     def test_terminal_finish_waits_for_inflight_heartbeat(self):
         entered, release, complete, finished = threading.Event(), threading.Event(), threading.Event(), threading.Event()
         class BlockingApi(FakeApi):
