@@ -1,50 +1,75 @@
 function columnNames(db, table) {
-    return new Set(db.prepare(`PRAGMA table_info(${table})`).all()
-        .map((column) => column.name));
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
 }
 function addColumnIfMissing(db, table, name, definition) {
-    if (!columnNames(db, table).has(name)) {
+    if (!columnNames(db, table).has(name))
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
-    }
 }
-/** Additive schema for publication scheduling; legacy task runs remain unchanged. */
+/** Additive private-media and durable publication-queue schema. */
 export function applyPublicationMigrations(db) {
     db.exec(`
+    CREATE TABLE IF NOT EXISTS publication_media (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id INTEGER NOT NULL,
+      created_by_user_id INTEGER,
+      original_filename TEXT NOT NULL,
+      private_path TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      file_extension TEXT,
+      size_bytes INTEGER NOT NULL,
+      sha256 TEXT NOT NULL,
+      duration_seconds REAL,
+      width INTEGER,
+      height INTEGER,
+      video_codec TEXT,
+      audio_codec TEXT,
+      upload_status TEXT NOT NULL DEFAULT 'stored',
+      retention_until TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+    );
+
     CREATE TABLE IF NOT EXISTS publication_jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       workspace_id INTEGER NOT NULL,
+      created_by_user_id INTEGER,
       device_id INTEGER NOT NULL,
       social_account_id INTEGER NOT NULL,
+      media_id INTEGER,
       platform TEXT NOT NULL,
       caption TEXT NOT NULL,
       word_count INTEGER NOT NULL,
       scheduled_for TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'queued',
+      current_step TEXT,
+      progress_percent INTEGER NOT NULL DEFAULT 0,
+      claim_token TEXT,
       claimed_by TEXT,
       claimed_at TEXT,
       lease_expires_at TEXT,
       last_heartbeat_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
       final_action_at TEXT,
-      cancellation_requested_at TEXT,
+      published_at TEXT,
+      verified_at TEXT,
+      remote_post_identity TEXT,
+      result TEXT,
+      error_code TEXT,
+      error_message TEXT,
+      cancel_requested_at TEXT,
+      completed_at TEXT,
+      account_snapshot TEXT,
+      device_snapshot TEXT,
       created_by_type TEXT,
       created_by_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
       FOREIGN KEY (device_id) REFERENCES devices(id),
-      FOREIGN KEY (social_account_id) REFERENCES social_accounts(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS publication_media (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      publication_job_id INTEGER NOT NULL,
-      workspace_id INTEGER NOT NULL,
-      media_url TEXT NOT NULL,
-      media_type TEXT NOT NULL,
-      position INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (publication_job_id) REFERENCES publication_jobs(id),
-      FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+      FOREIGN KEY (social_account_id) REFERENCES social_accounts(id),
+      FOREIGN KEY (media_id) REFERENCES publication_media(id)
     );
 
     CREATE TABLE IF NOT EXISTS publication_events (
@@ -52,6 +77,8 @@ export function applyPublicationMigrations(db) {
       publication_job_id INTEGER NOT NULL,
       from_status TEXT,
       to_status TEXT,
+      current_step TEXT,
+      message TEXT,
       actor_type TEXT,
       actor_id TEXT,
       payload TEXT,
@@ -70,17 +97,25 @@ export function applyPublicationMigrations(db) {
       FOREIGN KEY (publication_job_id) REFERENCES publication_jobs(id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_publication_jobs_status_schedule
-      ON publication_jobs(status, scheduled_for);
-    CREATE INDEX IF NOT EXISTS idx_publication_jobs_device_status
-      ON publication_jobs(device_id, status);
-    CREATE INDEX IF NOT EXISTS idx_publication_jobs_account_status
-      ON publication_jobs(social_account_id, status);
-    CREATE INDEX IF NOT EXISTS idx_publication_events_job_time
-      ON publication_events(publication_job_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_device_automation_locks_expiry
-      ON device_automation_locks(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_publication_jobs_status_schedule ON publication_jobs(status, scheduled_for);
+    CREATE INDEX IF NOT EXISTS idx_publication_jobs_device_status ON publication_jobs(device_id, status);
+    CREATE INDEX IF NOT EXISTS idx_publication_jobs_account_status ON publication_jobs(social_account_id, status);
+    CREATE INDEX IF NOT EXISTS idx_publication_events_job_time ON publication_events(publication_job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_device_automation_locks_expiry ON device_automation_locks(expires_at);
   `);
-    addColumnIfMissing(db, 'publication_jobs', 'final_action_at', 'TEXT');
-    addColumnIfMissing(db, 'publication_jobs', 'cancellation_requested_at', 'TEXT');
+    for (const [name, definition] of [
+        ['created_by_user_id', 'INTEGER'], ['media_id', 'INTEGER'], ['priority', 'INTEGER NOT NULL DEFAULT 0'],
+        ['current_step', 'TEXT'], ['progress_percent', 'INTEGER NOT NULL DEFAULT 0'], ['claim_token', 'TEXT'],
+        ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'], ['published_at', 'TEXT'], ['verified_at', 'TEXT'],
+        ['remote_post_identity', 'TEXT'], ['result', 'TEXT'], ['error_code', 'TEXT'], ['error_message', 'TEXT'],
+        ['cancel_requested_at', 'TEXT'], ['completed_at', 'TEXT'], ['account_snapshot', 'TEXT'], ['device_snapshot', 'TEXT'],
+    ])
+        addColumnIfMissing(db, 'publication_jobs', name, definition);
+    for (const [name, definition] of [
+        ['created_by_user_id', 'INTEGER'], ['original_filename', 'TEXT'], ['private_path', 'TEXT'], ['mime_type', 'TEXT'],
+        ['file_extension', 'TEXT'], ['size_bytes', 'INTEGER'], ['sha256', 'TEXT'], ['duration_seconds', 'REAL'],
+        ['width', 'INTEGER'], ['height', 'INTEGER'], ['video_codec', 'TEXT'], ['audio_codec', 'TEXT'],
+        ['upload_status', "TEXT NOT NULL DEFAULT 'stored'"], ['retention_until', 'TEXT'], ['updated_at', 'TEXT'],
+    ])
+        addColumnIfMissing(db, 'publication_media', name, definition);
 }

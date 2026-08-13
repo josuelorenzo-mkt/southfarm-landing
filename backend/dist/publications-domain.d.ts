@@ -2,8 +2,15 @@ import type Database from 'better-sqlite3';
 export declare const PUBLICATION_TERMINAL_STATES: Set<string>;
 export declare const PUBLICATION_STATE_TRANSITIONS: {
     readonly queued: readonly ["claimed", "cancelled"];
-    readonly claimed: readonly ["in_progress", "cancellation_requested", "failed", "review_required"];
-    readonly in_progress: readonly ["completed", "cancellation_requested", "failed", "review_required"];
+    readonly claimed: readonly ["preparing", "cancellation_requested", "failed", "review_required"];
+    readonly preparing: readonly ["transferring", "cancellation_requested", "failed", "review_required"];
+    readonly transferring: readonly ["selecting_media", "cancellation_requested", "failed", "review_required"];
+    readonly selecting_media: readonly ["editing", "cancellation_requested", "failed", "review_required"];
+    readonly editing: readonly ["captioning", "cancellation_requested", "failed", "review_required"];
+    readonly captioning: readonly ["ready_to_publish", "cancellation_requested", "failed", "review_required"];
+    readonly ready_to_publish: readonly ["publishing", "cancellation_requested", "failed", "review_required"];
+    readonly publishing: readonly ["verifying", "review_required"];
+    readonly verifying: readonly ["completed", "review_required"];
     readonly cancellation_requested: readonly ["cancelled"];
     readonly completed: readonly [];
     readonly cancelled: readonly [];
@@ -37,24 +44,13 @@ export type PublicationJobView = Record<string, unknown> & {
     status: PublicationStatus;
     final_action_at: string | null;
 };
-type PublicationRow = {
+type PublicationRow = Record<string, unknown> & {
     id: number;
-    workspace_id: number;
     device_id: number;
     social_account_id: number;
-    platform: string;
-    caption: string;
-    word_count: number;
-    scheduled_for: string;
     status: PublicationStatus;
     claimed_by: string | null;
-    claimed_at: string | null;
-    lease_expires_at: string | null;
-    last_heartbeat_at: string | null;
     final_action_at: string | null;
-    cancellation_requested_at: string | null;
-    created_at: string;
-    updated_at: string;
 };
 export declare function validatePublicationInput(input: {
     caption: unknown;
@@ -78,7 +74,9 @@ export declare class PublicationStore {
         job: PublicationJobView | null;
     };
     heartbeat(id: number, worker: PublicationWorker, now: string): PublicationJobView;
-    checkpoint(id: number, worker: PublicationWorker, now: string, options?: {
+    checkpoint(id: number, worker: PublicationWorker, now: string, options: {
+        step: PublicationStatus;
+        progressPercent: number;
         finalAction?: boolean;
     }): PublicationJobView;
     finish(id: number, worker: PublicationWorker, target: Extract<PublicationStatus, 'completed' | 'cancelled' | 'failed' | 'review_required'>, now: string, actor?: PublicationActor): PublicationJobView;
