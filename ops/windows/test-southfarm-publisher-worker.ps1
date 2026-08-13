@@ -73,25 +73,53 @@ if ($CreateTemporaryFixture) {
   [IO.File]::WriteAllText($backendConfig, '{"jwt_secret":"fixture-only"}')
   $installer = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "install-southfarm-publisher-worker.ps1"
   $backendPath = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\backend"))
-  $nodePath = Join-Path $env:LOCALAPPDATA "SouthFarm\node-v22.23.1-win-x64\node.exe"; $fixtureDatabase = Join-Path $temporaryRoot "southfarm.db"
+  $portableNodeRoot = Join-Path $env:LOCALAPPDATA "SouthFarm"
+  $nodePath = Get-ChildItem -LiteralPath $portableNodeRoot -Directory -Filter "node-v22.*-win-x64" -ErrorAction SilentlyContinue |
+    Sort-Object Name -Descending |
+    ForEach-Object { Join-Path $_.FullName "node.exe" } |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+  $fixtureDatabase = Join-Path $temporaryRoot "southfarm.db"
   Assert-WorkerCondition (Test-Path -LiteralPath $nodePath -PathType Leaf) "Portable SouthFarm Node 22 is required for the fixture"
   Assert-WorkerCondition ((& $nodePath -p "process.versions.node.split('.')[0]").Trim() -eq "22") "Fixture Node major version must be 22"
-  $createDeviceDb = 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,lifecycle_status TEXT)");d.prepare("INSERT INTO devices VALUES(?,?,?)").run(1,"0123456789abcdef","active");d.close()'
+  # Keep the fixture SQL in a file instead of `node -e`: PowerShell's native
+  # argument marshalling can otherwise alter the quotes inside this program.
+  $fixtureDbScript = Join-Path $temporaryRoot "fixture-device-db.cjs"
+  [IO.File]::WriteAllText($fixtureDbScript, @'
+const Database = require("better-sqlite3");
+const db = new Database(process.argv[2]);
+const action = process.argv[3];
+if (action === "create") {
+  db.exec("CREATE TABLE devices(id INTEGER PRIMARY KEY,device_id TEXT,lifecycle_status TEXT)");
+  db.prepare("INSERT INTO devices VALUES(?,?,?)").run(1, "0123456789abcdef", "active");
+} else if (action === "set-id") {
+  db.prepare("UPDATE devices SET device_id=? WHERE id=1").run(process.argv[4]);
+} else {
+  throw new Error(`Unsupported fixture database action: ${action}`);
+}
+db.close();
+'@)
+  # The script itself deliberately lives outside the repository.  Let Node
+  # resolve the backend's native dependency explicitly rather than relying on
+  # the script's temporary directory to contain node_modules.
+  $backendNodeModules = Join-Path $backendPath "node_modules"
+  Assert-WorkerCondition (Test-Path -LiteralPath (Join-Path $backendNodeModules "better-sqlite3") -PathType Container) "Backend better-sqlite3 dependency is required for the fixture"
+  $env:NODE_PATH = if ([string]::IsNullOrWhiteSpace($env:NODE_PATH)) { $backendNodeModules } else { "$backendNodeModules;$env:NODE_PATH" }
   Push-Location -LiteralPath $backendPath
-  try { & $nodePath -e $createDeviceDb $fixtureDatabase }
+  try { & $nodePath $fixtureDbScript $fixtureDatabase create }
   finally { Pop-Location }
   $validationArgs = @{ RunAsUser=[Security.Principal.WindowsIdentity]::GetCurrent().Name; DeviceId=1; DeviceSerial="fixture-serial"; PythonPath=(Join-Path $env:WINDIR "System32\cmd.exe"); AdbPath=$fakeAdb; FfprobeSourcePath=(Join-Path $env:WINDIR "System32\cmd.exe"); RuntimeRoot=(Join-Path $temporaryRoot "runtime"); BackendRuntimeConfigPath=$backendConfig; BackendPath=$backendPath; NodePath=$nodePath; DatabasePath=$fixtureDatabase; ForbiddenInstagramAccounts="fixture-account"; ValidationOnly=$true; WhatIf=$true }
   $validationOutput = & $installer @validationArgs
   Assert-WorkerCondition (($validationOutput -join "`n") -eq "Validated publisher worker installation inputs; no config or task was changed.") "Installer ValidationOnly fixture did not pass exactly"
   Assert-WorkerCondition (!(Test-Path -LiteralPath (Join-Path $temporaryRoot "runtime\config\publisher-worker.json"))) "ValidationOnly wrote a worker config"
   Push-Location -LiteralPath $backendPath
-  try { & $nodePath -e 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.prepare("UPDATE devices SET device_id=? WHERE id=1").run("fedcba9876543210");d.close()' $fixtureDatabase }
+  try { & $nodePath $fixtureDbScript $fixtureDatabase set-id "fedcba9876543210" }
   finally { Pop-Location }
   $failedAsExpected = $false
   try { & $installer @validationArgs | Out-Null } catch { $failedAsExpected = $_.Exception.Message -eq "DeviceId is registered to a different Android ID than DeviceSerial." }
   Assert-WorkerCondition $failedAsExpected "DeviceId/DeviceSerial mismatch was not rejected"
   Push-Location -LiteralPath $backendPath
-  try { & $nodePath -e 'const D=require("better-sqlite3");const d=new D(process.argv[1]);d.prepare("UPDATE devices SET device_id=? WHERE id=1").run("0123456789abcdef");d.close()' $fixtureDatabase }
+  try { & $nodePath $fixtureDbScript $fixtureDatabase set-id "0123456789abcdef" }
   finally { Pop-Location }
   [IO.File]::WriteAllText($backendConfig, (@{ jwt_secret="fixture-only"; publisher_worker_token=$fixture.worker_token; publisher_worker_enabled=$true; publication_media_root=$mediaRoot; ffprobe_path=$fixture.ffprobe_path } | ConvertTo-Json -Compress))
   $backendFileAcl = New-Object System.Security.AccessControl.FileSecurity; $backendFileAcl.SetAccessRuleProtection($true, $false)
