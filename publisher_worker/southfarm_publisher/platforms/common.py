@@ -209,11 +209,21 @@ class GuardedPublisher:
             raise PublisherError("VERIFICATION_NO_DELTA", "The matching item predates this publication", retryable=True, final_action_uncertain=True)
         return identity
 
-    def _cleanup_preflight(self, expected_identity: str, baseline: set[str], device: Any) -> list[dict[str, str]]:
+    def _cleanup_preflight(self, expected_identity: str, baseline: list[str], device: Any) -> list[dict[str, str]]:
+        if not isinstance(baseline, list):
+            raise PublisherError("CLEANUP_BASELINE_INVALID", "Cleanup baseline must preserve ordered identities and duplicates")
+        baseline_sequence = list(baseline)
         if not expected_identity or expected_identity in baseline:
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup identity must be a new verified item")
         nodes = self._nodes(device); self._account(nodes)
-        identities = {node.get("content-desc") or node.get("text") for node in nodes if (node.get("content-desc") or node.get("text")) and (node.get("content-desc") or node.get("text")) not in {"More actions", "More options"}}
-        if identities != baseline | {expected_identity}:
+        identities = [node.get("content-desc") or node.get("text") for node in nodes if (node.get("content-desc") or node.get("text")) and (node.get("content-desc") or node.get("text")) not in {"More actions", "More options"}]
+        expected = list(baseline_sequence)
+        account_index = expected.index(self.expected_account) if self.expected_account in expected else 0
+        expected.insert(account_index + 1, expected_identity)
+        if identities != expected:
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup screen must contain exactly baseline plus verified item")
         return nodes
+
+    @staticmethod
+    def _restored_identities(nodes: list[dict[str, str]]) -> list[str]:
+        return [node.get("content-desc") or node.get("text") for node in nodes if (node.get("content-desc") or node.get("text")) and (node.get("content-desc") or node.get("text")) not in {"More actions", "More options"}]

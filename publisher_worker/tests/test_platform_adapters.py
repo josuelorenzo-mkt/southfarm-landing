@@ -158,7 +158,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "VERIFICATION_NO_DELTA")
 
     def test_cleanup_requires_verified_identity_and_restores_baseline(self):
-        expected, baseline = "safe publishing test - play Short", {"older post - play Short", "expected.account"}
+        expected, baseline = "safe publishing test - play Short", ["expected.account", "older post - play Short"]
         device = Device("com.google.android.youtube", [
             [node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,100][700,200]"}), node(**{"content-desc": "older post - play Short"})],
             [node(**{"resource-id": "com.google.android.youtube:id/delete"})],
@@ -170,7 +170,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 3)
 
     def test_instagram_cleanup_uses_reel_menu_and_exact_baseline(self):
-        expected, baseline = "safe reel", {"older reel", "expected.account"}
+        expected, baseline = "safe reel", ["expected.account", "older reel"]
         device = Device("com.instagram.android", [
             [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"resource-id": "com.instagram.android:id/reel_more_options"})], [node(**{"resource-id": "com.instagram.android:id/delete"})], [node(text="Confirm deletion")], [node(**{"resource-id": "com.instagram.android:id/delete", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older reel"})]
         ])
@@ -178,7 +178,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 4)
 
     def test_tiktok_cleanup_uses_video_menu_and_exact_baseline(self):
-        expected, baseline = "safe video", {"older video", "expected.account"}
+        expected, baseline = "safe video", ["expected.account", "older video"]
         device = Device("com.zhiliaoapp.musically", [
             [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"})], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})], [node(text="Confirm deletion")], [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5", "bounds": "[20,1200][700,1300]"}), node(text="Confirm delete")], [node(text="expected.account"), node(**{"content-desc": "older video"})]
         ])
@@ -186,8 +186,36 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 3)
         self.assertEqual(len(device.swipes), 1)
 
+    def test_tiktok_cleanup_rejects_fq5_already_visible_before_and_after_swipe(self):
+        expected, baseline = "safe video", ["expected.account", "older video"]
+        stale = [node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"}), node(text="Saved")]
+        device = Device("com.zhiliaoapp.musically", [
+            [node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})],
+            [node(**{"resource-id": "com.zhiliaoapp.musically:id/vbn"}), node(**{"resource-id": "com.zhiliaoapp.musically:id/fq5"})],
+            stale,
+        ])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)
+        self.assertEqual(raised.exception.code, "UI_TIMEOUT")
+        self.assertEqual(len(device.taps), 1, "Only the verified video target is opened; stale fq5 is never tapped")
+
+    def test_cleanup_baseline_rejects_duplicate_missing_or_reordered_identities(self):
+        baseline = ["expected.account", "same reel", "same reel"]
+        expected = "new reel"
+        publisher = InstagramPublisher(expected_account="expected.account")
+        for visible in (
+            ["expected.account", expected, "same reel"],
+            ["expected.account", "same reel", expected, "same reel"],
+        ):
+            with self.subTest(visible=visible):
+                device = Device("com.instagram.android", [[node(text=value) for value in visible]])
+                with self.assertRaises(PublisherError) as raised:
+                    publisher.cleanup_test_post(expected, baseline, device)
+                self.assertEqual(raised.exception.code, "CLEANUP_IDENTITY_MISMATCH")
+                self.assertEqual(device.taps, [])
+
     def test_cleanup_collision_or_extra_identity_never_taps_delete_target(self):
-        expected, baseline = "safe reel", {"older reel", "expected.account"}
+        expected, baseline = "safe reel", ["expected.account", "older reel"]
         device = Device("com.instagram.android", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"}), node(**{"content-desc": "unrelated reel"})]])
         with self.assertRaises(PublisherError) as raised:
             InstagramPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
@@ -195,7 +223,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.taps, [])
 
     def test_youtube_cleanup_more_actions_from_other_card_never_deletes(self):
-        expected, baseline = "safe publishing test - play Short", {"older post - play Short", "expected.account"}
+        expected, baseline = "safe publishing test - play Short", ["expected.account", "older post - play Short"]
         device = Device("com.google.android.youtube", [[node(text="expected.account"), node(**{"content-desc": expected, "bounds": "[0,100][600,200]"}), node(**{"content-desc": "More actions", "bounds": "[610,300][700,400]"}), node(**{"content-desc": "older post - play Short"})]])
         with self.assertRaises(PublisherError) as raised:
             YouTubeShortPublisher(expected_account="expected.account").cleanup_test_post(expected, baseline, device)
@@ -203,7 +231,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.taps, [])
 
     def test_instagram_cleanup_wrong_menu_id_never_reaches_delete(self):
-        expected, baseline = "safe reel", {"older reel", "expected.account"}
+        expected, baseline = "safe reel", ["expected.account", "older reel"]
         device = Device("com.instagram.android", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older reel"})], [node(**{"content-desc": "More options"})]])
         with self.assertRaises(PublisherError) as raised:
             InstagramPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)
@@ -211,7 +239,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 1)
 
     def test_cleanup_missing_confirmation_never_taps_delete_action(self):
-        expected, baseline = "safe video", {"older video", "expected.account"}
+        expected, baseline = "safe video", ["expected.account", "older video"]
         device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(**{"content-desc": expected}), node(**{"content-desc": "older video"})], [node(**{"content-desc": "More actions"})], [node(text="Delete")], []])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None).cleanup_test_post(expected, baseline, device)

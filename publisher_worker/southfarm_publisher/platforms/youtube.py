@@ -46,7 +46,8 @@ class YouTubeShortPublisher(GuardedPublisher):
     def cleanup(self, job: Any, device: Any) -> None:
         return None
 
-    def cleanup_test_post(self, expected_identity: str, baseline: set[str], device: Any) -> None:
+    def cleanup_test_post(self, expected_identity: str, baseline: list[str], device: Any) -> None:
+        baseline_sequence = list(baseline)
         nodes = self._cleanup_preflight(expected_identity, baseline, device)
         target = self._one(nodes, error="CLEANUP_TARGET", content_desc=expected_identity, required=False) or self._one(nodes, error="CLEANUP_TARGET", text=expected_identity)
         _, top, _, bottom = self._bounds(target)
@@ -55,8 +56,8 @@ class YouTubeShortPublisher(GuardedPublisher):
         menu = self.tap_and_wait(device, associated[0], error="DELETE_ACTION", resource_id="com.google.android.youtube:id/delete")
         confirm = self.tap_and_wait(device, menu, error="DELETE_CONFIRMATION", resource_id="com.google.android.youtube:id/delete")
         self.tap_and_wait(device, confirm, error="BASELINE_RELOAD", predicate=lambda screen: next((item for item in screen if (item.get("content-desc") or item.get("text")) in baseline), None))
-        restored = {value for node in self._last_nodes for value in (node.get("content-desc"), node.get("text")) if value}
-        if expected_identity in restored or restored != baseline: raise PublisherError("BASELINE_NOT_RESTORED", "YouTube cleanup did not restore exact baseline")
+        restored = self._restored_identities(self._last_nodes)
+        if expected_identity in restored or restored != baseline_sequence: raise PublisherError("BASELINE_NOT_RESTORED", "YouTube cleanup did not restore exact ordered baseline")
 
     @staticmethod
     def _bounds(node: dict[str, str]) -> tuple[int, int, int, int]:
