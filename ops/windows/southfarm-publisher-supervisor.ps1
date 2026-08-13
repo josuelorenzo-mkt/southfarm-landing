@@ -69,6 +69,7 @@ try {
   $env:SOUTHFARM_PUBLISHER_DEVICE_ID = [string]$config.device_id
   $env:SOUTHFARM_ADB_SERIAL = [string]$config.device_serial
   $env:SOUTHFARM_EXPECTED_ANDROID_ID = [string]$config.android_id
+  $env:SOUTHFARM_BACKEND_DEVICE_ID = if ([bool]$config.legacy_app_identity) { [string]$config.legacy_device_id } else { [string]$config.device_id }
   $env:SOUTHFARM_ADB = [string]$config.adb_path
   $env:SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS = [string]$config.forbidden_instagram_accounts
   $env:SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS = if ([bool]$config.allow_all_instagram_accounts) { "true" } else { "false" }

@@ -38,6 +38,20 @@ class AdbDeviceTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "DEVICE_IDENTITY_MISMATCH")
         self.assertTrue(all(call[0][2] == "wifi" for call in fake.calls))
 
+    def test_legacy_backend_identity_maps_to_exact_physical_android_device(self):
+        fake = FakeRun()
+        registry = AdbDeviceRegistry(
+            run=fake,
+            adb_path="adb-test",
+            expected_serial="wifi",
+            expected_android_id="android-1",
+            expected_backend_device_id="legacy-device-1",
+        )
+        registry.list_output = lambda: "List of devices attached\nwifi\tdevice product:x\n"
+        self.assertEqual(registry.find("legacy-device-1"), AdbDevice(serial="wifi", android_id="android-1"))
+        with self.assertRaises(PublisherError) as raised: registry.find("android-1")
+        self.assertEqual(raised.exception.code, "DEVICE_IDENTITY_MISMATCH")
+
     def test_safe_adb_uses_argv_and_parses_exact_semantic_nodes(self):
         fake = FakeRun(); adb = SafeAdb("serial-1", run=fake, adb_path="adb-test")
         xml = '<hierarchy><node text="Next" content-desc="" resource-id="x" clickable="true" bounds="[1,2][30,40]"/><node text="Next step" resource-id="y" clickable="true" bounds="[1,2][30,40]"/></hierarchy>'
