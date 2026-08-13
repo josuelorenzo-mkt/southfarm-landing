@@ -84,6 +84,19 @@ class AdbDeviceTests(unittest.TestCase):
                 import os
                 if os.path.exists(target): os.unlink(target)
 
+    def test_text_adb_commands_decode_utf8_xml_on_windows(self):
+        fake = FakeRun()
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test")
+        adb.command("exec-out", "uiautomator", "dump", "/dev/tty")
+        kwargs = fake.calls[-1][1]
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
+
+    def test_parse_ui_ignores_uiautomator_dump_status_suffix(self):
+        xml = '<?xml version="1.0" encoding="UTF-8" ?><hierarchy><node text="Instagram" /></hierarchy>'
+        nodes = SafeAdb.parse_ui(xml + "UI hierchary dumped to: /dev/tty\n")
+        self.assertEqual(nodes[0]["text"], "Instagram")
+
     def test_remote_path_is_sanitized(self):
         self.assertEqual(SafeAdb.safe_remote_name("../../clip name.mp4"), "clip_name.mp4")
         with self.assertRaises(ValueError): SafeAdb.safe_remote_name("..").__str__()

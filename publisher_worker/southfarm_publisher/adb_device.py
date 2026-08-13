@@ -22,7 +22,7 @@ class SafeAdb:
     def __init__(self, serial: str, *, adb_path: str = DEFAULT_ADB, run: Callable[..., Any] = subprocess.run, timeout: float = 20.0): self.serial, self.adb_path, self._run, self.timeout = serial, adb_path, run, timeout
     def command(self, *args: str, timeout: float | None = None) -> str:
         try:
-            result = self._run([self.adb_path, "-s", self.serial, *args], shell=False, capture_output=True, text=True, timeout=timeout or self.timeout, check=False)
+            result = self._run([self.adb_path, "-s", self.serial, *args], shell=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout or self.timeout, check=False)
         except (OSError, subprocess.TimeoutExpired): raise PublisherError("ADB_UNAVAILABLE", "ADB command failed", retryable=True) from None
         if result.returncode != 0: raise PublisherError("ADB_COMMAND_FAILED", "ADB command failed", retryable=True)
         return result.stdout or ""
@@ -35,7 +35,9 @@ class SafeAdb:
     def android_id(self) -> str: return self.command("shell", "settings", "get", "secure", "android_id").strip()
     @staticmethod
     def parse_ui(xml: str) -> list[dict[str, str]]:
-        try: return [dict(node.attrib) for node in ET.fromstring(xml).iter("node")]
+        try:
+            cleaned = re.sub(r"(</hierarchy>)\s*UI (?:hierchary|hierarchy) dumped to: /dev/tty\s*$", r"\1", xml.strip())
+            return [dict(node.attrib) for node in ET.fromstring(cleaned).iter("node")]
         except ET.ParseError: raise PublisherError("UI_XML_INVALID", "Device UI dump was invalid", retryable=True) from None
     def dump_ui(self) -> list[dict[str, str]]:
         return self.parse_ui(self.command("exec-out", "uiautomator", "dump", "/dev/tty", timeout=15))
