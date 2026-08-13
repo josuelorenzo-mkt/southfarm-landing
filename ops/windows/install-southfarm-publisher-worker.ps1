@@ -119,7 +119,7 @@ Set-ProtectedFileAcl $BackendRuntimeConfigPath @{ $systemSid="FullControl"; $adm
 $arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $(Quote-Argument $supervisorPath) -ConfigPath $(Quote-Argument $workerConfigPath) -LogDirectory $(Quote-Argument $logDir)"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $RunAsUser
-$principal = New-ScheduledTaskPrincipal -UserId $RunAsUser -LogonType InteractiveToken -RunLevel Highest
+$principal = New-ScheduledTaskPrincipal -UserId $RunAsUser -LogonType Interactive -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 if ($PSCmdlet.ShouldProcess($TaskName, "register SouthFarm interactive publisher worker task")) { Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "SouthFarm Publisher Worker; interactive ADB account, one worker per device." -Force | Out-Null }
 Write-Output ("Registered publisher worker task: " + $TaskName)
