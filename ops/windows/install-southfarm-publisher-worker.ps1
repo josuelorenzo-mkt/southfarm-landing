@@ -40,8 +40,8 @@ function Set-ProtectedDirectoryAcl([string]$Path, [hashtable]$AccountRights) {
 function Get-AppPrivateIdentity([string]$Adb, [string]$Serial, [string]$PackageName) {
   $prefs = (& $Adb -s $Serial shell run-as $PackageName cat "shared_prefs/FlutterSharedPreferences.xml" 2>$null | Out-String).Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($prefs)) { throw "Could not read SouthFarm private identity for the exact DeviceSerial." }
-  $device = [regex]::Match($prefs, '<string name="(?:flutter\\.)?device_id">([^<]+)</string>')
-  $installation = [regex]::Match($prefs, '<string name="(?:flutter\\.)?installation_id">([^<]+)</string>')
+  $device = [regex]::Match($prefs, '<string name="(?:flutter\.)?device_id">([^<]+)</string>')
+  $installation = [regex]::Match($prefs, '<string name="(?:flutter\.)?installation_id">([^<]+)</string>')
   if (!$device.Success -or !$installation.Success) { throw "SouthFarm private identity is incomplete for the exact DeviceSerial." }
   return [pscustomobject]@{ device_id=$device.Groups[1].Value; installation_id=$installation.Groups[1].Value }
 }

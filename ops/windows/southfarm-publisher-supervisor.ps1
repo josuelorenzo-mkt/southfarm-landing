@@ -24,8 +24,8 @@ function Log([string]$Path, [string]$Message) { Add-Content -LiteralPath $Path -
 function Get-AppPrivateIdentity($Config) {
   $prefs = (& ([string]$Config.adb_path) -s ([string]$Config.device_serial) shell run-as ([string]$Config.southfarm_package) cat "shared_prefs/FlutterSharedPreferences.xml" 2>$null | Out-String).Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($prefs)) { throw "Could not read SouthFarm private identity for the configured ADB serial." }
-  $device = [regex]::Match($prefs, '<string name="(?:flutter\\.)?device_id">([^<]+)</string>')
-  $installation = [regex]::Match($prefs, '<string name="(?:flutter\\.)?installation_id">([^<]+)</string>')
+  $device = [regex]::Match($prefs, '<string name="(?:flutter\.)?device_id">([^<]+)</string>')
+  $installation = [regex]::Match($prefs, '<string name="(?:flutter\.)?installation_id">([^<]+)</string>')
   if (!$device.Success -or !$installation.Success) { throw "SouthFarm private identity is incomplete for the configured ADB serial." }
   return [pscustomobject]@{ device_id=$device.Groups[1].Value; installation_id=$installation.Groups[1].Value }
 }
