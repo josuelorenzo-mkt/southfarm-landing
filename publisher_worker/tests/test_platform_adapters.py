@@ -55,6 +55,36 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_select_account_accepts_scanned_account_when_current_profile_differs(self):
+        claimed = job()
+        claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "tiktok"})
+        device = Device("com.zhiliaoapp.musically", [[node(text="different.account"), node(text="expected.account")]])
+
+        TikTokPublisher(expected_account="expected.account").select_account(claimed, device)
+
+        self.assertEqual(device.taps, [], "account availability must not enter credentials or make an irreversible UI action")
+        self.assertEqual(claimed.account["username"], "expected.account")
+
+    def test_select_account_requires_an_exact_switcher_username_match(self):
+        claimed = job()
+        claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "tiktok"})
+        device = Device("com.zhiliaoapp.musically", [[node(text="expected.account.backup"), node(text="expected.account")]])
+
+        TikTokPublisher(expected_account="expected.account").select_account(claimed, device)
+
+        self.assertEqual(device.taps, [])
+
+    def test_select_account_reports_scanned_account_absent_from_switcher(self):
+        claimed = job()
+        claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "tiktok"})
+        device = Device("com.zhiliaoapp.musically", [[node(text="different.account"), node(text="expected.account.backup")]])
+
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account").select_account(claimed, device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(device.taps, [])
+
     def test_sanitized_fixture_is_parsed_into_exact_nodes(self):
         fixtures = {
             "instagram_about_reels.xml": "com.instagram.android:id/clips_nux_sheet_share_button",

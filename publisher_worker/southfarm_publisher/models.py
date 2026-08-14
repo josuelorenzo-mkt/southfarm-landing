@@ -5,6 +5,16 @@ from enum import StrEnum
 from typing import Any
 
 
+class _FrozenAccountSnapshot(dict[str, Any]):
+    """A dict-compatible, immutable copy of the claimed social account."""
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        raise TypeError("publication account snapshot is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
+
+
 class PublicationStatus(StrEnum):
     QUEUED = "queued"; CLAIMED = "claimed"; PREPARING = "preparing"; TRANSFERRING = "transferring"
     SELECTING_MEDIA = "selecting_media"; EDITING = "editing"; CAPTIONING = "captioning"; READY_TO_PUBLISH = "ready_to_publish"
@@ -33,6 +43,11 @@ class PublicationJob:
     account: dict[str, Any] = field(default_factory=dict)
     device: dict[str, Any] = field(default_factory=dict)
     status: str = "claimed"
+
+    def __post_init__(self) -> None:
+        # The claim's account is the publication authority.  Copy before
+        # freezing so mutations of the caller's response cannot retarget work.
+        object.__setattr__(self, "account", _FrozenAccountSnapshot(self.account))
 
     @classmethod
     def from_json(cls, value: dict[str, Any]) -> "PublicationJob":

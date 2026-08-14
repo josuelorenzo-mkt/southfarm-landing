@@ -92,6 +92,16 @@ class ResponseLossApi(FakeApi):
 
 class RunnerTests(unittest.TestCase):
     def job(self): return PublicationJob(id=7, device_id=5, media_id=3, platform="youtube", caption="safe test", media={"size_bytes": 5, "sha256": hashlib.sha256(b"video").hexdigest(), "mime_type": "video/mp4", "file_extension": "mp4", "duration_seconds": 25, "width": 1080, "height": 1920, "video_codec": "hevc", "audio_codec": "aac"})
+    def test_publication_job_keeps_an_immutable_account_username_snapshot(self):
+        account = {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "youtube"}
+        claimed = PublicationJob(7, 5, 3, "youtube", "safe test", self.job().media, account)
+
+        account["username"] = "different.account"
+
+        self.assertEqual(claimed.account["username"], "expected.account")
+        with self.assertRaises(TypeError):
+            claimed.account["username"] = "another.account"
+
     def test_post_final_exception_finishes_review_required_and_cleans_up(self):
         api = FakeApi(self.job()); adapter = Adapter(fail_after_final=True); registry = FakeRegistry()
         with tempfile.TemporaryDirectory() as directory:
