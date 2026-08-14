@@ -157,6 +157,11 @@ class GuardedPublisher:
         """Require one exact match for the immutable account snapshot in a switcher."""
         username = self.selected_account_username(job)
         exact = [node for node in nodes if node.get("text") == username or node.get("content-desc") == username]
+        clickable = [node for node in exact if node.get("clickable", "true").lower() != "false"]
+        if clickable:
+            if len(clickable) != 1 or not enabled(clickable[0]):
+                raise PublisherError("ACCOUNT_UNAVAILABLE", "The selected scanned account is unavailable on this device")
+            return clickable[0]
         if len(exact) != 1:
             raise PublisherError("ACCOUNT_UNAVAILABLE", "The selected scanned account is unavailable on this device")
         return exact[0]

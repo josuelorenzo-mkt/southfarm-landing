@@ -55,6 +55,25 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_selected_account_prefers_one_clickable_account_option_over_its_nested_text(self):
+        option = node(**{"content-desc": "expected.account", "bounds": "[32,679][688,807]"})
+        label = node(text="expected.account", clickable="false", bounds="[168,722][384,763]")
+
+        for platform, publisher_type in (("instagram", InstagramPublisher), ("tiktok", TikTokPublisher), ("youtube", YouTubeShortPublisher)):
+            with self.subTest(platform=platform):
+                selected = publisher_type(expected_account="expected.account").require_account_available(job(platform), [option, label])
+                self.assertEqual(selected, option)
+
+    def test_selected_account_rejects_duplicate_clickable_account_options(self):
+        first = node(**{"content-desc": "expected.account", "bounds": "[32,679][688,807]"})
+        second = node(**{"content-desc": "expected.account", "bounds": "[32,808][688,936]"})
+        label = node(text="expected.account", clickable="false", bounds="[168,722][384,763]")
+
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").require_account_available(job("instagram"), [first, label, second])
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+
     def test_tiktok_duplicate_switcher_control_is_account_unavailable_without_media_or_typing(self):
         device = Device("com.zhiliaoapp.musically", [
             [node(text="Profile")],
