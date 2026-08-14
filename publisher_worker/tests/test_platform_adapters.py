@@ -187,19 +187,17 @@ class PlatformAdapterTests(unittest.TestCase):
 
     def test_instagram_prepare_switches_from_wrong_profile_to_exact_selected_account(self):
         device = Device("com.instagram.android", [
-            [node(text="Profile")],
-            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/profile_header_container"}), node(**{"content-desc": "Profile"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
             [node(text="expected.account", **{"resource-id": "account_item"})],
-            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"content-desc": "Create New"})],
+            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/profile_header_container"}), node(**{"content-desc": "Profile"}), node(**{"content-desc": "Create New"})],
             [node(**{"content-desc": "Create new reel"})],
             [node(**{"content-desc": "Video thumbnail created today"})],
-            [node(text="Profile")],
-            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"})],
+            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/profile_header_container"}), node(**{"content-desc": "Profile"})],
         ])
 
         InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
 
-        self.assertEqual(len(device.taps), 6)
+        self.assertEqual(len(device.taps), 4)
 
     def test_tiktok_prepare_switches_from_wrong_profile_to_exact_selected_account(self):
         device = Device("com.zhiliaoapp.musically", [
@@ -535,6 +533,20 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_instagram_navigate_profile_reuses_the_exact_active_profile_without_tapping(self):
         active_profile = [
             node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}),
+            node(**{"resource-id": "com.instagram.android:id/profile_header_container"}),
+            node(**{"content-desc": "Profile"}),
+        ]
+        device = Device("com.instagram.android", [active_profile])
+
+        nodes = InstagramPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None)._navigate_profile(device)
+
+        self.assertEqual(nodes, active_profile)
+        self.assertEqual(device.taps, [])
+
+    def test_instagram_navigate_profile_reuses_a_verified_wrong_active_profile_without_tapping(self):
+        active_profile = [
+            node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}),
+            node(**{"resource-id": "com.instagram.android:id/profile_header_container"}),
             node(**{"content-desc": "Profile"}),
         ]
         device = Device("com.instagram.android", [active_profile])
