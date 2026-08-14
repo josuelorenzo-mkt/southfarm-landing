@@ -40,6 +40,8 @@ class InstagramPublisher(GuardedPublisher):
         profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
         if profile is None:
             raise PublisherError("PROFILE_TAB", "Instagram Profile tab is required before account verification")
+        if self._profile_account(nodes) is not None:
+            return nodes
         self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self.optional_account_control(screen, resource_id="com.instagram.android:id/action_bar_title", error="Instagram active profile account") or self._one(screen, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create New", required=False))
         return self._last_nodes
 

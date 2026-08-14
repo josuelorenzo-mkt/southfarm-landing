@@ -532,6 +532,18 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "PROFILE_TAB")
         self.assertEqual(device.taps, [])
 
+    def test_instagram_navigate_profile_reuses_the_exact_active_profile_without_tapping(self):
+        active_profile = [
+            node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}),
+            node(**{"content-desc": "Profile"}),
+        ]
+        device = Device("com.instagram.android", [active_profile])
+
+        nodes = InstagramPublisher(expected_account="expected.account", timeout=.1, poll=.05, pause=lambda _: None)._navigate_profile(device)
+
+        self.assertEqual(nodes, active_profile)
+        self.assertEqual(device.taps, [])
+
     def test_tiktok_prepare_rejects_username_incidental_outside_profile(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="expected.account"), node(text="Create")]])
         with self.assertRaises(PublisherError) as raised:
