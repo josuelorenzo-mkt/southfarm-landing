@@ -10,11 +10,27 @@ class YouTubeShortPublisher(GuardedPublisher):
     package = "com.google.android.youtube"
 
     def prepare(self, job: Any, device: Any) -> None:
-        self._launch(device); nodes = self._nodes(device); self._account(nodes)
+        self.selected_account_username(job)
+        self._launch(device); nodes = self._nodes(device)
+        if self._selected_account_screen(nodes) is None:
+            you = self._one(nodes, error="YOU_TAB", text="You", required=False) or self._one(nodes, error="YOU_TAB", content_desc="You", required=False)
+            if you is None:
+                raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube account navigation is unavailable")
+            profile = self.tap_and_wait(device, you, error="ACCOUNT_MENU", predicate=lambda screen: self._one(screen, error="ACCOUNT_MENU", content_desc="Account", required=False))
+            selected = self.tap_and_wait(device, profile, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
+            self.tap_and_wait(device, selected, error="ACCOUNT_SELECTED", predicate=lambda screen: self._selected_account_screen(screen))
+            nodes = self._last_nodes
+        self._account(nodes)
         self._capture_baseline(nodes)
         create = self._one(nodes, error="CREATE_CONTROL", text="Create", required=False) or self._one(nodes, error="CREATE_CONTROL", content_desc="Create")
         short = self.tap_and_wait(device, create, error="SHORT_SELECTOR", text="Short", resource_id="com.google.android.youtube:id/creation_mode_button")
         self._entry_node = self.tap_and_wait(device, short, error="IMPORT_SELECTOR", resource_id="com.google.android.youtube:id/reel_camera_gallery_button_delegate")
+
+    def _selected_account_screen(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
+        if len(exact) == 1:
+            return exact[0]
+        return None
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption, youtube=True); nodes = [self._entry_node] if hasattr(self, "_entry_node") else self._nodes(device)

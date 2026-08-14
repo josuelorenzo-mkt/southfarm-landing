@@ -231,7 +231,7 @@ class RunnerTests(unittest.TestCase):
         table = {"instagram": (InstagramPublisher, "com.instagram.android"), "tiktok": (TikTokPublisher, "com.zhiliaoapp.musically"), "youtube": (YouTubeShortPublisher, "com.google.android.youtube")}
         for platform, (cls, package) in table.items():
             with self.subTest(platform=platform):
-                base = self.job(); media = {**base.media, **({"duration_seconds": 25} if platform == "instagram" else {})}; claimed = PublicationJob(base.id, base.device_id, base.media_id, platform, base.caption, media)
+                base = self.job(); media = {**base.media, **({"duration_seconds": 25} if platform == "instagram" else {})}; claimed = PublicationJob(base.id, base.device_id, base.media_id, platform, base.caption, media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": platform})
                 api = FakeApi(claimed); device = ScriptDevice(package, platform_dumps(platform))
                 PublicationRunner(api, ScriptRegistry(device), {platform: cls(expected_account="expected.account")}, heartbeat_interval=999).run_once(5)
                 self.assertIn(("finish", "completed"), api.calls)
@@ -248,7 +248,7 @@ class RunnerTests(unittest.TestCase):
         self.assertIn(("finish", "review_required"), api.calls)
 
     def test_runner_real_instagram_checkpoint_response_loss_never_taps_share(self):
-        base = self.job(); claimed = PublicationJob(base.id, base.device_id, base.media_id, "instagram", base.caption, {**base.media, "duration_seconds": 25})
+        base = self.job(); claimed = PublicationJob(base.id, base.device_id, base.media_id, "instagram", base.caption, {**base.media, "duration_seconds": 25}, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "instagram"})
         api = ResponseLossApi(claimed); device = ScriptDevice("com.instagram.android", platform_dumps("instagram"))
         PublicationRunner(api, ScriptRegistry(device), {"instagram": InstagramPublisher(expected_account="expected.account")}, heartbeat_interval=999).run_once(5)
         self.assertIn(("finish", "review_required"), api.calls)

@@ -141,14 +141,21 @@ class GuardedPublisher:
         if len(exact) != 1:
             raise PublisherError("ACCOUNT_MISMATCH", "Expected authenticated account label is absent or ambiguous")
 
-    def require_account_available(self, job: Any, nodes: list[dict[str, str]]) -> dict[str, str]:
-        """Require one exact match for the immutable account snapshot in a switcher."""
+    def selected_account_username(self, job: Any) -> str:
+        """Validate the immutable selected-account snapshot before any UI action."""
         account = getattr(job, "account", None)
         username = account.get("username") if isinstance(account, dict) else None
         if not isinstance(username, str) or not username.strip():
             raise PublisherError("ACCOUNT_SNAPSHOT_INVALID", "Publication job lacks a safe expected account")
         if username != self.expected_account:
             raise PublisherError("ACCOUNT_MISMATCH", "Publication account snapshot does not match the configured adapter")
+        if self.expected_account.lstrip('@').casefold() in self.forbidden_accounts:
+            raise PublisherError("FORBIDDEN_ACCOUNT", "This social account is forbidden for publishing")
+        return username
+
+    def require_account_available(self, job: Any, nodes: list[dict[str, str]]) -> dict[str, str]:
+        """Require one exact match for the immutable account snapshot in a switcher."""
+        username = self.selected_account_username(job)
         exact = [node for node in nodes if node.get("text") == username or node.get("content-desc") == username]
         if len(exact) != 1:
             raise PublisherError("ACCOUNT_UNAVAILABLE", "The selected scanned account is unavailable on this device")

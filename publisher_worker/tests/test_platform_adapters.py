@@ -39,7 +39,7 @@ class Device:
 
 
 def job(platform="tiktok", caption="safe publishing test"):
-    return PublicationJob(7, 5, 3, platform, caption, {"id": 3, "size_bytes": 1, "sha256": "a" * 64, "mime_type": "video/mp4", "file_extension": "mp4", "duration_seconds": 25, "width": 1080, "height": 1920, "video_codec": "hevc", "audio_codec": "aac"})
+    return PublicationJob(7, 5, 3, platform, caption, {"id": 3, "size_bytes": 1, "sha256": "a" * 64, "mime_type": "video/mp4", "file_extension": "mp4", "duration_seconds": 25, "width": 1080, "height": 1920, "video_codec": "hevc", "audio_codec": "aac"}, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": platform})
 
 
 def node(**values):
@@ -55,6 +55,76 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_instagram_prepare_switches_from_wrong_profile_to_exact_selected_account(self):
+        device = Device("com.instagram.android", [
+            [node(text="Profile")],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+            [node(text="expected.account", **{"resource-id": "account_item"})],
+            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"content-desc": "Create New"})],
+            [node(**{"content-desc": "Create new reel"})],
+            [node(**{"content-desc": "Video thumbnail created today"})],
+            [node(text="Profile")],
+            [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"})],
+        ])
+
+        InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
+
+        self.assertEqual(len(device.taps), 6)
+
+    def test_tiktok_prepare_switches_from_wrong_profile_to_exact_selected_account(self):
+        device = Device("com.zhiliaoapp.musically", [
+            [node(text="Profile")],
+            [node(text="wrong.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})],
+            [node(text="expected.account")],
+            [node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"}), node(**{"content-desc": "Create"})],
+            [node(text="Upload")],
+            [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica"})],
+            [node(text="Profile")],
+            [node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})],
+        ])
+
+        TikTokPublisher(expected_account="expected.account").prepare(job(), device)
+
+        self.assertEqual(len(device.taps), 6)
+
+    def test_youtube_prepare_switches_channel_before_opening_short_selector(self):
+        device = Device("com.google.android.youtube", [
+            [node(text="You")],
+            [node(text="wrong.account"), node(**{"content-desc": "Account"})],
+            [node(text="expected.account", **{"resource-id": "account_item"})],
+            [node(text="expected.account"), node(text="Create")],
+            [node(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})],
+            [node(**{"resource-id": "com.google.android.youtube:id/reel_camera_gallery_button_delegate"})],
+        ])
+
+        YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
+
+        self.assertEqual(len(device.taps), 5)
+
+    def test_missing_selected_account_never_reaches_media_selection(self):
+        device = Device("com.instagram.android", [
+            [node(text="Profile")],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+            [node(text="expected.account.backup"), node(**{"content-desc": "Create New"})],
+        ])
+
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 2)
+
+    def test_forbidden_santilorennzo_is_blocked_before_account_switch(self):
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")]])
+
+        claimed = job()
+        claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "santilorennzo", "display_name": "Santiago", "platform": "tiktok"})
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="santilorennzo", forbidden_accounts={"santilorennzo"}).prepare(claimed, device)
+
+        self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
+        self.assertEqual(device.taps, [])
+
     def test_select_account_accepts_scanned_account_when_current_profile_differs(self):
         claimed = job()
         claimed = PublicationJob(claimed.id, claimed.device_id, claimed.media_id, claimed.platform, claimed.caption, claimed.media, {"id": 9, "username": "expected.account", "display_name": "Expected", "platform": "tiktok"})
@@ -114,7 +184,7 @@ class PlatformAdapterTests(unittest.TestCase):
         device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create"}), node(text="different.account")]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account").prepare(job(), device)
-        self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
         self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before account rejection")
     def test_tiktok_refuses_create_a_story_collision(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create a Story"}), node(text="expected.account")]])
@@ -298,7 +368,7 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account", forbidden_accounts={"expected.account"}).prepare(job(), device)
         self.assertEqual(raised.exception.code, "FORBIDDEN_ACCOUNT")
-        self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before forbidden-account rejection")
+        self.assertEqual(len(device.taps), 0, "Forbidden accounts are rejected before any UI action")
 
     def test_instagram_factory_normalizes_forbidden_account_only_for_instagram(self):
         from southfarm_publisher.runner import platform_adapters
@@ -459,7 +529,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "VERIFICATION_VIEW_COUNT")
 
     def test_instagram_full_profile_to_share_flow_has_monotonic_checkpoints(self):
-        base = job("instagram", "safe test"); clip = PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, {**base.media, "duration_seconds": 25})
+        base = job("instagram", "safe test"); clip = PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, {**base.media, "duration_seconds": 25}, base.account)
         remote = "publication-7-3.mp4"
         home = [node(text="Profile")]
         profile = [node(text="expected.account"), node(**{"content-desc": "Create New"}), node(**{"content-desc": "older reel"})]
@@ -537,7 +607,8 @@ class PlatformAdapterTests(unittest.TestCase):
         from southfarm_publisher.runner import platform_adapters
         # Directly-created synthetic job has no safe snapshot: the factory must reject it.
         with self.assertRaises(PublisherError) as raised:
-            platform_adapters()["youtube"](job("youtube"))
+            base = job("youtube")
+            platform_adapters()["youtube"](PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, base.media))
         self.assertEqual(raised.exception.code, "ACCOUNT_SNAPSHOT_INVALID")
 
 
