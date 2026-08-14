@@ -8,7 +8,7 @@ import threading
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from southfarm_publisher.models import ClaimedJob, JobCancelled, PublicationJob
+from southfarm_publisher.models import ClaimedJob, JobCancelled, PublicationJob, PublisherError
 from southfarm_publisher.runner import PublicationRunner, _config
 from southfarm_publisher.platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
 
@@ -132,6 +132,34 @@ class RunnerTests(unittest.TestCase):
         runner = PublicationRunner(api, FakeRegistry(), {"youtube": Adapter()}, heartbeat_interval=999)
         runner.run_once(5)
         self.assertIn(("finish", "failed"), api.calls)
+
+    def test_unavailable_selected_account_finishes_once_without_media_transfer_or_final_checkpoint(self):
+        class AccountUnavailable(Adapter):
+            def prepare(self, job, device):
+                raise PublisherError("ACCOUNT_UNAVAILABLE", "The selected scanned account is unavailable on this device")
+
+        class LockedApi(FakeApi):
+            def __init__(self, job):
+                super().__init__(job); self.downloads = 0; self.finished = False; self.heartbeat_after_finish = False
+            def heartbeat(self, job_id, token):
+                if self.finished: self.heartbeat_after_finish = True
+                return super().heartbeat(job_id, token)
+            def download_media(self, *args, **kwargs):
+                self.downloads += 1
+                return super().download_media(*args, **kwargs)
+            def finish(self, job_id, token, status, **kwargs):
+                self.finished = True
+                self.calls.append(("finish", status, kwargs.get("error_code")))
+
+        api, registry = LockedApi(self.job()), FakeRegistry()
+        PublicationRunner(api, registry, {"youtube": AccountUnavailable()}, heartbeat_interval=999).run_once(5)
+
+        self.assertEqual(api.downloads, 0)
+        self.assertEqual(registry.lookups, ["android-secure-id"])
+        self.assertEqual([call[1] for call in api.calls if call[0] == "checkpoint"], ["preparing"])
+        self.assertEqual([call for call in api.calls if call[0] == "finish"], [("finish", "failed", "ACCOUNT_UNAVAILABLE")])
+        self.assertFalse(api.heartbeat_after_finish)
+        self.assertFalse(any(thread.name == "southfarm-publisher-heartbeat-7" and thread.is_alive() for thread in threading.enumerate()))
 
     def test_lost_final_checkpoint_response_becomes_review_required(self):
         api = ResponseLossApi(self.job()); runner = PublicationRunner(api, FakeRegistry(), {"youtube": Adapter()}, heartbeat_interval=999)

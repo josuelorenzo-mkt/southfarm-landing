@@ -64,19 +64,19 @@ class PublicationRunner:
             if adapter is None: raise PublisherError("CONFIG_ADAPTER_MISSING", "No publisher adapter is configured")
             identity = self._available_identity(self.api.availability(job.device_id), job.id); device = self.registry.open(identity); self._heartbeat_once(job.id, token)
             extension = self._media_extension(job.media)
+            def checkpoint(step: str, progress: int, final_action: bool = False, evidence: Any = None):
+                if step not in ORDER or ORDER.index(step) < state["index"] or (step == "publishing") != final_action: raise PublisherError("CHECKPOINT_ORDER_INVALID", "Publication checkpoint is invalid")
+                if heartbeat_error: raise heartbeat_error[0]
+                self._heartbeat_once(job.id, token)
+                if final_action: state["final_intent"] = True
+                self.api.checkpoint(job.id, token, step, progress, final_action=final_action, evidence=evidence)
+                state["index"] = ORDER.index(step)
+                if final_action: state["final_persisted"] = True
+            checkpoint("preparing", 1); adapter.prepare(job, device)
             with tempfile.TemporaryDirectory(dir=self.temp_dir) as directory:
                 local_path = Path(directory) / SafeAdb.safe_remote_name(f"publication-{job.id}-{job.media_id}.{extension}")
                 self.api.download_media(job.media_id, token, local_path, job.media)
                 remote_path = f"/sdcard/Movies/SouthFarm/{SafeAdb.safe_remote_name(local_path.name)}"
-                def checkpoint(step: str, progress: int, final_action: bool = False, evidence: Any = None):
-                    if step not in ORDER or ORDER.index(step) < state["index"] or (step == "publishing") != final_action: raise PublisherError("CHECKPOINT_ORDER_INVALID", "Publication checkpoint is invalid")
-                    if heartbeat_error: raise heartbeat_error[0]
-                    self._heartbeat_once(job.id, token)
-                    if final_action: state["final_intent"] = True
-                    self.api.checkpoint(job.id, token, step, progress, final_action=final_action, evidence=evidence)
-                    state["index"] = ORDER.index(step)
-                    if final_action: state["final_persisted"] = True
-                checkpoint("preparing", 1); adapter.prepare(job, device)
                 checkpoint("transferring", 5); device.push(str(local_path), remote_path); device.scan_media(remote_path)
                 adapter.publish(job, device, checkpoint)
                 if not state["final_persisted"]: raise PublisherError("FINAL_ACTION_MISSING", "Adapter did not checkpoint final publishing action")
