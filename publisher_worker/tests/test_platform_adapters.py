@@ -78,6 +78,20 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 2)
         self.assertEqual(device.typed, [])
 
+    def test_instagram_duplicate_selected_switcher_item_is_account_unavailable_without_media_or_typing(self):
+        device = Device("com.instagram.android", [
+            [node(text="Profile")],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+            [node(text="expected.account"), node(text="expected.account")],
+        ])
+
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 2)
+        self.assertEqual(device.typed, [])
+
     def test_youtube_duplicate_switcher_control_is_account_unavailable_without_media_or_typing(self):
         device = Device("com.google.android.youtube", [
             [node(text="You")],
