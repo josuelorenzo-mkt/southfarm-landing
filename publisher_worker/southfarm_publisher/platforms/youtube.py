@@ -27,7 +27,7 @@ class YouTubeShortPublisher(GuardedPublisher):
         self._entry_node = self.tap_and_wait(device, short, error="IMPORT_SELECTOR", resource_id="com.google.android.youtube:id/reel_camera_gallery_button_delegate")
 
     def _selected_account_screen(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
+        exact = [node for node in nodes if node.get("resource-id") == "com.google.android.youtube:id/account_name" and (node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account)]
         if len(exact) == 1:
             return exact[0]
         return None

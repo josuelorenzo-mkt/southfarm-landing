@@ -161,6 +161,16 @@ class GuardedPublisher:
             raise PublisherError("ACCOUNT_UNAVAILABLE", "The selected scanned account is unavailable on this device")
         return exact[0]
 
+    def account_control(self, nodes: list[dict[str, str]], *, resource_id: str, error: str) -> dict[str, str]:
+        """Return exactly one account-scoped control, otherwise fail closed."""
+        matches = [node for node in nodes if node.get("resource-id") == resource_id]
+        if len(matches) != 1:
+            raise PublisherError("ACCOUNT_UNAVAILABLE", f"{error} is absent or ambiguous")
+        if not enabled(matches[0]):
+            raise PublisherError("ACCOUNT_UNAVAILABLE", f"{error} is unavailable")
+        SafeAdb.bounds(matches[0])
+        return matches[0]
+
     def select_account(self, job: Any, device: Any) -> None:
         """Validate the selected scanned account before a platform-specific switch."""
         self.require_account_available(job, self._nodes(device))

@@ -55,6 +55,48 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_instagram_rejects_incidental_username_without_active_profile_control(self):
+        device = Device("com.instagram.android", [[node(text="Profile")], [node(text="expected.account"), node(**{"content-desc": "Create New"})]])
+
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(device.typed, [])
+
+    def test_tiktok_rejects_incidental_username_without_active_profile_control(self):
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(text="expected.account"), node(text="Create")]])
+
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account").prepare(job(), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(device.typed, [])
+
+    def test_youtube_rejects_incidental_username_without_active_channel_control(self):
+        device = Device("com.google.android.youtube", [[node(text="expected.account"), node(text="Create")]])
+
+        with self.assertRaises(PublisherError) as raised:
+            YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(device.taps, [])
+        self.assertEqual(device.typed, [])
+
+    def test_duplicate_account_switch_controls_are_account_unavailable(self):
+        device = Device("com.instagram.android", [
+            [node(text="Profile")],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+        ])
+
+        with self.assertRaises(PublisherError) as raised:
+            InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
+
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 1)
+
     def test_instagram_prepare_switches_from_wrong_profile_to_exact_selected_account(self):
         device = Device("com.instagram.android", [
             [node(text="Profile")],
@@ -92,7 +134,7 @@ class PlatformAdapterTests(unittest.TestCase):
             [node(text="You")],
             [node(text="wrong.account"), node(**{"content-desc": "Account"})],
             [node(text="expected.account", **{"resource-id": "account_item"})],
-            [node(text="expected.account"), node(text="Create")],
+            [node(text="expected.account", **{"resource-id": "com.google.android.youtube:id/account_name"}), node(text="Create")],
             [node(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})],
             [node(**{"resource-id": "com.google.android.youtube:id/reel_camera_gallery_button_delegate"})],
         ])
@@ -187,14 +229,14 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
         self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before account rejection")
     def test_tiktok_refuses_create_a_story_collision(self):
-        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create a Story"}), node(text="expected.account")]])
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(**{"content-desc": "Create a Story"}), node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})]])
         with self.assertRaises(PublisherError) as raised:
             TikTokPublisher(expected_account="expected.account").prepare(job(), device)
         self.assertEqual(raised.exception.code, "CREATE_CONTROL")
         self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before Create collision rejection")
 
     def test_youtube_refuses_shorts_collision(self):
-        device = Device("com.google.android.youtube", [[node(text="Create"), node(text="expected.account")], [node(text="Shorts", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]])
+        device = Device("com.google.android.youtube", [[node(text="Create"), node(text="expected.account", **{"resource-id": "com.google.android.youtube:id/account_name"})], [node(text="Shorts", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]])
         with self.assertRaises(PublisherError) as raised:
             YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
         self.assertEqual(raised.exception.code, "UI_TIMEOUT")
@@ -477,7 +519,7 @@ class PlatformAdapterTests(unittest.TestCase):
         old = node(**{"content-desc": "old reel"})
         publisher._profile_tiles = [publisher._tile_signature(old), publisher._tile_signature(old)]
         new = node(**{"content-desc": "new reel"})
-        account = node(text="expected.account")
+        account = node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"})
         profile = node(text="Profile")
         valid = Device("com.instagram.android", [[profile], [account, new, old, old]])
         self.assertEqual(publisher.verify(job("instagram"), valid), "new reel")
@@ -532,7 +574,7 @@ class PlatformAdapterTests(unittest.TestCase):
         base = job("instagram", "safe test"); clip = PublicationJob(base.id, base.device_id, base.media_id, base.platform, base.caption, {**base.media, "duration_seconds": 25}, base.account)
         remote = "publication-7-3.mp4"
         home = [node(text="Profile")]
-        profile = [node(text="expected.account"), node(**{"content-desc": "Create New"}), node(**{"content-desc": "older reel"})]
+        profile = [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"content-desc": "Create New"}), node(**{"content-desc": "older reel"})]
         create = [node(**{"content-desc": "Create new reel"})]
         gallery = [node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created today", "bounds": "[0,100][200,300]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,260][200,300]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_thumbnail", "content-desc": "Video thumbnail created yesterday", "bounds": "[0,300][200,500]"}), node(**{"resource-id": "com.instagram.android:id/gallery_grid_item_label", "text": "0:25", "bounds": "[120,460][200,500]"})]
         editor = [node(**{"resource-id": "com.instagram.android:id/clips_right_action_button"})]
@@ -557,7 +599,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_tiktok_full_profile_to_post_flow_has_monotonic_checkpoints(self):
         clip = job("tiktok", "safe test")
         home = [node(text="Profile")]
-        profile = [node(text="expected.account"), node(text="Create"), node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "older tile"})]
+        profile = [node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"}), node(text="Create"), node(**{"resource-id": "com.zhiliaoapp.musically:id/ev2", "content-desc": "older tile"})]
         upload = [node(text="Upload")]
         gallery = [node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "publication-7-3.mp4", "bounds": "[0,100][200,300]"}), node(**{"resource-id": "com.zhiliaoapp.musically:id/ica", "content-desc": "old-tile", "bounds": "[0,300][200,500]"})]
         next_one = [node(text="Next (1)")]
@@ -579,7 +621,7 @@ class PlatformAdapterTests(unittest.TestCase):
     def test_youtube_full_profile_to_upload_flow_has_monotonic_checkpoints(self):
         clip = job("youtube", "safe test")
         remote = "publication-7-3.mp4"
-        profile = [node(text="expected.account"), node(text="Create"), node(**{"content-desc": "old channel card - play Short"})]
+        profile = [node(text="expected.account", **{"resource-id": "com.google.android.youtube:id/account_name"}), node(text="Create"), node(**{"content-desc": "old channel card - play Short"})]
         short = [node(text="Short", **{"resource-id": "com.google.android.youtube:id/creation_mode_button"})]
         import_button = [node(**{"resource-id": "com.google.android.youtube:id/reel_camera_gallery_button_delegate"})]
         gallery = [node(**{"resource-id": "com.google.android.youtube:id/thumb_image_view", "content-desc": remote})]

@@ -40,17 +40,15 @@ class InstagramPublisher(GuardedPublisher):
         profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
         if profile is None:
             raise PublisherError("PROFILE_TAB", "Instagram Profile tab is required before account verification")
-        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False) or self._expected_profile_label(screen) or self._one(screen, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create New", required=False))
+        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False) or self._one(screen, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create New", required=False))
         return self._last_nodes
 
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
-        title = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False) or self._expected_profile_label(nodes)
-        if title is None:
-            raise PublisherError("ACCOUNT_UNAVAILABLE", "Instagram profile account label is unavailable")
+        title = self.account_control(nodes, resource_id="com.instagram.android:id/action_bar_title", error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
-            switcher = self._one(nodes, error="ACCOUNT_SWITCHER", resource_id="com.instagram.android:id/action_bar_username_container")
+            switcher = self.account_control(nodes, resource_id="com.instagram.android:id/action_bar_username_container", error="Instagram account switcher")
             selected = self.tap_and_wait(device, switcher, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
             self.tap_and_wait(device, selected, error="PROFILE_ACCOUNT", predicate=lambda screen: self._profile_account(screen))
             self._account(self._last_nodes)
@@ -68,14 +66,10 @@ class InstagramPublisher(GuardedPublisher):
         self._navigate_profile(device)
 
     def _profile_account(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        title = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False) or self._expected_profile_label(nodes)
+        title = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False)
         if title is not None and (title.get("text") == self.expected_account or title.get("content-desc") == self.expected_account):
             return title
         return None
-
-    def _expected_profile_label(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
-        return exact[0] if len(exact) == 1 else None
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption)

@@ -43,15 +43,13 @@ class TikTokPublisher(GuardedPublisher):
         profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
         if profile is None:
             raise PublisherError("PROFILE_TAB", "TikTok Profile tab is required before account verification")
-        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False) or self._expected_profile_label(screen) or self._one(screen, error="CREATE_CONTROL", content_desc="Create", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create", required=False))
+        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False) or self._one(screen, error="CREATE_CONTROL", content_desc="Create", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create", required=False))
         return self._last_nodes
 
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
-        profile_account = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False) or self._expected_profile_label(nodes)
-        if profile_account is None:
-            raise PublisherError("ACCOUNT_UNAVAILABLE", "TikTok profile account label is unavailable")
+        profile_account = self.account_control(nodes, resource_id="com.zhiliaoapp.musically:id/profile_account", error="TikTok active profile account")
         if profile_account.get("text") != self.expected_account and profile_account.get("content-desc") != self.expected_account:
             selected = self.tap_and_wait(device, profile_account, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
             self.tap_and_wait(device, selected, error="PROFILE_ACCOUNT", predicate=lambda screen: self._profile_account(screen))
@@ -70,14 +68,10 @@ class TikTokPublisher(GuardedPublisher):
         self._navigate_profile(device)
 
     def _profile_account(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        account = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False) or self._expected_profile_label(nodes)
+        account = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False)
         if account is not None and (account.get("text") == self.expected_account or account.get("content-desc") == self.expected_account):
             return account
         return None
-
-    def _expected_profile_label(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        exact = [node for node in nodes if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account]
-        return exact[0] if len(exact) == 1 else None
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption); nodes = self._nodes(device)
