@@ -55,6 +55,52 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_tiktok_duplicate_switcher_control_is_account_unavailable_without_media_or_typing(self):
+        device = Device("com.zhiliaoapp.musically", [
+            [node(text="Profile")],
+            [node(text="wrong", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"}), node(text="wrong", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})],
+        ])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account").prepare(job(), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(device.typed, [])
+
+    def test_tiktok_duplicate_selected_switcher_item_is_account_unavailable_without_media_or_typing(self):
+        device = Device("com.zhiliaoapp.musically", [
+            [node(text="Profile")],
+            [node(text="wrong", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})],
+            [node(text="expected.account"), node(text="expected.account")],
+        ])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account").prepare(job(), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 2)
+        self.assertEqual(device.typed, [])
+
+    def test_youtube_duplicate_switcher_control_is_account_unavailable_without_media_or_typing(self):
+        device = Device("com.google.android.youtube", [
+            [node(text="You")],
+            [node(**{"content-desc": "Account"}), node(**{"content-desc": "Account"})],
+        ])
+        with self.assertRaises(PublisherError) as raised:
+            YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(device.typed, [])
+
+    def test_youtube_duplicate_selected_switcher_item_is_account_unavailable_without_media_or_typing(self):
+        device = Device("com.google.android.youtube", [
+            [node(text="You")],
+            [node(**{"content-desc": "Account"})],
+            [node(text="expected.account"), node(text="expected.account")],
+        ])
+        with self.assertRaises(PublisherError) as raised:
+            YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(len(device.taps), 2)
+        self.assertEqual(device.typed, [])
+
     def test_tiktok_missing_selected_switcher_item_is_account_unavailable_without_typing(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(text="wrong", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})], [node(text="backup")]])
         with self.assertRaises(PublisherError) as raised:

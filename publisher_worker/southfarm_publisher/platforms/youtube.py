@@ -16,7 +16,7 @@ class YouTubeShortPublisher(GuardedPublisher):
             you = self._one(nodes, error="YOU_TAB", text="You", required=False) or self._one(nodes, error="YOU_TAB", content_desc="You", required=False)
             if you is None:
                 raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube account navigation is unavailable")
-            profile = self.tap_and_wait(device, you, error="ACCOUNT_MENU", predicate=lambda screen: self._one(screen, error="ACCOUNT_MENU", content_desc="Account", required=False))
+            profile = self.tap_and_wait(device, you, error="ACCOUNT_MENU", predicate=self._account_menu)
             selected = self.tap_and_wait(device, profile, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
             self.tap_and_wait(device, selected, error="ACCOUNT_SELECTED", predicate=lambda screen: self._selected_account_screen(screen, required=True))
             nodes = self._last_nodes
@@ -40,6 +40,13 @@ class YouTubeShortPublisher(GuardedPublisher):
         if required:
             raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube selected channel does not match the publication account")
         return None
+
+    @staticmethod
+    def _account_menu(nodes: list[dict[str, str]]) -> dict[str, str]:
+        matches = [node for node in nodes if node.get("content-desc") == "Account"]
+        if len(matches) != 1:
+            raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube account switcher is absent or ambiguous")
+        return matches[0]
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption, youtube=True); nodes = [self._entry_node] if hasattr(self, "_entry_node") else self._nodes(device)
