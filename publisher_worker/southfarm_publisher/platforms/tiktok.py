@@ -43,7 +43,7 @@ class TikTokPublisher(GuardedPublisher):
         profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
         if profile is None:
             raise PublisherError("PROFILE_TAB", "TikTok Profile tab is required before account verification")
-        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False) or self._one(screen, error="CREATE_CONTROL", content_desc="Create", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create", required=False))
+        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self.optional_account_control(screen, resource_id="com.zhiliaoapp.musically:id/profile_account", error="TikTok active profile account") or self._one(screen, error="CREATE_CONTROL", content_desc="Create", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create", required=False))
         return self._last_nodes
 
     def prepare(self, job: Any, device: Any) -> None:
@@ -53,7 +53,7 @@ class TikTokPublisher(GuardedPublisher):
         if profile_account.get("text") != self.expected_account and profile_account.get("content-desc") != self.expected_account:
             selected = self.tap_and_wait(device, profile_account, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
             self.tap_and_wait(device, selected, error="PROFILE_ACCOUNT", predicate=lambda screen: self._profile_account(screen))
-            self._account(self._last_nodes)
+            self.account_control(self._last_nodes, resource_id="com.zhiliaoapp.musically:id/profile_account", error="TikTok active profile account")
             nodes = self._last_nodes
         self._capture_baseline(nodes)
         self._capture_profile_tiles(nodes)
@@ -68,7 +68,7 @@ class TikTokPublisher(GuardedPublisher):
         self._navigate_profile(device)
 
     def _profile_account(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        account = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.zhiliaoapp.musically:id/profile_account", required=False)
+        account = self.optional_account_control(nodes, resource_id="com.zhiliaoapp.musically:id/profile_account", error="TikTok active profile account")
         if account is not None and (account.get("text") == self.expected_account or account.get("content-desc") == self.expected_account):
             return account
         return None

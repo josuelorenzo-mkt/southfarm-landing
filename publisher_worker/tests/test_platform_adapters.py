@@ -55,6 +55,34 @@ def resumed_for_final(cls):
 
 
 class PlatformAdapterTests(unittest.TestCase):
+    def test_tiktok_missing_selected_switcher_item_is_account_unavailable_without_typing(self):
+        device = Device("com.zhiliaoapp.musically", [[node(text="Profile")], [node(text="wrong", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})], [node(text="backup")]])
+        with self.assertRaises(PublisherError) as raised:
+            TikTokPublisher(expected_account="expected.account").prepare(job(), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(device.typed, [])
+
+    def test_youtube_missing_selected_switcher_item_is_account_unavailable_without_typing(self):
+        device = Device("com.google.android.youtube", [[node(text="You")], [node(**{"content-desc": "Account"})], [node(text="backup")]])
+        with self.assertRaises(PublisherError) as raised:
+            YouTubeShortPublisher(expected_account="expected.account").prepare(job("youtube"), device)
+        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        self.assertEqual(device.typed, [])
+
+    def test_duplicate_active_account_controls_are_account_unavailable_on_all_platforms(self):
+        cases = {
+            "instagram": (InstagramPublisher, "com.instagram.android", [[node(text="Profile")], [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"})]]),
+            "tiktok": (TikTokPublisher, "com.zhiliaoapp.musically", [[node(text="Profile")], [node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"}), node(text="expected.account", **{"resource-id": "com.zhiliaoapp.musically:id/profile_account"})]]),
+            "youtube": (YouTubeShortPublisher, "com.google.android.youtube", [[node(text="expected.account", **{"resource-id": "com.google.android.youtube:id/account_name"}), node(text="expected.account", **{"resource-id": "com.google.android.youtube:id/account_name"})]]),
+        }
+        for platform, (publisher_type, package, dumps) in cases.items():
+            with self.subTest(platform=platform):
+                device = Device(package, dumps)
+                with self.assertRaises(PublisherError) as raised:
+                    publisher_type(expected_account="expected.account").prepare(job(platform), device)
+                self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+                self.assertEqual(device.typed, [])
+
     def test_instagram_rejects_incidental_username_without_active_profile_control(self):
         device = Device("com.instagram.android", [[node(text="Profile")], [node(text="expected.account"), node(**{"content-desc": "Create New"})]])
 

@@ -40,7 +40,7 @@ class InstagramPublisher(GuardedPublisher):
         profile = self._one(nodes, error="PROFILE_TAB", text="Profile", required=False) or self._one(nodes, error="PROFILE_TAB", content_desc="Profile", required=False)
         if profile is None:
             raise PublisherError("PROFILE_TAB", "Instagram Profile tab is required before account verification")
-        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self._one(screen, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False) or self._one(screen, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create New", required=False))
+        self.tap_and_wait(device, profile, error="PROFILE_ACCOUNT", predicate=lambda screen: self.optional_account_control(screen, resource_id="com.instagram.android:id/action_bar_title", error="Instagram active profile account") or self._one(screen, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(screen, error="CREATE_CONTROL", text="Create New", required=False))
         return self._last_nodes
 
     def prepare(self, job: Any, device: Any) -> None:
@@ -51,7 +51,7 @@ class InstagramPublisher(GuardedPublisher):
             switcher = self.account_control(nodes, resource_id="com.instagram.android:id/action_bar_username_container", error="Instagram account switcher")
             selected = self.tap_and_wait(device, switcher, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
             self.tap_and_wait(device, selected, error="PROFILE_ACCOUNT", predicate=lambda screen: self._profile_account(screen))
-            self._account(self._last_nodes)
+            self.account_control(self._last_nodes, resource_id="com.instagram.android:id/action_bar_title", error="Instagram active profile account")
             nodes = self._last_nodes
         self._capture_baseline(nodes)
         self._profile_tiles = [self._tile_signature(node) for node in nodes if "reel" in node.get("content-desc", "").casefold()]
@@ -66,7 +66,7 @@ class InstagramPublisher(GuardedPublisher):
         self._navigate_profile(device)
 
     def _profile_account(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        title = self._one(nodes, error="PROFILE_ACCOUNT", resource_id="com.instagram.android:id/action_bar_title", required=False)
+        title = self.optional_account_control(nodes, resource_id="com.instagram.android:id/action_bar_title", error="Instagram active profile account")
         if title is not None and (title.get("text") == self.expected_account or title.get("content-desc") == self.expected_account):
             return title
         return None

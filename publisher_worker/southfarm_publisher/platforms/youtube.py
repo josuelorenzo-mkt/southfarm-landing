@@ -18,7 +18,7 @@ class YouTubeShortPublisher(GuardedPublisher):
                 raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube account navigation is unavailable")
             profile = self.tap_and_wait(device, you, error="ACCOUNT_MENU", predicate=lambda screen: self._one(screen, error="ACCOUNT_MENU", content_desc="Account", required=False))
             selected = self.tap_and_wait(device, profile, error="ACCOUNT_SWITCHER_ITEM", predicate=lambda screen: self.require_account_available(job, screen))
-            self.tap_and_wait(device, selected, error="ACCOUNT_SELECTED", predicate=lambda screen: self._selected_account_screen(screen))
+            self.tap_and_wait(device, selected, error="ACCOUNT_SELECTED", predicate=lambda screen: self._selected_account_screen(screen, required=True))
             nodes = self._last_nodes
         self._account(nodes)
         self._capture_baseline(nodes)
@@ -26,10 +26,19 @@ class YouTubeShortPublisher(GuardedPublisher):
         short = self.tap_and_wait(device, create, error="SHORT_SELECTOR", text="Short", resource_id="com.google.android.youtube:id/creation_mode_button")
         self._entry_node = self.tap_and_wait(device, short, error="IMPORT_SELECTOR", resource_id="com.google.android.youtube:id/reel_camera_gallery_button_delegate")
 
-    def _selected_account_screen(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
-        exact = [node for node in nodes if node.get("resource-id") == "com.google.android.youtube:id/account_name" and (node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account)]
-        if len(exact) == 1:
-            return exact[0]
+    def _selected_account_screen(self, nodes: list[dict[str, str]], *, required: bool = False) -> dict[str, str] | None:
+        active = [node for node in nodes if node.get("resource-id") == "com.google.android.youtube:id/account_name"]
+        if len(active) > 1:
+            raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube active channel control is ambiguous")
+        if not active:
+            if required:
+                raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube active channel control is unavailable")
+            return None
+        node = active[0]
+        if node.get("text") == self.expected_account or node.get("content-desc") == self.expected_account:
+            return node
+        if required:
+            raise PublisherError("ACCOUNT_UNAVAILABLE", "YouTube selected channel does not match the publication account")
         return None
 
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
