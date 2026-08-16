@@ -71,7 +71,7 @@ Antes de cada commit que toque un archivo dirty se ejecuta `git diff -- <path>` 
 - `UiSnapshot.from_xml(xml: str | bytes, *, package: str, snapshot_id: str, captured_at: float, screen_size: ScreenSize) -> UiSnapshot` rechaza XML inválido, jerarquía incompleta y package vacío.
 - `UiSnapshot.resolve(selector: SemanticSelector, *, require_action: bool, require_visible: bool = True) -> ResolvedTarget` aplica exactamente `resource-id`, luego `content-desc`, luego `text`; levanta `SELECTOR_NOT_FOUND`, `SELECTOR_COLLISION`, `CONTROL_DISABLED` o `ACTION_TARGET_UNAVAILABLE` según el caso.
 
-- [ ] **Step 1: Escribir la prueba roja de jerarquía y prioridad.** Añadir `ui_snapshot_hierarchy.xml` con raíz, contenedor clickable y texto hijo pasivo, más dos matches de `text` para una colisión. La prueba debe afirmar `parent_id`, `child_ids`, orden pre-order, `node_id` reproducible y que `content_desc` gana a `text` cuando ambos duplican la cuenta.
+- [ ] **Step 1: Escribir la prueba roja de jerarquía y prioridad.** Añadir `ui_snapshot_hierarchy.xml` con una sola etiqueta `text="growtech.news"` bajo su único contenedor clickable, `content-desc="growtech.news"` en ese contenedor y dos nodos `text="Next"` en ramas separadas para el caso de colisión. La prueba de prioridad debe configurar ambos campos y demostrar que `content-desc` detiene la búsqueda antes del texto hijo; la prueba de ancestro usa sólo `text="growtech.news"`, que aparece una vez. Afirmar `parent_id`, `child_ids`, orden pre-order y `node_id` reproducible.
 
 ```python
 def test_passive_label_resolves_to_only_clickable_ancestor(self):
@@ -115,7 +115,7 @@ def resolve(self, selector: SemanticSelector, *, require_action: bool,
     raise UiResolutionError("SELECTOR_NOT_FOUND")
 ```
 
-- [ ] **Step 4: Completar pruebas negativas y verificar verde.** Cubrir XML inválido, package vacío, screen size ausente/inválido, `visible_to_user=false`, bounds invertidos/cero/fuera de pantalla, cero matches, colisión del primer campo, dos ancestros accionables, ancestro disabled y label pasivo aceptado sólo como identidad (`require_action=False`). Ejecutar de nuevo el test focalizado y luego `py -3 -m unittest discover -s publisher_worker\\tests -q` para detectar incompatibilidades sin alterar los hunks dirty preexistentes.
+- [ ] **Step 4: Completar pruebas negativas y verificar verde.** Cubrir XML inválido, package vacío, screen size ausente/inválido, `visible_to_user=false`, bounds invertidos/cero/fuera de pantalla, cero matches, `SemanticSelector(text="Next")` con sus dos matches (`SELECTOR_COLLISION`), dos ancestros accionables, ancestro disabled y label pasivo aceptado sólo como identidad (`require_action=False`). Ejecutar de nuevo el test focalizado y luego `py -3 -m unittest discover -s publisher_worker\\tests -q` para detectar incompatibilidades sin alterar los hunks dirty preexistentes.
 - [ ] **Step 5: Commit aislado.** Ejecutar `git diff --check -- publisher_worker/southfarm_publisher/ui_snapshot.py publisher_worker/tests/test_ui_snapshot.py publisher_worker/tests/fixtures/ui_snapshot_hierarchy.xml`, agregar sólo los tres paths nuevos y confirmar que ningún hunk de `common.py`/`test_platform_adapters.py` ni los PNG/egg-info fue stageado. Commit: `feat(worker): add hierarchical semantic UI snapshots`.
 
 ### Task 2: Integrar dumps frescos y acciones físicas seguras
