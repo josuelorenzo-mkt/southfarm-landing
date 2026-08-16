@@ -46,6 +46,17 @@ La inspección de los archivos worker mostró lo siguiente:
 - El `PublicationRunner` actual persiste checkpoints monotónicos, marca la intención final antes del gesto irreversible y puede terminar en `review_required`; su llamada actual de finish no garantiza todavía `error_message` ni `result` compactos. El delta objetivo de esta spec exige que una incertidumbre posterior use sólo el estado terminal existente, `error_code`, `error_message` y `result` compacto del endpoint de finish; no agrega ni envía un campo `final_action_uncertain`. No se debe reintentar automáticamente `Share`, `Post` o `Upload Short`.
 - Los adaptadores ya tienen guards de package, cuenta, contexto y delta de galería/perfil. Esos guards se conservarán y se implementarán sobre `UiSnapshot`.
 
+### Delta explícito para retirar la política permanente de cuenta
+
+El checkout actual todavía contiene una política permanente que debe eliminarse como parte de la implementación, aunque esta spec no modifica código:
+
+- En `publisher_worker/southfarm_publisher/platforms/common.py`, retirar el parámetro `forbidden_accounts` del constructor y el atributo asociado de `GuardedPublisher`, junto con los branches por username y el error `FORBIDDEN_ACCOUNT` en `_account()` y `selected_account_username()`. La identidad esperada se seguirá validando exactamente, pero ningún username activa una rama de prohibición productiva.
+- En `publisher_worker/southfarm_publisher/runner.py`, eliminar `_normalized_accounts`, la lectura y validación de `SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS` y `SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS`, y el cuarto valor de retorno de `_config()`. `platform_adapters()` ya no recibe `forbidden_instagram_accounts`, sus builders ya no reciben ni pasan `forbidden_accounts`, y `main()` deja de cablear esa política.
+- El worker/config instalado no debe volver a exigir ni documentar esas variables. Si existen restos en una configuración local, se eliminan del contrato y no cambian el comportamiento.
+- En `publisher_worker/tests/test_platform_adapters.py` y `publisher_worker/tests/test_runner.py`, retirar los tests que esperan `FORBIDDEN_ACCOUNT` o que construyen adapters con `forbidden_accounts`. Sustituirlos por regresiones que prueben que `santilorennzo`, `growtech.news` y otro username válido pasan por el mismo camino semántico, que los adapters no tienen un branch de username prohibido, que la factory no recibe esa opción y que `_config()` funciona sin las variables antiguas.
+
+La exclusión de `santilorennzo` se mantiene sólo como entrada del orquestador/checklist de rollout de esta sesión: el orquestador selecciona `@growtech.news`, nunca selecciona la cuenta temporalmente excluida y registra esa elección. El worker y sus tests de producto no codifican esa decisión.
+
 ### Evidencia operativa previa
 
 El handoff registra que el teléfono físico usado para las pruebas es:
@@ -456,7 +467,7 @@ La implementación se acepta sólo si todos los criterios siguientes tienen evid
 12. Cuando la cuenta escaneada falta o es ambigua, la web muestra exactamente: `La cuenta seleccionada ya no está disponible en este teléfono. Volvé a escanear sus cuentas o elegí otra cuenta disponible.`
 13. El teléfono, la cuenta `@growtech.news`, el backend device identity y los jobs existentes se verifican antes del rollout. No se declara éxito por un job `completed` sin evidencia de perfil/canal.
 14. `cleanup_cli.execute_cleanup` sólo ejecuta cleanups reales con autorización server-signed, humana, no consumida, vigente y de un solo uso, scopeada a workspace/job/device/account/platform/worker/identidad/baseline; primero se valida firma/scope/cuenta/post/expiración sin ADB, luego se abre y se hace preflight, y sólo inmediatamente antes del delete se consume atómicamente. Un consumo fallido produce cero delete.
-15. Se ejecutan los tests unitarios, de adaptadores, de integración, build/lint web y pruebas backend especificadas en el handoff sin incorporar los artefactos dirty.
+15. Se ejecutan los tests unitarios, de adaptadores, de integración, build/lint web y pruebas backend especificadas en el handoff sin incorporar los artefactos dirty; además, las regresiones prueban que no quedan `forbidden_accounts`, `FORBIDDEN_ACCOUNT`, variables `SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS`/`SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS` ni wiring de esa política, y que no existe branching productivo por username.
 16. Se completa el rollout real autorizado: como máximo dos publicaciones en Instagram sobre `@growtech.news`, usando `MP-V-1.mp4` y `MP-V-2.mp4`, cada una publicada desde la webapp, verificada en el perfil y eliminada después con autorización de cleanup y confirmación de baseline. Si la primera falla o queda `review_required`, no se inicia la segunda.
 
 El criterio 16 no autoriza publicaciones reales en TikTok o YouTube. Esas pruebas requieren aprobación explícita adicional.
@@ -519,6 +530,7 @@ Se revisó este documento después de redactarlo:
 - Se fijó una sola salida para incertidumbre final: finish existente con `review_required`, `FINAL_ACTION_UNCERTAIN` y datos compactos; no se añade un campo ni un endpoint nuevo.
 - Se distinguió el estado actual del runner de su delta objetivo: hoy no se afirma que ya envíe `error_message`/`result` compactos; la spec exige implementarlo.
 - Se eliminó la política global de `santilorennzo` del producto; sólo queda documentada como exclusión temporal del rollout y pruebas de esta sesión.
+- Se dejó como delta explícito retirar `forbidden_accounts`/`FORBIDDEN_ACCOUNT`, las dos variables env/config y su wiring, y reemplazar sus tests por regresiones de camino común para varios usernames; sólo el orquestador selecciona `@growtech.news` en esta sesión.
 - Se exigió en `cleanup_cli.execute_cleanup` el orden validación de firma/scope/cuenta/post/expiración/no-consumido sin ADB → open/preflight → consumo atómico one-use inmediatamente antes de delete, y cero delete ante cualquier fallo.
 - Se corrigió la referencia de autorización de publicaciones reales para apuntar al criterio 16; TikTok/YouTube siguen requiriendo aprobación adicional.
 - Se resolvió la frontera web/móvil: sólo ADB y apps móviles usan `input tap`; React web conserva `onClick`.
