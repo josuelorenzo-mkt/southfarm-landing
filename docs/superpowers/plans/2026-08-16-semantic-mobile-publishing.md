@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- La fuente de desarrollo es `C:\SouthFarm\source\.worktrees\semiorganic-publishing`; conservar `common.py`, `test_platform_adapters.py`, `phone-after-exit.png`, `phone-current.png` y `publisher_worker/southfarm_publisher_worker.egg-info/` dirty, sin resetearlos ni incluirlos en commits funcionales.
+- La fuente de desarrollo es `C:\SouthFarm\source\.worktrees\semiorganic-publishing`; preservar los cambios preexistentes de `common.py` y `test_platform_adapters.py`, revisar sus diffs antes de cada staging e integrar en el commit funcional correspondiente sólo los hunks aprobados. No resetear ni revertir esos cambios. `phone-after-exit.png`, `phone-current.png` y `publisher_worker/southfarm_publisher_worker.egg-info/` se conservan fuera de todos los commits.
 - La interacción física móvil debe usar exclusivamente `adb -s SERIAL shell input tap X Y`; no usar `click`, `performClick`, `UiObject.click`, Appium ni métodos equivalentes.
 - No usar coordenadas fijas para botones ni fallback geométrico adivinado; todo tap y swipe se deriva de bounds válidos del snapshot inmediatamente anterior.
 - Cada acción física toma dump fresco antes y después, exige package/contexto esperado y evidencia positiva; el retorno `0` de ADB o la desaparición del control anterior no prueban éxito por sí solos.
@@ -33,7 +33,7 @@ El plan separa el modelo UI, las acciones físicas, el contrato común, los adap
 
 - `publisher_worker/southfarm_publisher/ui_snapshot.py` (crear): `ScreenSize`, `Bounds`, `UiNode`, `UiSnapshot`, `SemanticSelector`, prioridad de atributos, validación geométrica y resolución de ancestros.
 - `publisher_worker/southfarm_publisher/adb_device.py` (modificar): captura de snapshots, wrapper seguro de subprocess, `input tap`, `keyevent 4`, `input text`, launch y swipe derivado de bounds.
-- `publisher_worker/southfarm_publisher/platforms/common.py` (modificar): guards de package/cuenta/contexto, `tap_and_wait`, identidad pasiva, target accionable, frescura y errores estables; retirar política permanente de cuentas prohibidas.
+- `publisher_worker/southfarm_publisher/platforms/common.py` (modificar): guards de package/cuenta/contexto, `tap_and_wait`, identidad pasiva, target accionable, frescura y errores estables; retirar política permanente de cuentas prohibidas. El diff dirty preexistente se revisa antes de staging y sus hunks funcionales aprobados se integran aquí o en el commit común correspondiente.
 - `publisher_worker/southfarm_publisher/platforms/instagram.py` (modificar): selectores y flujo semántico de Instagram Reels, baseline, publicación, verificación y cleanup.
 - `publisher_worker/southfarm_publisher/platforms/tiktok.py` (modificar): flujo semántico TikTok, guards `Create`/`Post`, verificación de cover/contador y cleanup con guard hasta fixture live.
 - `publisher_worker/southfarm_publisher/platforms/youtube.py` (modificar): flujo semántico YouTube Shorts, canal, galería, visibilidad, publicación, verificación y cleanup.
@@ -43,7 +43,7 @@ El plan separa el modelo UI, las acciones físicas, el contrato común, los adap
 - `publisher_worker/southfarm_publisher/models.py` (modificar sólo si los tipos de estado/error/result existentes no cubren el contrato): errores y resultado compacto sin campo nuevo `final_action_uncertain`.
 - `publisher_worker/tests/test_ui_snapshot.py` (crear): parser, jerarquía, selectores, bounds y errores fail-closed.
 - `publisher_worker/tests/test_adb_device.py` (modificar): fake de subprocess, argv exacto, `shell=False`, acciones especiales y dumps frescos.
-- `publisher_worker/tests/test_platform_adapters.py` (modificar): fixtures/guards de los tres adaptadores y regresiones de usernames sin política prohibida.
+- `publisher_worker/tests/test_platform_adapters.py` (modificar): fixtures/guards de los tres adaptadores y regresiones de usernames sin política prohibida. El test dirty preexistente se conserva, se revisa contra la implementación y sólo sus asserts funcionales aprobados se agregan al commit que los hace verdes.
 - `publisher_worker/tests/test_runner.py` (modificar): config, checkpoints, finish incierto y no reintento.
 - `publisher_worker/tests/test_cleanup_cli.py` (modificar): orden de autorización, preflight, consumo y cero delete ante fallos.
 - `publisher_worker/tests/test_semantic_publishing_integration.py` (crear): secuencias completas con fake ADB, capturas de argv y estados terminales.
@@ -51,6 +51,8 @@ El plan separa el modelo UI, las acciones físicas, el contrato común, los adap
 - `webapp/src/app/publication-panel.tsx` y sus tests Vitest (modificar sólo para completar el copy exacto y preservar handlers): no cambiar la estrategia web a taps.
 - `backend/` (sin cambio de contrato ni migración): ejecutar build y suites del handoff; modificar sólo si un test demuestra que el endpoint existente no acepta `error_message`/`result` compactos ya definidos.
 - `docs/superpowers/plans/2026-08-16-semantic-mobile-publishing.md` (este archivo): documento de ejecución; no mezclarlo con código funcional.
+
+Antes de cada commit que toque un archivo dirty se ejecuta `git diff -- <path>` y se identifica qué hunks pertenecen a la tarea. Se agrega con `git add -p` o staging equivalente sólo el contenido funcional aprobado, se verifica `git diff --cached --name-only` y se excluyen siempre los PNG y `egg-info`; no se usa `git reset`, `git checkout --` ni revert para limpiar el resto.
 
 ---
 
@@ -113,8 +115,8 @@ def resolve(self, selector: SemanticSelector, *, require_action: bool,
     raise UiResolutionError("SELECTOR_NOT_FOUND")
 ```
 
-- [ ] **Step 4: Completar pruebas negativas y verificar verde.** Cubrir XML inválido, package vacío, screen size ausente/inválido, `visible_to_user=false`, bounds invertidos/cero/fuera de pantalla, cero matches, colisión del primer campo, dos ancestros accionables, ancestro disabled y label pasivo aceptado sólo como identidad (`require_action=False`). Ejecutar de nuevo el test focalizado y luego `py -3 -m unittest discover -s publisher_worker\\tests -q` para detectar incompatibilidades sin modificar archivos dirty.
-- [ ] **Step 5: Commit aislado.** Ejecutar `git diff --check -- publisher_worker/southfarm_publisher/ui_snapshot.py publisher_worker/tests/test_ui_snapshot.py publisher_worker/tests/fixtures/ui_snapshot_hierarchy.xml` y luego `git add --intent-to-add` sólo los tres paths nuevos antes de `git add` explícito; confirmar que `git status --short` sigue mostrando intactos los cinco dirty paths protegidos. Commit: `feat(worker): add hierarchical semantic UI snapshots`.
+- [ ] **Step 4: Completar pruebas negativas y verificar verde.** Cubrir XML inválido, package vacío, screen size ausente/inválido, `visible_to_user=false`, bounds invertidos/cero/fuera de pantalla, cero matches, colisión del primer campo, dos ancestros accionables, ancestro disabled y label pasivo aceptado sólo como identidad (`require_action=False`). Ejecutar de nuevo el test focalizado y luego `py -3 -m unittest discover -s publisher_worker\\tests -q` para detectar incompatibilidades sin alterar los hunks dirty preexistentes.
+- [ ] **Step 5: Commit aislado.** Ejecutar `git diff --check -- publisher_worker/southfarm_publisher/ui_snapshot.py publisher_worker/tests/test_ui_snapshot.py publisher_worker/tests/fixtures/ui_snapshot_hierarchy.xml`, agregar sólo los tres paths nuevos y confirmar que ningún hunk de `common.py`/`test_platform_adapters.py` ni los PNG/egg-info fue stageado. Commit: `feat(worker): add hierarchical semantic UI snapshots`.
 
 ### Task 2: Integrar dumps frescos y acciones físicas seguras
 
@@ -131,7 +133,7 @@ def resolve(self, selector: SemanticSelector, *, require_action: bool,
 - `GuardedPublisher.tap_and_wait(selector: SemanticSelector, *, expected_package: str, expect: Callable[[UiSnapshot], bool], label: str) -> UiSnapshot` obtiene snapshot antes, resuelve identidad/target, ejecuta un tap y obtiene un snapshot posterior que satisface `expect` o lanza un error estable.
 - `GuardedPublisher.back_and_wait`, `input_text_and_wait`, `launch_and_wait` y `swipe_and_wait` aplican el mismo contrato antes/después, con sus excepciones explícitas.
 
-- [ ] **Step 1: Añadir pruebas rojas con fake de subprocess.** Capturar `argv`, `shell` y la secuencia de dumps; afirmar que el centro de `[100,200][500,600]` produce `300,400`, que no aparece `.click`/`performClick`/`UiObject.click`, y que un target del snapshot anterior no se reutiliza.
+- [ ] **Step 1: Revisar el diff dirty y añadir pruebas rojas con fake de subprocess.** Ejecutar `git diff -- publisher_worker/southfarm_publisher/platforms/common.py` para conservar la distinción de identidad pasiva ya existente; luego capturar `argv`, `shell` y la secuencia de dumps, afirmar que el centro de `[100,200][500,600]` produce `300,400`, que no aparece `.click`/`performClick`/`UiObject.click`, y que un target del snapshot anterior no se reutiliza.
 
 ```python
 def test_tap_uses_current_bounds_and_shell_false(self):
@@ -161,7 +163,7 @@ def tap_bounds(self, bounds: Bounds) -> None:
 ```
 
 - [ ] **Step 4: Implementar input/back/launch/swipe y pruebas verdes.** `input_text_and_wait` debe localizar un `EditText` visible/enabled/focusable y verificar cada prefijo sin loguear tokens; `back_and_wait` debe exigir perfil/cuenta/destino; `launch_and_wait` puede usar sólo `monkey` antes del primer package check; `swipe_and_wait` debe usar proporciones del contenedor y validar contexto posterior. Un `adb` return code exitoso sin evidencia positiva debe fallar.
-- [ ] **Step 5: Ejecutar estático y commit.** Ejecutar `rg -n "\.click\(|performClick|UiObject\.click|900,900|100,900" publisher_worker/southfarm_publisher` y revisar manualmente que cualquier coincidencia sea texto de prueba/documentación, no un gesto productivo. Commit: `feat(worker): enforce fresh semantic physical actions`.
+- [ ] **Step 5: Ejecutar estático y commit.** Ejecutar `rg -n "\.click\(|performClick|UiObject\.click|900,900|100,900" publisher_worker/southfarm_publisher` y revisar manualmente que cualquier coincidencia sea texto de prueba/documentación, no un gesto productivo. Revisar de nuevo `git diff -- publisher_worker/southfarm_publisher/platforms/common.py`, stagear sólo los hunks funcionales aprobados de ese archivo y excluir PNG/egg-info. Commit: `feat(worker): enforce fresh semantic physical actions`.
 
 ### Task 3: Unificar identidad de cuenta y retirar la política permanente prohibida
 
@@ -177,7 +179,7 @@ def tap_bounds(self, bounds: Bounds) -> None:
 - `platform_adapters(config: WorkerConfig) -> dict[str, GuardedPublisher]` no recibe `forbidden_instagram_accounts`.
 - `_config() -> WorkerConfig` no lee `SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS` ni `SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS`.
 
-- [ ] **Step 1: Escribir pruebas rojas para tres usernames y config limpia.** Probar que `santilorennzo`, `growtech.news` y `another.valid` recorren el mismo camino de identidad; retirar de los tests las construcciones de `forbidden_accounts` y reemplazarlas por asserts de igualdad exacta. Añadir test que envía esas variables de entorno y demuestra que `_config()` las ignora/no las exige.
+- [ ] **Step 1: Revisar e incorporar el test dirty aprobado y escribir pruebas rojas para tres usernames y config limpia.** Ejecutar `git diff -- publisher_worker/tests/test_platform_adapters.py` y conservar los asserts ya aprobados sobre identidad pasiva; probar que `santilorennzo`, `growtech.news` y `another.valid` recorren el mismo camino de identidad, retirar de los tests las construcciones de `forbidden_accounts` y reemplazarlas por asserts de igualdad exacta. Añadir test que envía esas variables de entorno y demuestra que `_config()` las ignora/no las exige.
 
 ```python
 def test_no_username_uses_a_product_forbidden_branch(self):
@@ -189,7 +191,7 @@ def test_no_username_uses_a_product_forbidden_branch(self):
 - [ ] **Step 2: Ejecutar tests focalizados y confirmar fallo.** Ejecutar `py -3 -m unittest publisher_worker.tests.test_platform_adapters publisher_worker.tests.test_runner -v`; el checkout actual debe fallar mientras exista el parámetro/branch antiguo.
 - [ ] **Step 3: Implementar el contrato común.** Eliminar sólo el wiring de `forbidden_accounts`, branches username y error `FORBIDDEN_ACCOUNT`; conservar guards de package, dispositivo, identidad esperada y `ACCOUNT_UNAVAILABLE` para cuentas ausentes/ambiguas.
 - [ ] **Step 4: Verificar regresiones y ausencia de wiring.** Ejecutar los tests focalizados y `rg -n "forbidden_accounts|FORBIDDEN_ACCOUNT|SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS|SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS" publisher_worker`; el comando no debe encontrar runtime/config/tests productivos de esa política. Confirmar manualmente que la exclusión de Santiago sólo existe en el checklist live del Task 10.
-- [ ] **Step 5: Commit.** `git add publisher_worker/southfarm_publisher/platforms/common.py publisher_worker/southfarm_publisher/runner.py publisher_worker/tests/test_platform_adapters.py publisher_worker/tests/test_runner.py` y commit `refactor(worker): remove permanent account exclusion wiring`.
+- [ ] **Step 5: Revisar diff y commit.** Inspeccionar `git diff -- publisher_worker/southfarm_publisher/platforms/common.py publisher_worker/tests/test_platform_adapters.py`, integrar sólo los hunks funcionales aprobados junto con los cambios de esta tarea usando `git add -p`, verificar `git diff --cached --name-only` y confirmar que PNG/egg-info no aparecen. No resetear ni revertir hunks no relacionados. Commit `refactor(worker): remove permanent account exclusion wiring`.
 
 ### Task 4: Migrar Instagram Reels al contrato semántico
 
@@ -204,7 +206,7 @@ def test_no_username_uses_a_product_forbidden_branch(self):
 - `InstagramPublisher.verify(prepared: PreparedPublication) -> VerificationResult` exige exactamente un tile nuevo delante del baseline e identidad remota observable.
 - `InstagramPublisher.cleanup_test_post(manifest: CleanupManifest, authorization: str) -> CleanupResult` usa guards de identidad, autorización y baseline; no selecciona Santiago durante el rollout.
 
-- [ ] **Step 1: Añadir fixtures y pruebas rojas.** Cubrir identidad pasiva `com.instagram.android:id/action_bar_title`, padre/hijo `action_bar_username_container`, `Create New`, `Create new reel`, thumbnail `Video thumbnail` con `gallery_grid_item_label`, `clips_right_action_button`, `Downloads privacy`, `About Reels`, colisión Next/Share y Share disabled. Cada test debe afirmar cero tap irreversible ante wrong package, cuenta ausente, colisión, transición stale o contexto final faltante.
+- [ ] **Step 1: Revisar el test dirty y añadir fixtures y pruebas rojas.** Ejecutar `git diff -- publisher_worker/tests/test_platform_adapters.py` antes de editar; conservar e integrar los asserts funcionales aprobados. Cubrir identidad pasiva `com.instagram.android:id/action_bar_title`, padre/hijo `action_bar_username_container`, `Create New`, `Create new reel`, thumbnail `Video thumbnail` con `gallery_grid_item_label`, `clips_right_action_button`, `Downloads privacy`, `About Reels`, colisión Next/Share y Share disabled. Cada test debe afirmar cero tap irreversible ante wrong package, cuenta ausente, colisión, transición stale o contexto final faltante.
 - [ ] **Step 2: Ejecutar sólo tests Instagram y observar fallo.** Ejecutar `py -3 -m unittest publisher_worker.tests.test_platform_adapters.InstagramAdapterTests -v` (o el nombre real equivalente del módulo, manteniendo el filtro) y confirmar que el flujo actual trata `action_bar_title` como target o acepta selector incorrecto.
 - [ ] **Step 3: Implementar navegación semántica.** Usar `identity_label` para el título pasivo, `switcher_option` para la opción exacta y `tap_and_wait` para el único padre accionable; no tocar el título ni usar coordenadas. Asociar duración al tile por geometría del mismo snapshot y rechazar duplicados/ausencia.
 
@@ -220,7 +222,7 @@ def _require_about_reels_share(self):
 ```
 
 - [ ] **Step 4: Probar verde y límites.** Ejecutar el módulo de adaptadores, verificar que Share exige enabled/clickable y checkpoint previo, y que post-final sólo usa navegación semántica al perfil con delta exacto; desaparición del botón termina `review_required`.
-- [ ] **Step 5: Commit.** Commit `feat(worker): migrate Instagram publishing to semantic UI actions` con sólo adapter/fixtures/tests nuevos de esta tarea.
+- [ ] **Step 5: Commit.** Revisar el diff de `test_platform_adapters.py`, stagear sólo los hunks funcionales aprobados junto con adapter/fixtures/tests de esta tarea, confirmar que PNG/egg-info no están staged y commit `feat(worker): migrate Instagram publishing to semantic UI actions`.
 
 ### Task 5: Migrar TikTok y bloquear cleanup no verificado hasta dump live
 
@@ -235,11 +237,11 @@ def _require_about_reels_share(self):
 - `TikTokPublisher.publish(prepared: PreparedPublication) -> None` distingue `Create` de `Create a Story`, selecciona media nueva, verifica caption/`Everyone can view this post` o `Public` y hace una sola acción `st6`.
 - `TikTokPublisher.cleanup_test_post(...) -> CleanupResult` devuelve `CLEANUP_SELECTOR_UNVERIFIED` antes de cualquier swipe/delete mientras no exista el fixture live aprobado.
 
-- [ ] **Step 1: Escribir pruebas rojas de publicación y cleanup guard.** Añadir casos `Create` versus `Create a Story`, identity passive, `Upload`, `ica`, `Next (1)`, `Next`, `h00`, keyboard-open, visibilidad, `st6`, cover y contador `tv_play_count=0`. Probar explícitamente que cleanup no llama `swipe` ni `tap` si no existe el fixture autorizado.
+- [ ] **Step 1: Revisar el diff dirty y escribir pruebas rojas de publicación y cleanup guard.** Ejecutar `git diff -- publisher_worker/tests/test_platform_adapters.py` y preservar los hunks aprobados; añadir casos `Create` versus `Create a Story`, identity passive, `Upload`, `ica`, `Next (1)`, `Next`, `h00`, keyboard-open, visibilidad, `st6`, cover y contador `tv_play_count=0`. Probar explícitamente que cleanup no llama `swipe` ni `tap` si no existe el fixture autorizado.
 - [ ] **Step 2: Ejecutar tests TikTok y confirmar fallo.** `py -3 -m unittest publisher_worker.tests.test_platform_adapters.TikTokAdapterTests -v`; debe fallar por la navegación plana/coordenada fija actual o por falta de guard.
 - [ ] **Step 3: Implementar el flujo semántico y el checkpoint final.** Resolver cada control con snapshots frescos, verificar el contador asociado a la cover y persistir `publishing` antes de Post; nunca aceptar `Create a Story` ni un `Post` fuera del contexto de descripción/visibilidad.
 - [ ] **Step 4: Mantener cleanup fail-closed.** Sustituir la llamada productiva `[900,900] → [100,900]` por una ruta que, hasta contar con selector live, lance `CLEANUP_SELECTOR_UNVERIFIED` antes de cualquier swipe. Cuando Task 10 provea fixture/selector, implementar `swipe_and_wait` con bounds del carrusel y tests en dos resoluciones.
-- [ ] **Step 5: Ejecutar regresiones y commit.** Ejecutar tests TikTok y `rg -n "900,900|100,900" publisher_worker/southfarm_publisher/platforms/tiktok.py`; no debe quedar coordenada fija. Commit `feat(worker): migrate TikTok publishing to semantic UI actions`.
+- [ ] **Step 5: Ejecutar regresiones y commit.** Ejecutar tests TikTok y `rg -n "900,900|100,900" publisher_worker/southfarm_publisher/platforms/tiktok.py`; no debe quedar coordenada fija. Revisar `git diff -- publisher_worker/tests/test_platform_adapters.py`, stagear sólo hunks funcionales aprobados y excluir PNG/egg-info. Commit `feat(worker): migrate TikTok publishing to semantic UI actions`.
 
 ### Task 6: Migrar YouTube Shorts al contrato semántico
 
@@ -253,11 +255,11 @@ def _require_about_reels_share(self):
 - `YouTubePublisher.publish(prepared: PreparedPublication) -> None` resuelve `Create`/`Short`, galería, `multi_select_next_button`, `creation_next_button`, `shorts_post_bottom_button`, caption, `Public` y `upload_bottom_button` enabled.
 - `YouTubePublisher.verify(prepared: PreparedPublication) -> VerificationResult` exige tarjeta nueva en `You -> View channel` con caption exacto y marcador `play Short`.
 
-- [ ] **Step 1: Añadir pruebas rojas y fixtures sanitizados.** Cubrir `Short` versus `Shorts`, canal ausente/ambiguo, galería duplicada, Upload disabled, `Private`/`Unlisted`, tarjeta de verificación y `More actions` geométricamente asociado. Cada caso negativo debe afirmar cero tap final.
+- [ ] **Step 1: Revisar el diff dirty, añadir pruebas rojas y fixtures sanitizados.** Ejecutar `git diff -- publisher_worker/tests/test_platform_adapters.py` antes de editar y preservar los hunks aprobados; cubrir `Short` versus `Shorts`, canal ausente/ambiguo, galería duplicada, Upload disabled, `Private`/`Unlisted`, tarjeta de verificación y `More actions` geométricamente asociado. Cada caso negativo debe afirmar cero tap final.
 - [ ] **Step 2: Ejecutar tests YouTube y confirmar fallo.** `py -3 -m unittest publisher_worker.tests.test_platform_adapters.YouTubeAdapterTests -v` debe evidenciar el incumplimiento actual de selector/guard.
 - [ ] **Step 3: Implementar selectores y guards.** Resolver la identidad pasiva sin tocarla, exigir nombre remoto exacto y rechazar duplicados; usar sólo targets enabled/clickable, checkpoint antes de `Upload Short`, y evidencia positiva de la tarjeta remota.
 - [ ] **Step 4: Implementar cleanup semántico.** Asociar `More actions` a la tarjeta verificada por geometría del snapshot, resolver delete/confirmación en snapshots nuevos y comprobar baseline ordenado restaurado; nunca borrar por posición fija.
-- [ ] **Step 5: Ejecutar tests y commit.** Commit `feat(worker): migrate YouTube Shorts to semantic UI actions`.
+- [ ] **Step 5: Ejecutar tests y commit.** Revisar `git diff -- publisher_worker/tests/test_platform_adapters.py`, stagear sólo los hunks funcionales aprobados junto con esta tarea, verificar que PNG/egg-info no están staged y commit `feat(worker): migrate YouTube Shorts to semantic UI actions`.
 
 ### Task 7: Endurecer runner, finish incierto y copy de cuenta no disponible
 
@@ -346,7 +348,7 @@ node scripts/test-publication-worker-api.mjs
 
 Luego desde raíz: `powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\windows\test-southfarm-publisher-worker.ps1 -CreateTemporaryFixture`.
 - [ ] **Step 5: Ejecutar web tests/lint/build.** Usar los scripts declarados por el `package.json` real del frontend y la guía Next leída en Task 7; comprobar Vitest, lint y build, y confirmar que los handlers siguen siendo `onClick`. No afirmar producción por un build local solamente.
-- [ ] **Step 6: Revisar diff y commit de pruebas.** Ejecutar `git diff --check`, `git diff --stat`, `git status --short`, y `rg -n "\.click\(|performClick|UiObject\.click|input tap [0-9]+ [0-9]+|900,900|100,900" publisher_worker/southfarm_publisher`. Commit `test(worker): cover semantic publishing end to end` sólo con el test/instrumentación nuevo y cambios de asserts de esta tarea.
+- [ ] **Step 6: Revisar diff y commit de pruebas.** Ejecutar `git diff --check`, `git diff --stat`, `git status --short`, y `rg -n "\.click\(|performClick|UiObject\.click|input tap [0-9]+ [0-9]+|900,900|100,900" publisher_worker/southfarm_publisher`. Revisar cualquier diff preexistente antes de staging, agregar sólo el test/instrumentación y asserts funcionales aprobados de esta tarea, y excluir PNG/egg-info. Commit `test(worker): cover semantic publishing end to end`.
 
 ### Task 10: Dry-run físico, despliegue controlado y rollout Instagram autorizado
 
@@ -359,7 +361,7 @@ Luego desde raíz: `powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\wi
 - `runbook.publish_one(video: MP-V-1.mp4 | MP-V-2.mp4, account="@growtech.news", platform="instagram")` must stop after any ambiguous selector, wrong account/package, stale transition, failed verification, cleanup mismatch or `review_required`.
 - `runbook.cleanup_one(...)` must use the server-signed human authorization and prove baseline restoration before allowing the next video.
 
-- [ ] **Step 1: Preserve and inspect the worktree.** Before deployment, run `git status --short`, verify the five protected dirty paths remain unchanged, and review only the functional commits from Tasks 1–9. Do not use `git reset`, `git checkout --` or broad cleanup commands.
+- [ ] **Step 1: Preserve and inspect the worktree.** Before deployment, run `git status --short`, review the preexisting diffs of `common.py` and `test_platform_adapters.py`, verify that approved functional hunks were integrated only in their corresponding commits and that unapproved hunks remain intact. Confirm PNG/egg-info are never staged. Review only functional commits from Tasks 1–9. Do not use `git reset`, `git checkout --` or broad cleanup commands.
 - [ ] **Step 2: Execute physical dry-run.** Obtain fresh sanitized dumps and run Instagram, TikTok and YouTube until before `Share`, `Post` or `Upload Short`. Confirm every tap has a preceding snapshot ID/bounds record, every post-action dump has positive context evidence, and swipes vary with two screen sizes. TikTok cleanup remains blocked until its live selector gate.
 - [ ] **Step 3: Deploy only after automated green.** Restart the Windows worker only after Python, backend, ops and web tests pass; verify `https://api.southfarm.tech/api/health`, queue/lease/heartbeat logs, worker task state, protected logging and remote media deletion. Open `https://southfarm-webapp.vercel.app/` and check that `Crear publicación` preserves device/account selection after recoverable errors and still uses web `onClick`.
 - [ ] **Step 4: Select only the authorized account.** Record in the protected rollout checklist that `@growtech.news` is selected and `santilorennzo`/Santiago is not selected, published or cleaned. This is an orchestration fact, never a runner/adaptor guard.
@@ -376,7 +378,7 @@ Luego desde raíz: `powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\wi
 - [ ] Interface names are consistent: `UiSnapshot`, `UiNode`, `SemanticSelector`, `ResolvedTarget`, `SafeAdb.dump_snapshot`, `GuardedPublisher.tap_and_wait`, `PublicationRunner.finish_uncertain`, `CleanupApi.validate_authorization` and `consume_authorization`.
 - [ ] Every implementation task starts with a failing test, runs the focused test, implements the minimum change, runs a green test and commits only its own paths.
 - [ ] The plan contains no unspecified follow-up; live unknowns are explicit gates that stop the rollout, especially TikTok cleanup selector capture.
-- [ ] The plan preserves the dirty worktree and keeps all live evidence outside commits.
+- [ ] The plan preserves unapproved dirty hunks, integrates approved functional hunks through reviewed staging, excludes PNG/egg-info from every commit and keeps all live evidence outside commits.
 
 Plan complete and saved to `docs/superpowers/plans/2026-08-16-semantic-mobile-publishing.md`. Two execution options:
 
