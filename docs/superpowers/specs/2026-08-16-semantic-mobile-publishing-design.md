@@ -6,7 +6,7 @@ Hacer que la publicación de videos en Instagram Reels, TikTok y YouTube Shorts 
 
 El resultado debe conservar el contrato de SouthFarm ya implementado: la web crea una publicación, el backend la encola y el Publisher Worker Windows reclama el trabajo, controla el teléfono exacto por ADB, cambia al perfil/canal exacto, transfiere el video, publica, verifica y comunica `completed`, `failed` o `review_required`.
 
-Este documento formaliza el cambio aprobado por el usuario. No autoriza credenciales automáticas ni altera la cuenta prohibida de Santiago. La interacción web conserva los handlers React `onClick`; la regla de `tap` aplica únicamente a la interacción física del worker con las aplicaciones móviles.
+Este documento formaliza el cambio aprobado por el usuario. No autoriza credenciales automáticas ni modifica cuentas sociales. La interacción web conserva los handlers React `onClick`; la regla de `tap` aplica únicamente a la interacción física del worker con las aplicaciones móviles.
 
 ## Estado actual verificado
 
@@ -43,7 +43,7 @@ La inspección de los archivos worker mostró lo siguiente:
 - `tap_and_wait()` vuelve a tomar un dump antes de seleccionar el nodo, realiza un tap mediante `SafeAdb.tap_bounds()` y espera una revisión fresca que demuestre el contexto positivo de la siguiente pantalla.
 - `SafeAdb.tap_bounds()` calcula el centro de bounds y ejecuta un argv equivalente a `adb -s SERIAL shell input tap X Y`, con `shell=False`. No utiliza un método Android `click`.
 - `SafeAdb.back()` usa `shell input keyevent 4`; `SafeAdb.text()` usa `shell input text` después de validar caracteres; `SafeAdb.swipe()` recibe coordenadas y duración. La implementación de cleanup de TikTok todavía llama a `device.swipe(900, 900, 100, 900, 300)`, por lo que ese caso conserva coordenadas fijas y debe migrarse a bounds dinámicos.
-- `PublicationRunner` persiste checkpoints monotónicos, marca la intención final antes del gesto irreversible y convierte una excepción posterior a la acción final en `review_required`. El contrato de incertidumbre usa sólo el estado terminal existente, `error_code`, `error_message` y `result` compacto del endpoint de finish; no agrega ni envía un campo `final_action_uncertain`. No se debe reintentar automáticamente `Share`, `Post` o `Upload Short`.
+- El `PublicationRunner` actual persiste checkpoints monotónicos, marca la intención final antes del gesto irreversible y puede terminar en `review_required`; su llamada actual de finish no garantiza todavía `error_message` ni `result` compactos. El delta objetivo de esta spec exige que una incertidumbre posterior use sólo el estado terminal existente, `error_code`, `error_message` y `result` compacto del endpoint de finish; no agrega ni envía un campo `final_action_uncertain`. No se debe reintentar automáticamente `Share`, `Post` o `Upload Short`.
 - Los adaptadores ya tienen guards de package, cuenta, contexto y delta de galería/perfil. Esos guards se conservarán y se implementarán sobre `UiSnapshot`.
 
 ### Evidencia operativa previa
@@ -57,7 +57,7 @@ Backend device row id: 28
 Backend legacy device_id: fd2f46b48e71496a
 ~~~
 
-La cuenta segura de trabajo es `@growtech.news`. La cuenta `santilorennzo`/Santiago está prohibida.
+La cuenta segura de trabajo es `@growtech.news`. Para el rollout y las pruebas autorizadas de esta sesión, `santilorennzo`/Santiago queda temporalmente excluida; esta exclusión no es una política permanente del producto.
 
 Los jobs de Instagram 4, 5 y 6 del handoff terminaron en `failed`; no se registró una publicación exitosa. El problema de `#6` fue que `action_bar_title` es una etiqueta de identidad pasiva (`clickable=false`) y se trató como si debiera ser un control accionable. El parche dirty corrige esa distinción.
 
@@ -90,7 +90,7 @@ El handoff también indica que el teléfono quedó en el perfil de Instagram `gr
 - Implementar carruseles, fotos, Stories, música añadida en la plataforma o edición avanzada.
 - Publicar automáticamente en varias cuentas o seleccionar una cuenta no proveniente del último escaneo.
 - Ejecutar una publicación real en TikTok o YouTube sin una autorización separada. La autorización de rollout real de esta spec se limita a Instagram en `@growtech.news`.
-- Usar, probar, cambiar, abrir, seleccionar o publicar en `santilorennzo`/Santiago bajo cualquier circunstancia.
+- No seleccionar, publicar ni limpiar en `santilorennzo`/Santiago durante el rollout y las pruebas de esta sesión. Esta exclusión temporal no se implementa como guard permanente en runner, adapters o `cleanup_cli`.
 - Reintentar una acción final una vez que su checkpoint fue persistido.
 
 ## Arquitectura de UiSnapshot
@@ -242,14 +242,14 @@ El back usado al salir de la galería durante `prepare` debe demostrar que regre
 
 ### Apertura de aplicación
 
-Abrir una app es la única excepción al requisito de tener el package esperado antes del comando: el teléfono puede estar mostrando otro package cuando se ejecuta `adb shell monkey -p PACKAGE 1`. Antes de ese comando se valida la identidad física del dispositivo y el guard global de cuenta prohibida; no se interpreta todavía un dump de la app destino. Inmediatamente después de `monkey` se consulta `foreground_package()` y se exige el package exacto. Sólo después de esa comprobación se permite tomar el primer dump del flujo, hacer un tap o transferir media.
+Abrir una app es la única excepción al requisito de tener el package esperado antes del comando: el teléfono puede estar mostrando otro package cuando se ejecuta `adb shell monkey -p PACKAGE 1`. Antes de ese comando se valida la identidad física del dispositivo; cualquier exclusión temporal de la sesión se aplica en el runbook/orquestación, no como guard permanente del worker. No se interpreta todavía un dump de la app destino. Inmediatamente después de `monkey` se consulta `foreground_package()` y se exige el package exacto. Sólo después de esa comprobación se permite tomar el primer dump del flujo, hacer un tap o transferir media.
 
 Después de verificar el package debe existir evidencia positiva de la pantalla inicial o de un control semántico esperado:
 
 - foreground package igual al adaptador;
 - dump XML válido;
 - una pantalla inicial o control semántico esperado;
-- cuenta prohibida ausente como target de trabajo.
+- cuenta del job y contexto inicial coherentes con el trabajo.
 
 No se usa una coordenada de launcher ni se acepta un package similar. Si la app no llega al foreground esperado, se devuelve `WRONG_PACKAGE` o `APP_LAUNCH_FAILED` de forma retryable cuando corresponda.
 
@@ -334,15 +334,23 @@ El cleanup de YouTube debe asociar geométricamente el control `More actions` co
 
 La cuenta social de un job proviene del snapshot inmutable del último escaneo del teléfono. Antes de transferir media o abrir la galería, el worker debe demostrar que la opción exacta existe en el selector real o que la identidad activa ya coincide. Una etiqueta parecida, una coincidencia parcial o una cuenta no presente produce `ACCOUNT_UNAVAILABLE` sin introducir texto ni credenciales.
 
-La comparación de identidad puede tolerar únicamente la representación visual documentada con o sin `@` cuando el contrato del adaptador lo defina; no puede eliminar caracteres ni hacer matching case-insensitive de manera que fusione cuentas. La cuenta configurada como `santilorennzo`, Santiago o cualquier variante equivalente bloqueada debe provocar `FORBIDDEN_ACCOUNT`.
-
-La prohibición de `santilorennzo` es global y se aplica por igual a los adapters de Instagram, TikTok y YouTube. El runner debe ejecutar un guard de cuenta sobre el snapshot inmutable inmediatamente después del claim y antes de consultar disponibilidad, abrir ADB, ejecutar `monkey`, tomar cualquier dump UI, transferir media, hacer tap, back, input text o swipe. Cada adapter repite el mismo guard como defensa en profundidad al inicio de `prepare`, `publish`, `verify` y `cleanup_test_post`. Si el username canonicalizado coincide con la cuenta prohibida, la operación termina con `FORBIDDEN_ACCOUNT` y el fake device debe demostrar cero dumps, comandos físicos y pushes. Ninguna prueba, dry-run ni cleanup puede tocarla.
+La comparación de identidad puede tolerar únicamente la representación visual documentada con o sin `@` cuando el contrato del adaptador lo defina; no puede eliminar caracteres ni hacer matching case-insensitive de manera que fusione cuentas. La exclusión temporal de `santilorennzo`/Santiago pertenece sólo al rollout y las pruebas de esta sesión; no se agrega un guard permanente al runner, adapters ni `cleanup_cli`.
 
 Cuando una cuenta escaneada falta o es ambigua en el selector real, la web debe mostrar exactamente: `La cuenta seleccionada ya no está disponible en este teléfono. Volvé a escanear sus cuentas o elegí otra cuenta disponible.`
 
 El serial ADB, Android ID y backend device identity siguen siendo los del contrato existente. UiSnapshot no reemplaza esa validación y no permite cambiar de teléfono por posición, orden de `adb devices` o similitud del package.
 
-Los cleanups de posts de prueba requieren la autorización existente del backend: un token firmado por el servidor y aprobado humanamente, de un solo uso y con expiración, scopeado al workspace, job, device, social account, platform, worker, identidad remota verificada y baseline. El worker/CLI debe llamar primero a `POST /api/publication-worker/test-cleanup-authorizations/:authorization/validate` con worker y device, comprobar que el manifiesto local coincide, y consumirlo una sola vez mediante `POST /api/publication-worker/test-cleanup-authorizations/:authorization/consume` inmediatamente antes de la acción destructiva. Nunca se acepta un token generado localmente ni se abre ADB para un manifiesto que no haya validado.
+Los cleanups de posts de prueba requieren la autorización existente del backend: un token firmado por el servidor y aprobado humanamente, de un solo uso y con expiración, scopeado al workspace, job, device, social account, platform, worker, identidad remota verificada y baseline.
+
+El orden implementable de `cleanup_cli.execute_cleanup` es obligatorio:
+
+1. Leer y canonicalizar la cuenta del manifiesto en memoria, sin abrir ADB ni llamar al device. No aplicar aquí una política permanente de cuentas prohibidas.
+2. Sin abrir ADB, llamar a `POST /api/publication-worker/test-cleanup-authorizations/:authorization/validate`. El servidor debe validar firma, expiración vigente, no-consumido, workspace, job, device, social account, platform, worker, identidad remota verificada, baseline y cuenta; el manifiesto local debe coincidir con todo ese scope.
+3. Sólo con validación positiva abrir el registro ADB y ejecutar el preflight físico: serial/Android ID, package, cuenta activa, post verificado y baseline exacto. Un preflight fallido no consume autorización ni ejecuta delete.
+4. Inmediatamente antes del primer tap destructivo, llamar una sola vez a `POST /api/publication-worker/test-cleanup-authorizations/:authorization/consume`. El consumo debe ser atómico y de un solo uso. Si falla, expira, ya fue consumido o no coincide el scope, detenerse con `CLEANUP_AUTH_INVALID` y ejecutar cero taps de delete.
+5. Sólo después de consumir correctamente se puede resolver el target exacto, hacer el menú/swipe guardado, confirmar delete y demostrar la restauración del baseline. No se permite consumir al comienzo ni reutilizar el token para otro post.
+
+Nunca se acepta un token generado localmente ni se abre ADB para un manifiesto cuya autorización no haya validado. Esta secuencia aplica a Instagram, TikTok y YouTube; el selector TikTok sigue además sujeto a `CLEANUP_SELECTOR_UNVERIFIED` hasta su dump live autorizado.
 
 ## Checkpoints, final action y recuperación
 
@@ -384,7 +392,7 @@ Está prohibido registrar:
 - argumentos completos de `input text`, caption o texto ingresado;
 - XML completo, dumps sin sanitizar, screenshots públicos o contenido de galería;
 - rutas privadas que permitan recuperar media;
-- cuentas prohibidas o datos de otra cuenta más allá del código de seguridad necesario.
+- cuentas no seleccionadas o datos de otra cuenta más allá del código de seguridad necesario.
 
 La evidencia live debe guardarse en el directorio protegido que ya usa el worker, con retención y ACL existentes. Los artefactos de esta tarea no deben entrar al commit de la spec.
 
@@ -419,12 +427,13 @@ Conservar y ampliar los fixtures sanitizados de `publisher_worker/tests/fixtures
 - TikTok: `Create` frente a `Create a Story`, identidad pasiva, galería, keyboard-open, visibilidad pública, Post, cover y contador cero, y guard `CLEANUP_SELECTOR_UNVERIFIED` hasta disponer del dump live del cleanup.
 - YouTube: `Short` frente a `Shorts`, canal activo pasivo, nombre remoto exacto, galería duplicada, `Public`, botón Upload deshabilitado, tarjeta de verificación y More actions asociado.
 
-Cada adapter debe tener una prueba específica con un job cuya cuenta sea `santilorennzo` y un fake device que demuestre cero dumps, lanzamientos, pushes y gestos para Instagram, TikTok y YouTube. Además debe probar wrong package, cuenta ausente, cuenta ambigua, selector ausente, selector deshabilitado, transición stale, evidencia posterior sólo negativa, final context faltante y final checkpoint fallido. La prueba debe afirmar que no hubo tap irreversible en esos casos.
+Cada adapter debe probar wrong package, cuenta ausente, cuenta ambigua, selector ausente, selector deshabilitado, transición stale, evidencia posterior sólo negativa, final context faltante y final checkpoint fallido. La prueba debe afirmar que no hubo tap irreversible en esos casos. La exclusión temporal de una cuenta durante esta sesión se verifica en el checklist de rollout, no como política o test permanente del producto.
 
 ### Integración
 
 - Ejecutar el worker con un fake ADB que entregue una secuencia de snapshots y capture argv.
 - Verificar la secuencia de checkpoints, limpieza remota y clasificación `review_required`.
+- Probar `cleanup_cli.execute_cleanup` con cada plataforma: validación de firma/scope/cuenta/post/expiración/no-consumido antes de abrir ADB, preflight fallido sin consumo, consumo atómico fallido con cero delete y consumo exitoso de un solo uso antes del primer tap destructivo.
 - Ejecutar la suite completa existente con `py -3 -m unittest discover -s publisher_worker\tests -q`.
 - Ejecutar build y pruebas del backend que ya forman parte del handoff; la spec no cambia su contrato.
 - Verificar que la webapp conserva `onClick`, navegación, accesibilidad y tests existentes. No se añaden taps ADB a React.
@@ -443,14 +452,14 @@ La implementación se acepta sólo si todos los criterios siguientes tienen evid
 8. `Share`, `Post` y `Upload Short` tienen checkpoint previo, una única oportunidad de tap y terminan mediante el contrato existente con `status=review_required`, `error_code=FINAL_ACTION_UNCERTAIN` y resultado/evidencia compactos si la acción final queda incierta; no existe un campo nuevo `final_action_uncertain`.
 9. No se registran secretos, captions, argumentos de texto, XML sin sanitizar ni screenshots públicos.
 10. La web conserva React `onClick`; el cambio de estrategia móvil no altera el comportamiento web.
-11. La cuenta `santilorennzo`/Santiago es rechazada globalmente en Instagram, TikTok y YouTube antes de dump, launch, push o cualquier acción física; cada plataforma tiene una prueba dedicada y no aparece en ninguna prueba live.
+11. El rollout y las pruebas autorizadas de esta sesión excluyen temporalmente `santilorennzo`/Santiago: no se selecciona, publica ni limpia allí. Esta exclusión se mantiene en la evidencia del rollout y no se convierte en un guard permanente del producto.
 12. Cuando la cuenta escaneada falta o es ambigua, la web muestra exactamente: `La cuenta seleccionada ya no está disponible en este teléfono. Volvé a escanear sus cuentas o elegí otra cuenta disponible.`
 13. El teléfono, la cuenta `@growtech.news`, el backend device identity y los jobs existentes se verifican antes del rollout. No se declara éxito por un job `completed` sin evidencia de perfil/canal.
-14. Los cleanups reales sólo ocurren con autorización server-signed, humana, de un solo uso, expirada y scopeada a workspace/job/device/account/platform/worker/identidad/baseline; se valida y consume mediante los endpoints existentes antes de abrir ADB y antes del delete.
+14. `cleanup_cli.execute_cleanup` sólo ejecuta cleanups reales con autorización server-signed, humana, no consumida, vigente y de un solo uso, scopeada a workspace/job/device/account/platform/worker/identidad/baseline; primero se valida firma/scope/cuenta/post/expiración sin ADB, luego se abre y se hace preflight, y sólo inmediatamente antes del delete se consume atómicamente. Un consumo fallido produce cero delete.
 15. Se ejecutan los tests unitarios, de adaptadores, de integración, build/lint web y pruebas backend especificadas en el handoff sin incorporar los artefactos dirty.
 16. Se completa el rollout real autorizado: como máximo dos publicaciones en Instagram sobre `@growtech.news`, usando `MP-V-1.mp4` y `MP-V-2.mp4`, cada una publicada desde la webapp, verificada en el perfil y eliminada después con autorización de cleanup y confirmación de baseline. Si la primera falla o queda `review_required`, no se inicia la segunda.
 
-El criterio 14 no autoriza publicaciones reales en TikTok o YouTube. Esas pruebas requieren aprobación explícita adicional.
+El criterio 16 no autoriza publicaciones reales en TikTok o YouTube. Esas pruebas requieren aprobación explícita adicional.
 
 ## Rollout
 
@@ -459,7 +468,7 @@ El criterio 14 no autoriza publicaciones reales en TikTok o YouTube. Esas prueba
 - Trabajar en `C:\SouthFarm\source\.worktrees\semiorganic-publishing`.
 - Revisar y conservar `common.py`, `test_platform_adapters.py`, PNG y egg-info dirty.
 - Confirmar serial ADB, Android ID, device identity, package instalados y worker configurado.
-- Confirmar que `santilorennzo` está en la política prohibida.
+- Registrar `santilorennzo` como exclusión temporal del rollout y pruebas de esta sesión; no añadir una política runtime permanente.
 - No navegar ni cambiar cuentas durante la elaboración de la spec.
 
 ### Fase 1: implementación aislada
@@ -495,7 +504,7 @@ La autorización vigente permite únicamente:
 - fuente: la webapp de producción;
 - ciclo obligatorio por cada video: publicar → observar timeline `publishing`/`verifying`/`completed` → verificar el Reel en el perfil correcto → validar y consumir la autorización server-signed, humana, de un solo uso y scopeada → eliminar mediante cleanup explícito → confirmar baseline restaurado.
 
-Antes de cada video se debe comprobar que no hay un post temporal previo ni un job `review_required`. Si la publicación, verificación o eliminación no queda inequívoca, se detiene el rollout, no se crea otra publicación y se deja el caso para revisión humana. Nunca se selecciona `santilorennzo`, aunque aparezca en el selector.
+Antes de cada video se debe comprobar que no hay un post temporal previo ni un job `review_required`. Si la publicación, verificación o eliminación no queda inequívoca, se detiene el rollout, no se crea otra publicación y se deja el caso para revisión humana. En esta sesión no se selecciona, publica ni limpia en `santilorennzo`, aunque aparezca en el selector; esa exclusión no se implementa como política permanente.
 
 ## Self-review de la spec
 
@@ -508,8 +517,10 @@ Se revisó este documento después de redactarlo:
 - Se fijó la excepción única de launch: `monkey` puede ejecutarse con otro package en foreground, pero el package exacto se verifica inmediatamente antes del primer dump, tap o push.
 - Se fijó evidencia positiva posterior a cada acción y se enumeraron las únicas excepciones; desaparición sola no marca éxito. También se exige `visible_to_user`, screen size y bounds válidos antes de cualquier gesto.
 - Se fijó una sola salida para incertidumbre final: finish existente con `review_required`, `FINAL_ACTION_UNCERTAIN` y datos compactos; no se añade un campo ni un endpoint nuevo.
-- Se hizo global la prohibición de `santilorennzo` para los tres adapters y se exigieron pruebas dedicadas sin dump, launch, push ni gesto.
-- Se exigió autorización server-signed, humana, expirable, de un solo uso y scopeada antes de cualquier cleanup destructivo.
+- Se distinguió el estado actual del runner de su delta objetivo: hoy no se afirma que ya envíe `error_message`/`result` compactos; la spec exige implementarlo.
+- Se eliminó la política global de `santilorennzo` del producto; sólo queda documentada como exclusión temporal del rollout y pruebas de esta sesión.
+- Se exigió en `cleanup_cli.execute_cleanup` el orden validación de firma/scope/cuenta/post/expiración/no-consumido sin ADB → open/preflight → consumo atómico one-use inmediatamente antes de delete, y cero delete ante cualquier fallo.
+- Se corrigió la referencia de autorización de publicaciones reales para apuntar al criterio 16; TikTok/YouTube siguen requiriendo aprobación adicional.
 - Se resolvió la frontera web/móvil: sólo ADB y apps móviles usan `input tap`; React web conserva `onClick`.
 - Se limitó explícitamente la autorización live a dos pruebas Instagram en `@growtech.news` con los dos videos indicados; no se asumió autorización para TikTok, YouTube ni Santiago.
 - El alcance es una sola spec de refactor semántico del worker y su rollout; los cambios de código, tests y despliegue se ejecutarán en un plan posterior y no están incluidos en este commit documental.
