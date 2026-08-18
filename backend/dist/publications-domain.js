@@ -12,7 +12,7 @@ export const PUBLICATION_STATE_TRANSITIONS = {
     publishing: ['verifying', 'review_required'],
     verifying: ['completed', 'review_required'],
     cancellation_requested: ['cancelled'],
-    completed: [], cancelled: [], failed: [], review_required: [],
+    completed: [], cancelled: [], failed: [], review_required: ['completed', 'failed'],
 };
 export class PublicationTransitionError extends Error {
     constructor(message) { super(message); this.name = 'PublicationTransitionError'; }
@@ -81,7 +81,10 @@ export class PublicationStore {
             .run(id, from, to, to, actor.type, actor.id, payload === undefined ? null : JSON.stringify(payload), at).lastInsertRowid);
     }
     transition(row, to, actor, at, payload) {
-        if (row.final_action_at && !['publishing', 'verifying', 'completed', 'review_required'].includes(to))
+        // A final action locks the job; only in-flight publishing steps, completion,
+        // and manual review resolution (review_required -> completed/failed) may
+        // still mutate it afterwards.
+        if (row.final_action_at && !['publishing', 'verifying', 'completed', 'review_required'].includes(to) && !(row.status === 'review_required' && to === 'failed'))
             throw new PublicationTransitionError('Cannot transition publication job after final action');
         if (!canTransition(row.status, to))
             throw new PublicationTransitionError(`Cannot transition publication job from ${row.status} to ${to}`);
@@ -161,4 +164,26 @@ export class PublicationStore {
         throw new Error('Cannot finish publication job that changed after final action'); row = this.transition(row, target, actor, now, metadata); const update = this.db.prepare('UPDATE publication_jobs SET completed_at = ?, result = ?, error_code = ?, error_message = ?, remote_post_identity = COALESCE(?, remote_post_identity), published_at = COALESCE(?, published_at), verified_at = COALESCE(?, verified_at), updated_at = ? WHERE id = ? AND claimed_by = ? AND claim_token = ? AND lease_expires_at > ?').run(now, metadata.result || null, metadata.errorCode || null, metadata.errorMessage || null, metadata.remotePostIdentity || null, metadata.publishedAt || null, metadata.verifiedAt || null, now, id, worker.id, worker.claimToken, now); if (update.changes !== 1)
         throw new Error('Worker no longer owns publication job'); const release = this.db.prepare('DELETE FROM device_automation_locks WHERE device_id = ? AND publication_job_id = ? AND worker_id = ? AND expires_at > ?').run(row.device_id, id, worker.id, now); if (release.changes !== 1)
         throw new Error('Worker does not hold a live device automation lock'); return publicationJobView(this.row(id), this.db); }); }
+    resolveReview(id, action, actor, options = {}, at = new Date().toISOString()) {
+        return this.transaction(() => {
+            const row = this.row(id);
+            if (action !== 'completed' && action !== 'failed')
+                throw new PublicationTransitionError('Review resolution action must be completed or failed');
+            if (row.status !== 'review_required')
+                throw new PublicationTransitionError('Only publication jobs in review_required can be resolved');
+            const note = typeof options.note === 'string' ? options.note.trim() : '';
+            const manualEvidence = JSON.stringify({ action, note, at, actor: { type: actor.type, id: actor.id } });
+            const update = this.db.prepare(action === 'completed'
+                ? "UPDATE publication_jobs SET status = ?, current_step = ?, completed_at = ?, verified_at = COALESCE(verified_at, ?), result = CASE WHEN result IS NULL OR result = '' THEN ? ELSE result || char(10) || ? END, error_code = NULL, error_message = NULL, updated_at = ? WHERE id = ?"
+                : "UPDATE publication_jobs SET status = ?, current_step = ?, completed_at = ?, error_code = ?, error_message = ?, result = CASE WHEN result IS NULL OR result = '' THEN ? ELSE result || char(10) || ? END, updated_at = ? WHERE id = ?")
+                .run(...(action === 'completed'
+                ? [action, action, at, at, manualEvidence, manualEvidence, at, id]
+                : [action, action, at, 'REVIEW_DISMISSED', note || 'Descartado por el operador', manualEvidence, manualEvidence, at, id]));
+            if (update.changes !== 1)
+                throw new Error('Publication job is no longer in review_required');
+            const resolved = this.row(id);
+            this.event(resolved.id, 'review_required', action, actor, at, { action, note: note || null, verified_at: action === 'completed' ? resolved.verified_at : null, error_code: action === 'failed' ? resolved.error_code : null, error_message: action === 'failed' ? resolved.error_message : null });
+            return publicationJobView(resolved, this.db);
+        });
+    }
 }

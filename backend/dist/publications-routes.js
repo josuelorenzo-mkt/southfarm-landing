@@ -206,6 +206,7 @@ function safePublication(job, media, events) {
         verified_at: job.verified_at || null, remote_post_identity: job.remote_post_identity || null,
         error_code: job.error_code || null, error_message: job.error_message || null, cancel_requested_at: job.cancel_requested_at || null,
         created_at: job.created_at, updated_at: job.updated_at, completed_at: job.completed_at || null,
+        result: job.result || null,
     };
     if (media)
         view.media = {
@@ -441,6 +442,29 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             if (error instanceof PublicationTransitionError)
                 return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
             return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
+        }
+    });
+    app.post('/api/publications/:id/review', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
+        try {
+            const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
+            if (job.status !== 'review_required')
+                routeError(409, 'UNSAFE_TRANSITION', 'Only publications in review_required can be resolved');
+            const action = String(req.body?.action || '');
+            if (action !== 'confirm' && action !== 'dismiss')
+                routeError(400, 'VALIDATION_ERROR', 'action must be confirm or dismiss');
+            const note = req.body?.note;
+            if (note !== undefined && typeof note !== 'string')
+                routeError(400, 'VALIDATION_ERROR', 'note must be a string');
+            const publication = store.resolveReview(Number(job.id), action === 'confirm' ? 'completed' : 'failed', { type: 'user', id: String(req.user.userId) }, { note });
+            const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+        }
+        catch (error) {
+            if (error instanceof PublicationRouteError)
+                return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+            if (error instanceof PublicationTransitionError)
+                return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
+            return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to resolve publication review' });
         }
     });
     app.post('/api/publications/:id/test-cleanup-authorizations', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
