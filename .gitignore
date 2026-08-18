@@ -47,3 +47,5 @@ backend/logs/
 backend/run/
 .worktrees/
 # public/southfarm.apk  — needed for direct download
+__pycache__/
+*.egg-info/
