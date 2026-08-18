@@ -15,7 +15,7 @@ export declare const PUBLICATION_STATE_TRANSITIONS: {
     readonly completed: readonly [];
     readonly cancelled: readonly [];
     readonly failed: readonly [];
-    readonly review_required: readonly [];
+    readonly review_required: readonly ["completed", "failed"];
 };
 export declare class PublicationTransitionError extends Error {
     constructor(message: string);
@@ -123,5 +123,8 @@ export declare class PublicationStore {
         evidence?: unknown;
     }): PublicationJobView;
     finish(id: number, worker: PublicationWorker, target: Extract<PublicationStatus, 'completed' | 'cancelled' | 'failed' | 'review_required'>, now: string, metadata?: PublicationFinishMetadata, actor?: PublicationActor): PublicationJobView;
+    resolveReview(id: number, action: Extract<PublicationStatus, 'completed' | 'failed'>, actor: PublicationActor, options?: {
+        note?: string;
+    }, at?: string): PublicationJobView;
 }
 export {};

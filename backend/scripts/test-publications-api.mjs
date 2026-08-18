@@ -49,6 +49,14 @@ const mp4Header = fs.readFileSync('C:\\Users\\josu_\\Downloads\\Videos to test\\
 const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
 const webmHeader = Buffer.from('1a45dfa3874282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+// A local copy of the real fixture: its ffprobe metadata is fixed at creation
+// time by the seeded upload, so each fixture below exercises one rule outcome.
+function seededMediaFixture(overrides = {}) {
+  const file = path.join(tempDir, `seeded-${++seededMediaFixture.sequence}.mp4`);
+  fs.writeFileSync(file, mp4Header);
+  return { file, metadata: { duration_seconds: 14, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac', ...overrides } };
+}
+seededMediaFixture.sequence = 0;
 
 async function waitForHealth() {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -186,6 +194,67 @@ try {
   assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'validation failures must remove temporary/final media');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'validation failures must remove temporary media');
 
+  // Fail-closed platform media rules run at creation, before any phone minutes
+  // are spent on the job. The uploaded bytes are the same real MP4 every time;
+  // only the seeded ffprobe metadata changes, which is what the route validates.
+  const rulesFixtures = [
+    seededMediaFixture({ video_codec: 'hevc', width: 2160, height: 3840 }),
+    seededMediaFixture({ video_codec: 'hevc', width: 1080, height: 1920 }),
+    seededMediaFixture({ video_codec: 'vp9', width: 1080, height: 1920 }),
+    seededMediaFixture({ video_codec: null, width: null, height: null }),
+  ];
+  // Multer stores the upload under a random name, so the injected inspector
+  // keys on the uploaded byte size; pad each fixture to a unique size.
+  for (let index = 0; index < rulesFixtures.length; index += 1) {
+    fs.appendFileSync(rulesFixtures[index].file, Buffer.alloc((index + 1) * 137));
+    rulesFixtures[index].size = fs.statSync(rulesFixtures[index].file).size;
+  }
+  const instagramAccountId = Number(db.prepare("INSERT INTO social_accounts (user_id, device_id, platform, username) VALUES (?, ?, 'instagram', 'test-reels')").run(owner.user.id, deviceId).lastInsertRowid);
+  const rulesApp = express();
+  rulesApp.use(express.json());
+  registerPublicationRoutes({
+    app: rulesApp, db, store: new PublicationStore(db), mediaRoot: path.join(tempDir, 'rules-media'),
+    auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
+    requireRole: () => (_req, _res, next) => next(),
+    inspectVideo: async (file) => {
+      const fixture = rulesFixtures.find((item) => item.size === fs.statSync(file).size);
+      return fixture ? fixture.metadata : { duration_seconds: 14, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac' };
+    },
+  });
+  const rulesServer = await new Promise((resolve) => { const server = rulesApp.listen(port + 3, () => resolve(server)); });
+  const rulesRequest = async (formData) => {
+    const response = await fetch(`http://127.0.0.1:${port + 3}/api/publications`, { method: 'POST', headers: { Authorization: `Bearer ${owner.token}` }, body: formData });
+    const body = await response.json().catch(() => ({}));
+    return { response, body };
+  };
+  const makeRulesForm = (file) => {
+    const value = new FormData();
+    value.set('video', new Blob([fs.readFileSync(file)], { type: 'video/mp4' }), 'clip.mp4');
+    value.set('platform', 'instagram');
+    value.set('device_id', String(deviceId));
+    value.set('social_account_id', String(instagramAccountId));
+    value.set('caption', 'Platform media rules reject this early');
+    value.set('scheduled_for', futureIso);
+    return value;
+  };
+  const unsupported4k = await rulesRequest(makeRulesForm(rulesFixtures[0].file));
+  assert.equal(unsupported4k.response.status, 400, JSON.stringify(unsupported4k.body));
+  assert.equal(unsupported4k.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupported4k.body.error, /Video is hevc 2160x3840 but platform allows max 1080x1920 with h264\/hevc/);
+  const supportedHevc = await rulesRequest(makeRulesForm(rulesFixtures[1].file));
+  assert.equal(supportedHevc.response.status, 201, JSON.stringify(supportedHevc.body));
+  const unsupportedCodec = await rulesRequest(makeRulesForm(rulesFixtures[2].file));
+  assert.equal(unsupportedCodec.response.status, 400, JSON.stringify(unsupportedCodec.body));
+  assert.equal(unsupportedCodec.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupportedCodec.body.error, /Video codec vp9 is not supported: platform allows max 1080x1920 with h264\/hevc/);
+  const unsupportedNoMetadata = await rulesRequest(makeRulesForm(rulesFixtures[3].file));
+  assert.equal(unsupportedNoMetadata.response.status, 400, JSON.stringify(unsupportedNoMetadata.body));
+  assert.equal(unsupportedNoMetadata.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupportedNoMetadata.body.error, /Video metadata is missing \(codec or dimensions not inspected\) but platform allows max 1080x1920 with h264\/hevc/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE platform = 'instagram' AND status = 'queued'").get().count, 1, 'only the rule-compliant media may enqueue a job');
+  assert.equal(fs.readdirSync(path.join(tempDir, 'rules-media')).filter((name) => name !== '.tmp').length, 1, 'rejected media must not remain in the media root');
+  await new Promise((resolve) => rulesServer.close(resolve));
+
   const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
   const mediaBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count;
   const abortRoot = path.join(tempDir, 'abort-media');
@@ -263,6 +332,44 @@ try {
   const foreignAccount = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId: foreignAccountId }) });
   assert.equal(foreignAccount.response.status, 404);
 
+  // `result` carries worker evidence (phone accessibility dumps) and must only
+  // reach managing roles. Seed it on a job, then confirm list and detail expose
+  // it to owner/operator but strip it for viewer.
+  db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, result, created_at, updated_at)
+    VALUES (?, ?, ?, 'youtube', 'Evidence gating', 2, ?, 'completed', 'completed', ?, ?, ?)`)
+    .run(ownerWorkspace, deviceId, accountId, futureIso, JSON.stringify({ worker_dump: 'evidence-dump.txt' }), futureIso, futureIso);
+  const evidenceJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'completed' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  const operatorEmail = `publication-operator-${Date.now()}@example.test`;
+  const operator = await createUser(operatorEmail);
+  const operatorId = Number(operator.user.id);
+  // register() created a private workspace for the operator; drop it so the
+  // operator resolves to the single owner-workspace membership like every
+  // other user under test (workspaceMembership orders by membership id).
+  db.prepare('DELETE FROM workspace_members WHERE user_id = ? AND workspace_id != ?').run(operatorId, ownerWorkspace);
+  db.prepare(`INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at, updated_at)
+    VALUES (?, ?, 'operator', 'active', ?, ?)`).run(ownerWorkspace, operatorId, futureIso, futureIso);
+  const operatorHeaders = { Authorization: `Bearer ${operator.token}` };
+  const operatorList = await request('/api/publications', { headers: operatorHeaders });
+  assert.equal(operatorList.response.status, 200);
+  const operatorEvidence = operatorList.body.publications.find((item) => item.id === evidenceJobId);
+  assert.ok(operatorEvidence, 'operator must see the evidence job in the list');
+  assert.equal(String(operatorEvidence.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'operator list exposes worker evidence');
+  const operatorDetail = await request(`/api/publications/${evidenceJobId}`, { headers: operatorHeaders });
+  assert.equal(operatorDetail.response.status, 200);
+  assert.equal(String(operatorDetail.body.publication.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'operator detail exposes worker evidence');
+  const ownerEvidence = await request(`/api/publications/${evidenceJobId}`, { headers: ownerHeaders });
+  assert.equal(ownerEvidence.response.status, 200);
+  assert.equal(String(ownerEvidence.body.publication.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'owner detail exposes worker evidence');
+  db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, operatorId);
+  const viewerList = await request('/api/publications', { headers: operatorHeaders });
+  assert.equal(viewerList.response.status, 200);
+  assert.equal('result' in viewerList.body.publications.find((item) => item.id === evidenceJobId), false, 'viewer list must not expose worker evidence');
+  assert.equal(viewerList.body.publications.some((item) => Object.prototype.hasOwnProperty.call(item, 'result')), false, 'viewer list must not expose result on any publication');
+  const viewerDetail = await request(`/api/publications/${evidenceJobId}`, { headers: operatorHeaders });
+  assert.equal(viewerDetail.response.status, 200);
+  assert.equal('result' in viewerDetail.body.publication, false, 'viewer detail must not expose worker evidence');
+
   db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
   const viewer = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
   assert.equal(viewer.response.status, 403);
@@ -277,7 +384,68 @@ try {
   assert.equal(blockedByReview.body.error_code, 'REVIEW_REQUIRED');
   assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'review gate must clean the uploaded temp file');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'review gate must remove temporary media');
-  db.prepare("DELETE FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").run(accountId);
+
+  const reviewJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  db.prepare('UPDATE publication_jobs SET result = ?, final_action_at = ? WHERE id = ?').run(JSON.stringify({ worker_dump: 'screen-capture.txt' }), futureIso, reviewJobId);
+  const deviceReview = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...deviceHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(deviceReview.response.status, 403, 'device tokens cannot resolve reviews');
+  db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
+  const viewerReview = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(viewerReview.response.status, 403, 'viewers cannot resolve reviews');
+  db.prepare("UPDATE workspace_members SET role = 'owner' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
+  const invalidAction = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'maybe' }) });
+  assert.equal(invalidAction.response.status, 400);
+  assert.equal(invalidAction.body.error_code, 'VALIDATION_ERROR');
+  const badNote = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', note: 42 }) });
+  assert.equal(badNote.response.status, 400);
+  const wrongState = await request(`/api/publications/${valid.body.publication.id}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(wrongState.response.status, 409, 'jobs outside review_required are rejected');
+  assert.equal(wrongState.body.error_code, 'UNSAFE_TRANSITION');
+  const confirmed = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+  assert.equal(confirmed.body.publication.status, 'completed');
+  assert.equal(confirmed.body.publication.current_step, 'completed');
+  assert.ok(confirmed.body.publication.completed_at, 'confirm sets completed_at');
+  assert.equal(confirmed.body.publication.verified_at, confirmed.body.publication.completed_at, 'confirm sets verified_at');
+  assert.equal(confirmed.body.publication.error_code, null);
+  assert.equal(confirmed.body.publication.error_message, null);
+  assert.ok(String(confirmed.body.publication.result).startsWith(`${JSON.stringify({ worker_dump: 'screen-capture.txt' })}\n`), 'worker evidence is preserved');
+  assert.ok(String(confirmed.body.publication.result).includes('"action":"completed"'), 'manual evidence is appended to result');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(accountId).count, 0);
+  const confirmedDetail = await request(`/api/publications/${reviewJobId}`, { headers: ownerHeaders });
+  const confirmEvent = confirmedDetail.body.publication.events.at(-1);
+  assert.equal(confirmEvent.from_status, 'review_required');
+  assert.equal(confirmEvent.to_status, 'completed');
+  assert.equal(confirmEvent.actor_type, 'user');
+  assert.equal(confirmEvent.payload.action, 'completed');
+  const unblockedAfterConfirm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(unblockedAfterConfirm.response.status, 201, `account can publish again after confirm: ${JSON.stringify(unblockedAfterConfirm.body)}`);
+  const confirmAgain = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(confirmAgain.response.status, 409, 'resolved jobs cannot be resolved twice');
+
+  db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, result, error_code, error_message, created_at, updated_at)
+    VALUES (?, ?, ?, 'youtube', 'Dismiss me', 2, ?, 'review_required', 'review_required', ?, 'VERIFICATION_PENDING', 'Publication completed but could not be verified', ?, ?)`)
+    .run(ownerWorkspace, deviceId, accountId, futureIso, JSON.stringify({ worker_dump: 'last-dump.txt' }), futureIso, futureIso);
+  const dismissJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  const dismissed = await request(`/api/publications/${dismissJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', note: 'El video nunca apareció en la cuenta' }) });
+  assert.equal(dismissed.response.status, 200, JSON.stringify(dismissed.body));
+  assert.equal(dismissed.body.publication.status, 'failed');
+  assert.equal(dismissed.body.publication.current_step, 'failed');
+  assert.equal(dismissed.body.publication.error_code, 'REVIEW_DISMISSED');
+  assert.equal(dismissed.body.publication.error_message, 'El video nunca apareció en la cuenta');
+  assert.equal(dismissed.body.publication.verified_at, null, 'dismiss does not set verified_at');
+  assert.ok(String(dismissed.body.publication.result).startsWith(`${JSON.stringify({ worker_dump: 'last-dump.txt' })}\n`), 'worker evidence is preserved on dismiss');
+  assert.ok(String(dismissed.body.publication.result).includes('"action":"failed"'), 'manual evidence is appended on dismiss');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(accountId).count, 0);
+  const dismissedDetail = await request(`/api/publications/${dismissJobId}`, { headers: ownerHeaders });
+  const dismissEvent = dismissedDetail.body.publication.events.at(-1);
+  assert.equal(dismissEvent.from_status, 'review_required');
+  assert.equal(dismissEvent.to_status, 'failed');
+  assert.equal(dismissEvent.payload.action, 'failed');
+  assert.equal(dismissEvent.payload.error_code, 'REVIEW_DISMISSED');
+  const unblockedAfterDismiss = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(unblockedAfterDismiss.response.status, 201, `account can publish again after dismiss: ${JSON.stringify(unblockedAfterDismiss.body)}`);
 
   const orphanTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const orphanId = Number(db.prepare(`INSERT INTO publication_media
@@ -333,7 +501,7 @@ try {
   const large = await request('/api/publications', { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: largeBody, duplex: 'half' });
   assert.equal(large.response.status, 413, JSON.stringify(large.body));
   assert.equal(large.body.error_code, 'VIDEO_TOO_LARGE');
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 4, 'failed uploads must not leave media files');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 6, 'failed uploads must not leave media files');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'oversized uploads must remove temporary media');
   // The initial DB handle was closed before restart recovery.
 

@@ -4,6 +4,24 @@ import path from 'node:path';
 import multer, { MulterError } from 'multer';
 import { PublicationTransitionError, validatePublicationInput } from './publications-domain.js';
 import { inspectPublicationVideo } from './publication-media-inspector.js';
+export const PLATFORM_MEDIA_RULES = {
+    instagram: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+    tiktok: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+    youtube: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+};
+export function mediaSupportedForPlatform(platform, metadata) {
+    const rules = PLATFORM_MEDIA_RULES[platform];
+    if (!rules)
+        return { supported: false, reason: 'codec' };
+    if (typeof metadata.video_codec !== 'string' || !metadata.video_codec || typeof metadata.width !== 'number' || !Number.isInteger(metadata.width) || typeof metadata.height !== 'number' || !Number.isInteger(metadata.height)) {
+        return { supported: false, reason: 'metadata' };
+    }
+    if (metadata.width > rules.maxWidth || metadata.height > rules.maxHeight)
+        return { supported: false, reason: 'dimensions' };
+    if (!rules.allowedVideoCodecs.includes(metadata.video_codec))
+        return { supported: false, reason: 'codec' };
+    return { supported: true };
+}
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MIME_EXTENSIONS = {
     'video/mp4': 'mp4',
@@ -197,7 +215,14 @@ function workspaceJob(db, workspaceId, rawId) {
         routeError(404, 'NOT_FOUND', 'Publication not found');
     return job;
 }
-function safePublication(job, media, events) {
+// Roles that may see the worker evidence captured in `result` (accessibility
+// tree dumps of the phone screen). This mirrors the managing-role set used by
+// requireRole for mutating endpoints, so `viewer` never receives evidence.
+const MANAGING_ROLES = ['owner', 'admin', 'operator'];
+function isManagingRole(role) {
+    return MANAGING_ROLES.includes(String(role || '').toLowerCase());
+}
+function safePublication(job, media, events, includeResult = false) {
     const view = {
         id: Number(job.id), workspace_id: Number(job.workspace_id), device_id: Number(job.device_id), social_account_id: Number(job.social_account_id),
         platform: job.platform, caption: job.caption, word_count: Number(job.word_count), scheduled_for: job.scheduled_for,
@@ -207,6 +232,8 @@ function safePublication(job, media, events) {
         error_code: job.error_code || null, error_message: job.error_message || null, cancel_requested_at: job.cancel_requested_at || null,
         created_at: job.created_at, updated_at: job.updated_at, completed_at: job.completed_at || null,
     };
+    if (includeResult)
+        view.result = job.result || null;
     if (media)
         view.media = {
             id: Number(media.id), media_key: path.basename(String(media.private_path || '')),
@@ -329,6 +356,21 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 catch {
                     routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified');
                 }
+                // Fail-closed platform media rules: a job whose media the target
+                // platform cannot handle must be rejected here, before any phone
+                // minutes are spent on it (e.g. 4K HEVC clips that Instagram's
+                // gallery refuses with MEDIA_UNSELECTABLE after a long run).
+                const platformCheck = mediaSupportedForPlatform(input.platform, metadata);
+                if (!platformCheck.supported) {
+                    const rules = PLATFORM_MEDIA_RULES[input.platform];
+                    const ruleText = `max ${rules.maxWidth}x${rules.maxHeight} with ${rules.allowedVideoCodecs.join('/')}`;
+                    const message = platformCheck.reason === 'dimensions'
+                        ? `Video is ${metadata.video_codec} ${metadata.width}x${metadata.height} but platform allows ${ruleText}`
+                        : platformCheck.reason === 'metadata'
+                            ? `Video metadata is missing (codec or dimensions not inspected) but platform allows ${ruleText}`
+                            : `Video codec ${metadata.video_codec} is not supported: platform allows ${ruleText}`;
+                    routeError(400, 'MEDIA_UNSUPPORTED', message);
+                }
                 if (state.aborted || req.aborted)
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const mediaInsert = db.prepare(`INSERT INTO publication_media
@@ -362,7 +404,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const job = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(state.jobId);
                 state.committed = true;
-                res.status(201).json({ publication: safePublication(job, mediaForJob(db, job)) });
+                res.status(201).json({ publication: safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role)) });
             }
             catch (error) {
                 compensateUpload(db, req, state);
@@ -386,7 +428,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 }
             }
             const jobs = db.prepare(`SELECT * FROM publication_jobs WHERE ${where.join(' AND ')} ORDER BY scheduled_for DESC, id DESC`).all(...values);
-            res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job))) });
+            res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role))) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -398,7 +440,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         try {
             const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
             const events = db.prepare('SELECT * FROM publication_events WHERE publication_job_id = ? ORDER BY id ASC').all(job.id);
-            res.json({ publication: safePublication(job, mediaForJob(db, job), events) });
+            res.json({ publication: safePublication(job, mediaForJob(db, job), events, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -415,7 +457,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             const scheduledFor = parseSchedule(req.body?.scheduled_for);
             const publication = store.rescheduleJob(Number(job.id), scheduledFor, { type: 'user', id: String(req.user.userId) });
             const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
-            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -433,7 +475,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             testHooks?.beforeCancel?.();
             const publication = store.requestCancellation(Number(job.id), { type: 'user', id: String(req.user.userId) });
             const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
-            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -441,6 +483,29 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             if (error instanceof PublicationTransitionError)
                 return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
             return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
+        }
+    });
+    app.post('/api/publications/:id/review', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {
+        try {
+            const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
+            if (job.status !== 'review_required')
+                routeError(409, 'UNSAFE_TRANSITION', 'Only publications in review_required can be resolved');
+            const action = String(req.body?.action || '');
+            if (action !== 'confirm' && action !== 'dismiss')
+                routeError(400, 'VALIDATION_ERROR', 'action must be confirm or dismiss');
+            const note = req.body?.note;
+            if (note !== undefined && typeof note !== 'string')
+                routeError(400, 'VALIDATION_ERROR', 'note must be a string');
+            const publication = store.resolveReview(Number(job.id), action === 'confirm' ? 'completed' : 'failed', { type: 'user', id: String(req.user.userId) }, { note });
+            const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
+        }
+        catch (error) {
+            if (error instanceof PublicationRouteError)
+                return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+            if (error instanceof PublicationTransitionError)
+                return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
+            return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to resolve publication review' });
         }
     });
     app.post('/api/publications/:id/test-cleanup-authorizations', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req, res) => {

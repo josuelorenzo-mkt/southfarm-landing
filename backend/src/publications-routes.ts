@@ -11,6 +11,29 @@ type SqliteDatabase = Database.Database;
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 type UploadState = { uploadedPath?: string; finalPath?: string; mediaId?: number; jobId?: number; committed: boolean; aborted: boolean; cleaning: boolean };
 
+// Fail-closed media rules per platform, evaluated at creation time from the
+// ffprobe metadata captured during upload. Keeping the rules as data mirrors
+// the per-platform selectors of the publisher worker: the worker should never
+// receive a job whose media its platform adapters cannot handle (e.g. a 4K
+// HEVC file that Instagram's gallery refuses with MEDIA_UNSELECTABLE).
+export type PlatformMediaRules = { maxWidth: number; maxHeight: number; allowedVideoCodecs: readonly string[] };
+export const PLATFORM_MEDIA_RULES: Record<string, PlatformMediaRules> = {
+  instagram: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+  tiktok: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+  youtube: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+};
+
+export function mediaSupportedForPlatform(platform: string, metadata: { width: number | null; height: number | null; video_codec: string | null }): { supported: boolean; reason?: 'dimensions' | 'codec' | 'metadata' } {
+  const rules = PLATFORM_MEDIA_RULES[platform];
+  if (!rules) return { supported: false, reason: 'codec' };
+  if (typeof metadata.video_codec !== 'string' || !metadata.video_codec || typeof metadata.width !== 'number' || !Number.isInteger(metadata.width) || typeof metadata.height !== 'number' || !Number.isInteger(metadata.height)) {
+    return { supported: false, reason: 'metadata' };
+  }
+  if (metadata.width > rules.maxWidth || metadata.height > rules.maxHeight) return { supported: false, reason: 'dimensions' };
+  if (!rules.allowedVideoCodecs.includes(metadata.video_codec)) return { supported: false, reason: 'codec' };
+  return { supported: true };
+}
+
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MIME_EXTENSIONS: Record<string, string> = {
   'video/mp4': 'mp4',
@@ -163,7 +186,15 @@ function workspaceJob(db: SqliteDatabase, workspaceId: number, rawId: unknown): 
   return job;
 }
 
-function safePublication(job: any, media?: any, events?: any[]): Record<string, unknown> {
+// Roles that may see the worker evidence captured in `result` (accessibility
+// tree dumps of the phone screen). This mirrors the managing-role set used by
+// requireRole for mutating endpoints, so `viewer` never receives evidence.
+const MANAGING_ROLES = ['owner', 'admin', 'operator'] as const;
+function isManagingRole(role: unknown): boolean {
+  return MANAGING_ROLES.includes(String(role || '').toLowerCase() as (typeof MANAGING_ROLES)[number]);
+}
+
+function safePublication(job: any, media?: any, events?: any[], includeResult = false): Record<string, unknown> {
   const view: Record<string, unknown> = {
     id: Number(job.id), workspace_id: Number(job.workspace_id), device_id: Number(job.device_id), social_account_id: Number(job.social_account_id),
     platform: job.platform, caption: job.caption, word_count: Number(job.word_count), scheduled_for: job.scheduled_for,
@@ -173,6 +204,7 @@ function safePublication(job: any, media?: any, events?: any[]): Record<string, 
     error_code: job.error_code || null, error_message: job.error_message || null, cancel_requested_at: job.cancel_requested_at || null,
     created_at: job.created_at, updated_at: job.updated_at, completed_at: job.completed_at || null,
   };
+  if (includeResult) view.result = job.result || null;
   if (media) view.media = {
     id: Number(media.id), media_key: path.basename(String(media.private_path || '')),
     original_filename: media.original_filename, mime_type: media.mime_type, file_extension: media.file_extension,
@@ -264,6 +296,21 @@ export function registerPublicationRoutes({
         const sha256 = hashFile(state.uploadedPath!);
         let metadata;
         try { metadata = await inspectVideo(state.uploadedPath!); } catch { routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified'); }
+        // Fail-closed platform media rules: a job whose media the target
+        // platform cannot handle must be rejected here, before any phone
+        // minutes are spent on it (e.g. 4K HEVC clips that Instagram's
+        // gallery refuses with MEDIA_UNSELECTABLE after a long run).
+        const platformCheck = mediaSupportedForPlatform(input.platform, metadata);
+        if (!platformCheck.supported) {
+          const rules = PLATFORM_MEDIA_RULES[input.platform];
+          const ruleText = `max ${rules.maxWidth}x${rules.maxHeight} with ${rules.allowedVideoCodecs.join('/')}`;
+          const message = platformCheck.reason === 'dimensions'
+            ? `Video is ${metadata.video_codec} ${metadata.width}x${metadata.height} but platform allows ${ruleText}`
+            : platformCheck.reason === 'metadata'
+              ? `Video metadata is missing (codec or dimensions not inspected) but platform allows ${ruleText}`
+              : `Video codec ${metadata.video_codec} is not supported: platform allows ${ruleText}`;
+          routeError(400, 'MEDIA_UNSUPPORTED', message);
+        }
         if (state.aborted || req.aborted) routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
         const mediaInsert = db.prepare(`INSERT INTO publication_media
           (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)
@@ -295,7 +342,7 @@ export function registerPublicationRoutes({
         if (state.aborted || req.aborted) routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
         const job = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(state.jobId) as any;
         state.committed = true;
-        res.status(201).json({ publication: safePublication(job, mediaForJob(db, job)) });
+        res.status(201).json({ publication: safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role)) });
       } catch (error: any) {
         compensateUpload(db, req, state);
         if (state.aborted || req.aborted || res.headersSent) return;
@@ -313,7 +360,7 @@ export function registerPublicationRoutes({
         if (req.query[key] !== undefined) { where.push(`${column} = ?`); values.push(key.endsWith('_id') ? parseId(req.query[key], key) : String(req.query[key])); }
       }
       const jobs = db.prepare(`SELECT * FROM publication_jobs WHERE ${where.join(' AND ')} ORDER BY scheduled_for DESC, id DESC`).all(...values) as any[];
-      res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job))) });
+      res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role))) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to list publications' });
@@ -324,7 +371,7 @@ export function registerPublicationRoutes({
     try {
       const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
       const events = db.prepare('SELECT * FROM publication_events WHERE publication_job_id = ? ORDER BY id ASC').all(job.id) as any[];
-      res.json({ publication: safePublication(job, mediaForJob(db, job), events) });
+      res.json({ publication: safePublication(job, mediaForJob(db, job), events, isManagingRole(req.user?.role)) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to retrieve publication' });
@@ -339,7 +386,7 @@ export function registerPublicationRoutes({
       const scheduledFor = parseSchedule(req.body?.scheduled_for);
       const publication = store.rescheduleJob(Number(job.id), scheduledFor, { type: 'user', id: String(req.user.userId) });
       const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id) as any;
-      res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+      res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
       if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
@@ -354,11 +401,29 @@ export function registerPublicationRoutes({
       testHooks?.beforeCancel?.();
       const publication = store.requestCancellation(Number(job.id), { type: 'user', id: String(req.user.userId) });
       const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id) as any;
-      res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+      res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
     } catch (error: any) {
       if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
       if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
       return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to cancel publication' });
+    }
+  });
+
+  app.post('/api/publications/:id/review', auth, requireUserSession, requireRole('owner', 'admin', 'operator'), (req: any, res: Response) => {
+    try {
+      const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
+      if (job.status !== 'review_required') routeError(409, 'UNSAFE_TRANSITION', 'Only publications in review_required can be resolved');
+      const action = String(req.body?.action || '');
+      if (action !== 'confirm' && action !== 'dismiss') routeError(400, 'VALIDATION_ERROR', 'action must be confirm or dismiss');
+      const note = req.body?.note;
+      if (note !== undefined && typeof note !== 'string') routeError(400, 'VALIDATION_ERROR', 'note must be a string');
+      const publication = store.resolveReview(Number(job.id), action === 'confirm' ? 'completed' : 'failed', { type: 'user', id: String(req.user.userId) }, { note });
+      const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id) as any;
+      res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
+    } catch (error: any) {
+      if (error instanceof PublicationRouteError) return res.status(error.status).json({ error_code: error.errorCode, error: error.message });
+      if (error instanceof PublicationTransitionError) return res.status(409).json({ error_code: 'UNSAFE_TRANSITION', error: error.message });
+      return res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Unable to resolve publication review' });
     }
   });
 
