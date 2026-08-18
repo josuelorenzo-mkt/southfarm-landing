@@ -48,7 +48,7 @@ assert.deepEqual(PUBLICATION_STATE_TRANSITIONS, {
   completed: [],
   cancelled: [],
   failed: [],
-  review_required: [],
+  review_required: ['completed', 'failed'],
 });
 
 for (const column of [
@@ -166,5 +166,93 @@ db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').r
 const pausedJob = createJob(jobInput, actor);
 db.prepare("INSERT INTO task_runs (id, device_id, status, lease_expires_at) VALUES (5, 1, 'paused', NULL)").run();
 assert.equal(store.claimDueJob(worker, later).claimed, false, 'paused task with a live lease blocks a claim');
+db.prepare('DELETE FROM task_runs WHERE id = 5').run();
+
+const reviewActor = { type: 'user', id: 'reviewer-1' };
+const toReview = (result) => {
+  const job = createJob(jobInput, actor);
+  db.prepare("UPDATE publication_jobs SET status = 'review_required', current_step = 'review_required', final_action_at = ?, result = ?, error_code = 'VERIFICATION_PENDING', error_message = 'Publication completed but could not be verified', completed_at = ? WHERE id = ?")
+    .run(now, result, now, job.id);
+  return job;
+};
+const reviewEvents = (jobId) => db.prepare("SELECT from_status, to_status, actor_type, actor_id, payload FROM publication_events WHERE publication_job_id = ? ORDER BY id").all(jobId);
+const releaseDeviceLocks = () => db.prepare('DELETE FROM device_automation_locks').run();
+const deleteJob = (jobId) => { db.prepare('DELETE FROM publication_events WHERE publication_job_id = ?').run(jobId); db.prepare('DELETE FROM device_automation_locks WHERE publication_job_id = ?').run(jobId); db.prepare('DELETE FROM publication_jobs WHERE id = ?').run(jobId); };
+
+const confirmJob = toReview(JSON.stringify({ worker_dump: 'screen-capture.txt' }));
+assert.equal(store.claimDueJob(worker, now).claimed, false, 'review_required job freezes the account claim gate');
+const confirmed = store.resolveReview(confirmJob.id, 'completed', reviewActor, {}, now);
+assert.equal(confirmed.status, 'completed');
+assert.equal(confirmed.completed_at, now);
+assert.equal(confirmed.verified_at, now, 'confirm sets verified_at');
+assert.equal(confirmed.error_code, null);
+assert.equal(confirmed.error_message, null);
+assert.equal(confirmed.result, JSON.stringify({ worker_dump: 'screen-capture.txt' }) + '\n' + JSON.stringify({ action: 'completed', note: '', at: now, actor: { type: 'user', id: 'reviewer-1' } }), 'worker evidence is preserved and manual evidence is appended');
+assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(1).count, 0, 'confirm clears the review gate');
+const confirmedEvents = reviewEvents(confirmJob.id);
+assert.equal(confirmedEvents.at(-1).from_status, 'review_required');
+assert.equal(confirmedEvents.at(-1).to_status, 'completed');
+assert.equal(confirmedEvents.at(-1).actor_type, 'user');
+assert.deepEqual(JSON.parse(confirmedEvents.at(-1).payload), { action: 'completed', note: null, verified_at: now, error_code: null, error_message: null });
+const claimedAfterConfirm = store.claimDueJob(worker, now);
+assert.equal(claimedAfterConfirm.claimed, true, 'account can receive claims again after confirm');
+releaseDeviceLocks();
+
+const dismissJob = toReview('publish-response-evidence');
+const dismissed = store.resolveReview(dismissJob.id, 'failed', reviewActor, { note: '  El video nunca apareció  ' }, now);
+assert.equal(dismissed.status, 'failed');
+assert.equal(dismissed.completed_at, now);
+assert.equal(dismissed.error_code, 'REVIEW_DISMISSED');
+assert.equal(dismissed.error_message, 'El video nunca apareció');
+assert.equal(dismissed.verified_at, null, 'dismiss does not set verified_at');
+assert.equal(dismissed.result, 'publish-response-evidence\n' + JSON.stringify({ action: 'failed', note: 'El video nunca apareció', at: now, actor: { type: 'user', id: 'reviewer-1' } }), 'worker evidence is preserved and manual evidence is appended');
+assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(1).count, 0, 'dismiss clears the review gate');
+const dismissedEvents = reviewEvents(dismissJob.id);
+assert.equal(dismissedEvents.at(-1).to_status, 'failed');
+assert.deepEqual(JSON.parse(dismissedEvents.at(-1).payload), { action: 'failed', note: 'El video nunca apareció', verified_at: null, error_code: 'REVIEW_DISMISSED', error_message: 'El video nunca apareció' });
+const postDismissJob = createJob(jobInput, actor);
+const claimedAfterDismiss = store.claimDueJob(worker, now);
+assert.equal(claimedAfterDismiss.claimed, true, 'account can receive claims again after dismiss');
+releaseDeviceLocks();
+
+const noNoteJob = toReview(null);
+const noNote = store.resolveReview(noNoteJob.id, 'failed', reviewActor, {}, now);
+assert.equal(noNote.error_message, 'Descartado por el operador');
+assert.equal(noNote.result, JSON.stringify({ action: 'failed', note: '', at: now, actor: { type: 'user', id: 'reviewer-1' } }), 'result starts with manual evidence when the worker left none');
+const noNoteEvents = reviewEvents(noNoteJob.id);
+assert.deepEqual(JSON.parse(noNoteEvents.at(-1).payload), { action: 'failed', note: null, verified_at: null, error_code: 'REVIEW_DISMISSED', error_message: 'Descartado por el operador' });
+
+const rejectJob = toReview(null);
+assert.throws(() => store.resolveReview(rejectJob.id, 'cancelled', reviewActor, {}, now), /must be completed or failed/, 'non-terminal actions are rejected');
+assert.equal(store.getJob(rejectJob.id).status, 'review_required', 'invalid action leaves the job untouched');
+const frozenProbe = createJob(jobInput, actor);
+assert.equal(store.claimDueJob(worker, now).claimed, false, 'rejected resolutions leave the claim gate frozen');
+deleteJob(rejectJob.id);
+deleteJob(frozenProbe.id);
+releaseDeviceLocks();
+
+const wrongStateJob = createJob(jobInput, actor);
+assert.throws(() => store.resolveReview(wrongStateJob.id, 'completed', reviewActor, {}, now), /review_required/, 'jobs outside review_required cannot be resolved');
+deleteJob(wrongStateJob.id);
+
+const failedAfterReview = toReview(null);
+assert.throws(() => store.finish(failedAfterReview.id, worker, 'failed', now, actor), /active publication job/, 'worker cannot finish a review_required job it no longer owns');
+assert.throws(() => store.checkpoint(failedAfterReview.id, worker, now, { step: 'preparing', progressPercent: 10 }), /active publication job/, 'worker cannot checkpoint a review_required job');
+assert.equal(store.getJob(failedAfterReview.id).status, 'review_required');
+assert.throws(() => store.requestCancellation(failedAfterReview.id, actor, now), /final action/, 'cancellation is still blocked after final action');
+assert.throws(() => store.checkpoint(confirmJob.id, worker, now, { step: 'publishing', progressPercent: 90, finalAction: true }), /active publication job/, 'resolved jobs cannot be checkpointed');
+deleteJob(failedAfterReview.id);
+
+const guardedJob = createJob(jobInput, actor);
+const guardClaim = store.claimDueJob(worker, now);
+assert.equal(guardClaim.claimed, true);
+worker.claimToken = guardClaim.job.claim_token;
+for (const [step, progressPercent] of [['preparing', 10], ['transferring', 20], ['selecting_media', 35], ['editing', 50], ['captioning', 65], ['ready_to_publish', 80], ['publishing', 90]]) store.checkpoint(guardClaim.job.id, worker, now, { step, progressPercent, finalAction: step === 'publishing' });
+assert.equal(store.getJob(guardClaim.job.id).final_action_at, now);
+assert.throws(() => store.resolveReview(guardClaim.job.id, 'failed', reviewActor, {}, now), /review_required/, 'post-final-action jobs not in review_required cannot resolve to failed');
+assert.throws(() => store.finish(guardClaim.job.id, worker, 'failed', now, actor), /after final action/, 'post-final-action transition to failed stays prohibited');
+assert.equal(store.getJob(guardClaim.job.id).status, 'publishing');
+releaseDeviceLocks();
 
 console.log('publications-domain test passed: full state machine, task leases, locks, and final-action safety');
+console.log('publications-domain review resolution test passed: confirm, dismiss, claim gate, and guard integrity');

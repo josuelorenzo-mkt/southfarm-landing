@@ -277,7 +277,68 @@ try {
   assert.equal(blockedByReview.body.error_code, 'REVIEW_REQUIRED');
   assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 3, 'review gate must clean the uploaded temp file');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'review gate must remove temporary media');
-  db.prepare("DELETE FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").run(accountId);
+
+  const reviewJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  db.prepare('UPDATE publication_jobs SET result = ?, final_action_at = ? WHERE id = ?').run(JSON.stringify({ worker_dump: 'screen-capture.txt' }), futureIso, reviewJobId);
+  const deviceReview = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...deviceHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(deviceReview.response.status, 403, 'device tokens cannot resolve reviews');
+  db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
+  const viewerReview = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(viewerReview.response.status, 403, 'viewers cannot resolve reviews');
+  db.prepare("UPDATE workspace_members SET role = 'owner' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
+  const invalidAction = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'maybe' }) });
+  assert.equal(invalidAction.response.status, 400);
+  assert.equal(invalidAction.body.error_code, 'VALIDATION_ERROR');
+  const badNote = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', note: 42 }) });
+  assert.equal(badNote.response.status, 400);
+  const wrongState = await request(`/api/publications/${valid.body.publication.id}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(wrongState.response.status, 409, 'jobs outside review_required are rejected');
+  assert.equal(wrongState.body.error_code, 'UNSAFE_TRANSITION');
+  const confirmed = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+  assert.equal(confirmed.body.publication.status, 'completed');
+  assert.equal(confirmed.body.publication.current_step, 'completed');
+  assert.ok(confirmed.body.publication.completed_at, 'confirm sets completed_at');
+  assert.equal(confirmed.body.publication.verified_at, confirmed.body.publication.completed_at, 'confirm sets verified_at');
+  assert.equal(confirmed.body.publication.error_code, null);
+  assert.equal(confirmed.body.publication.error_message, null);
+  assert.ok(String(confirmed.body.publication.result).startsWith(`${JSON.stringify({ worker_dump: 'screen-capture.txt' })}\n`), 'worker evidence is preserved');
+  assert.ok(String(confirmed.body.publication.result).includes('"action":"completed"'), 'manual evidence is appended to result');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(accountId).count, 0);
+  const confirmedDetail = await request(`/api/publications/${reviewJobId}`, { headers: ownerHeaders });
+  const confirmEvent = confirmedDetail.body.publication.events.at(-1);
+  assert.equal(confirmEvent.from_status, 'review_required');
+  assert.equal(confirmEvent.to_status, 'completed');
+  assert.equal(confirmEvent.actor_type, 'user');
+  assert.equal(confirmEvent.payload.action, 'completed');
+  const unblockedAfterConfirm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(unblockedAfterConfirm.response.status, 201, `account can publish again after confirm: ${JSON.stringify(unblockedAfterConfirm.body)}`);
+  const confirmAgain = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
+  assert.equal(confirmAgain.response.status, 409, 'resolved jobs cannot be resolved twice');
+
+  db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, result, error_code, error_message, created_at, updated_at)
+    VALUES (?, ?, ?, 'youtube', 'Dismiss me', 2, ?, 'review_required', 'review_required', ?, 'VERIFICATION_PENDING', 'Publication completed but could not be verified', ?, ?)`)
+    .run(ownerWorkspace, deviceId, accountId, futureIso, JSON.stringify({ worker_dump: 'last-dump.txt' }), futureIso, futureIso);
+  const dismissJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  const dismissed = await request(`/api/publications/${dismissJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'dismiss', note: 'El video nunca apareció en la cuenta' }) });
+  assert.equal(dismissed.response.status, 200, JSON.stringify(dismissed.body));
+  assert.equal(dismissed.body.publication.status, 'failed');
+  assert.equal(dismissed.body.publication.current_step, 'failed');
+  assert.equal(dismissed.body.publication.error_code, 'REVIEW_DISMISSED');
+  assert.equal(dismissed.body.publication.error_message, 'El video nunca apareció en la cuenta');
+  assert.equal(dismissed.body.publication.verified_at, null, 'dismiss does not set verified_at');
+  assert.ok(String(dismissed.body.publication.result).startsWith(`${JSON.stringify({ worker_dump: 'last-dump.txt' })}\n`), 'worker evidence is preserved on dismiss');
+  assert.ok(String(dismissed.body.publication.result).includes('"action":"failed"'), 'manual evidence is appended on dismiss');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE social_account_id = ? AND status = 'review_required'").get(accountId).count, 0);
+  const dismissedDetail = await request(`/api/publications/${dismissJobId}`, { headers: ownerHeaders });
+  const dismissEvent = dismissedDetail.body.publication.events.at(-1);
+  assert.equal(dismissEvent.from_status, 'review_required');
+  assert.equal(dismissEvent.to_status, 'failed');
+  assert.equal(dismissEvent.payload.action, 'failed');
+  assert.equal(dismissEvent.payload.error_code, 'REVIEW_DISMISSED');
+  const unblockedAfterDismiss = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  assert.equal(unblockedAfterDismiss.response.status, 201, `account can publish again after dismiss: ${JSON.stringify(unblockedAfterDismiss.body)}`);
 
   const orphanTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const orphanId = Number(db.prepare(`INSERT INTO publication_media
@@ -333,7 +394,7 @@ try {
   const large = await request('/api/publications', { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: largeBody, duplex: 'half' });
   assert.equal(large.response.status, 413, JSON.stringify(large.body));
   assert.equal(large.body.error_code, 'VIDEO_TOO_LARGE');
-  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 4, 'failed uploads must not leave media files');
+  assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 6, 'failed uploads must not leave media files');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'oversized uploads must remove temporary media');
   // The initial DB handle was closed before restart recovery.
 
