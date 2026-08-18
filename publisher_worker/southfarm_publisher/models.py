@@ -20,6 +20,12 @@ class PublicationStatus(StrEnum):
     SELECTING_MEDIA = "selecting_media"; EDITING = "editing"; CAPTIONING = "captioning"; READY_TO_PUBLISH = "ready_to_publish"
     PUBLISHING = "publishing"; VERIFYING = "verifying"; COMPLETED = "completed"; CANCELLED = "cancelled"
     FAILED = "failed"; REVIEW_REQUIRED = "review_required"
+    # Worker-local result state: the final action went out but verification
+    # could not confirm it.  The backend does not accept this status yet, so
+    # PublicationRunner maps it to review_required + VERIFICATION_PENDING at
+    # the finish boundary (see run_once) -- a terminal state that is never a
+    # failure and never republished automatically.
+    UNVERIFIED = "unverified"
 
 
 class PublisherError(RuntimeError):

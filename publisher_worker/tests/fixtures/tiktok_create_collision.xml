@@ -1,1 +1,1 @@
-<hierarchy><node content-desc="Create a Story" clickable="true" bounds="[300,1400][420,1540]"/></hierarchy>
+<hierarchy><node text="Create" resource-id="com.zhiliaoapp.musically:id/camera_label" clickable="false" bounds="[300,1400][420,1540]"/><node content-desc="Profile" resource-id="com.zhiliaoapp.musically:id/o76" clickable="true" bounds="[316,2216][454,2336]"/></hierarchy>
