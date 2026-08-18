@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .adb_device import AdbDeviceRegistry, DEFAULT_ADB, SafeAdb
 from .api_client import PublisherApiClient
-from .models import JobCancelled, PublisherError
+from .models import JobCancelled, PublicationStatus, PublisherError
 
 ORDER = ("preparing", "transferring", "selecting_media", "editing", "captioning", "ready_to_publish", "publishing", "verifying")
 MIME_EXTENSIONS = {"video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm"}
@@ -63,6 +63,17 @@ class PublicationRunner:
         try:
             if adapter is None: raise PublisherError("CONFIG_ADAPTER_MISSING", "No publisher adapter is configured")
             identity = self._available_identity(self.api.availability(job.device_id), job.id); device = self.registry.open(identity); self._heartbeat_once(job.id, token)
+            # Single pre-flight gate before any app is touched: the SouthFarm
+            # accessibility service must answer a fresh dump.  A crashed
+            # service is repaired once inside the check; only a service that
+            # stays dead aborts the job here with ACCESSIBILITY_SERVICE_DOWN.
+            device.ensure_accessibility_healthy()
+            # Second pre-flight gate: the device must have working internet
+            # before any media is pushed or any app is opened.  The
+            # 2026-08-17 live run burned its Post tap on a phone that had
+            # lost WiFi mid-run; a device that is already offline aborts
+            # here with DEVICE_OFFLINE (retryable) instead.
+            device.ensure_network_up()
             extension = self._media_extension(job.media)
             def checkpoint(step: str, progress: int, final_action: bool = False, evidence: Any = None):
                 if step not in ORDER or ORDER.index(step) < state["index"] or (step == "publishing") != final_action: raise PublisherError("CHECKPOINT_ORDER_INVALID", "Publication checkpoint is invalid")
@@ -81,7 +92,24 @@ class PublicationRunner:
                 adapter.publish(job, device, checkpoint)
                 if not state["final_persisted"]: raise PublisherError("FINAL_ACTION_MISSING", "Adapter did not checkpoint final publishing action")
                 checkpoint("verifying", 95); identity = adapter.verify(job, device)
-                terminal_finish("completed", remote_post_identity=identity)
+                if identity is None or identity == PublicationStatus.UNVERIFIED:
+                    # Worker-local `unverified` result (models.PublicationStatus.
+                    # UNVERIFIED): the final action went out but could not be
+                    # verified.  Adapters may signal it by returning None or
+                    # the status sentinel itself.  The backend has no native
+                    # `unverified` status, so the job is finished through the
+                    # closest supported terminal state -- review_required with
+                    # the VERIFICATION_PENDING code -- which is NOT a failure
+                    # and blocks the account from automatic re-publication
+                    # (backend claim gate).  The adapter's last-dump evidence
+                    # travels in `result` for a human to confirm without
+                    # re-publishing.
+                    evidence = getattr(adapter, "verification_evidence", None)
+                    terminal_finish("review_required", error_code="VERIFICATION_PENDING",
+                                    error_message="Publication completed but could not be verified; verification pending (never republished automatically)",
+                                    result=evidence)
+                else:
+                    terminal_finish("completed", remote_post_identity=identity)
         except JobCancelled:
             if state["terminal_attempted"]: raise
             terminal_finish("review_required" if state["final_intent"] else "cancelled", error_code="JOB_CANCELLED")
@@ -116,9 +144,11 @@ def _config(env=os.environ) -> tuple[PublisherApiClient, AdbDeviceRegistry, int,
     if not expected_serial or not expected_android_id: raise PublisherError("CONFIG_INVALID", "Exact ADB serial and Android identity must be configured")
     expected_backend_device_id = env.get("SOUTHFARM_BACKEND_DEVICE_ID", expected_android_id).strip()
     if not expected_backend_device_id: raise PublisherError("CONFIG_INVALID", "Backend device identity must be configured")
+    ui_source = env.get("SOUTHFARM_UI_SOURCE", "service").strip().lower()
+    if ui_source not in ("service", "uiautomator"): raise PublisherError("CONFIG_INVALID", "SOUTHFARM_UI_SOURCE must be 'service' or 'uiautomator'")
     raw_forbidden, allow_all = env.get("SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS"), env.get("SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS", "").strip().lower()
     if raw_forbidden is None and allow_all != "true": raise PublisherError("CONFIG_INVALID", "Instagram forbidden-account policy must be configured")
-    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb, expected_serial=expected_serial, expected_android_id=expected_android_id, expected_backend_device_id=expected_backend_device_id), int(device_id), _normalized_accounts(raw_forbidden or "")
+    return PublisherApiClient(api_url, token, worker_id), AdbDeviceRegistry(adb_path=adb, expected_serial=expected_serial, expected_android_id=expected_android_id, expected_backend_device_id=expected_backend_device_id, ui_source=ui_source), int(device_id), _normalized_accounts(raw_forbidden or "")
 
 def platform_adapters(*, forbidden_instagram_accounts: set[str] | None = None) -> dict[str, Any]:
     from .platforms import InstagramPublisher, TikTokPublisher, YouTubeShortPublisher
