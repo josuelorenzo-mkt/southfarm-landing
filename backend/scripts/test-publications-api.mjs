@@ -49,6 +49,14 @@ const mp4Header = fs.readFileSync('C:\\Users\\josu_\\Downloads\\Videos to test\\
 const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
 const webmHeader = Buffer.from('1a45dfa3874282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+// A local copy of the real fixture: its ffprobe metadata is fixed at creation
+// time by the seeded upload, so each fixture below exercises one rule outcome.
+function seededMediaFixture(overrides = {}) {
+  const file = path.join(tempDir, `seeded-${++seededMediaFixture.sequence}.mp4`);
+  fs.writeFileSync(file, mp4Header);
+  return { file, metadata: { duration_seconds: 14, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac', ...overrides } };
+}
+seededMediaFixture.sequence = 0;
 
 async function waitForHealth() {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -185,6 +193,67 @@ try {
   assert.equal(webm.body.error_code, 'MEDIA_METADATA_INVALID');
   assert.equal(fs.readdirSync(mediaRoot).filter((name) => name !== '.tmp').length, 1, 'validation failures must remove temporary/final media');
   assert.equal(fs.readdirSync(path.join(mediaRoot, '.tmp')).length, 0, 'validation failures must remove temporary media');
+
+  // Fail-closed platform media rules run at creation, before any phone minutes
+  // are spent on the job. The uploaded bytes are the same real MP4 every time;
+  // only the seeded ffprobe metadata changes, which is what the route validates.
+  const rulesFixtures = [
+    seededMediaFixture({ video_codec: 'hevc', width: 2160, height: 3840 }),
+    seededMediaFixture({ video_codec: 'hevc', width: 1080, height: 1920 }),
+    seededMediaFixture({ video_codec: 'vp9', width: 1080, height: 1920 }),
+    seededMediaFixture({ video_codec: null, width: null, height: null }),
+  ];
+  // Multer stores the upload under a random name, so the injected inspector
+  // keys on the uploaded byte size; pad each fixture to a unique size.
+  for (let index = 0; index < rulesFixtures.length; index += 1) {
+    fs.appendFileSync(rulesFixtures[index].file, Buffer.alloc((index + 1) * 137));
+    rulesFixtures[index].size = fs.statSync(rulesFixtures[index].file).size;
+  }
+  const instagramAccountId = Number(db.prepare("INSERT INTO social_accounts (user_id, device_id, platform, username) VALUES (?, ?, 'instagram', 'test-reels')").run(owner.user.id, deviceId).lastInsertRowid);
+  const rulesApp = express();
+  rulesApp.use(express.json());
+  registerPublicationRoutes({
+    app: rulesApp, db, store: new PublicationStore(db), mediaRoot: path.join(tempDir, 'rules-media'),
+    auth: (req, _res, next) => { req.user = { userId: owner.user.id, workspaceId: ownerWorkspace, role: 'owner', authType: 'user' }; next(); },
+    requireRole: () => (_req, _res, next) => next(),
+    inspectVideo: async (file) => {
+      const fixture = rulesFixtures.find((item) => item.size === fs.statSync(file).size);
+      return fixture ? fixture.metadata : { duration_seconds: 14, width: 1080, height: 1920, video_codec: 'hevc', audio_codec: 'aac' };
+    },
+  });
+  const rulesServer = await new Promise((resolve) => { const server = rulesApp.listen(port + 3, () => resolve(server)); });
+  const rulesRequest = async (formData) => {
+    const response = await fetch(`http://127.0.0.1:${port + 3}/api/publications`, { method: 'POST', headers: { Authorization: `Bearer ${owner.token}` }, body: formData });
+    const body = await response.json().catch(() => ({}));
+    return { response, body };
+  };
+  const makeRulesForm = (file) => {
+    const value = new FormData();
+    value.set('video', new Blob([fs.readFileSync(file)], { type: 'video/mp4' }), 'clip.mp4');
+    value.set('platform', 'instagram');
+    value.set('device_id', String(deviceId));
+    value.set('social_account_id', String(instagramAccountId));
+    value.set('caption', 'Platform media rules reject this early');
+    value.set('scheduled_for', futureIso);
+    return value;
+  };
+  const unsupported4k = await rulesRequest(makeRulesForm(rulesFixtures[0].file));
+  assert.equal(unsupported4k.response.status, 400, JSON.stringify(unsupported4k.body));
+  assert.equal(unsupported4k.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupported4k.body.error, /Video is hevc 2160x3840 but platform allows max 1080x1920 with h264\/hevc/);
+  const supportedHevc = await rulesRequest(makeRulesForm(rulesFixtures[1].file));
+  assert.equal(supportedHevc.response.status, 201, JSON.stringify(supportedHevc.body));
+  const unsupportedCodec = await rulesRequest(makeRulesForm(rulesFixtures[2].file));
+  assert.equal(unsupportedCodec.response.status, 400, JSON.stringify(unsupportedCodec.body));
+  assert.equal(unsupportedCodec.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupportedCodec.body.error, /Video codec vp9 is not supported: platform allows max 1080x1920 with h264\/hevc/);
+  const unsupportedNoMetadata = await rulesRequest(makeRulesForm(rulesFixtures[3].file));
+  assert.equal(unsupportedNoMetadata.response.status, 400, JSON.stringify(unsupportedNoMetadata.body));
+  assert.equal(unsupportedNoMetadata.body.error_code, 'MEDIA_UNSUPPORTED');
+  assert.match(unsupportedNoMetadata.body.error, /Video metadata is missing \(codec or dimensions not inspected\) but platform allows max 1080x1920 with h264\/hevc/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE platform = 'instagram' AND status = 'queued'").get().count, 1, 'only the rule-compliant media may enqueue a job');
+  assert.equal(fs.readdirSync(path.join(tempDir, 'rules-media')).filter((name) => name !== '.tmp').length, 1, 'rejected media must not remain in the media root');
+  await new Promise((resolve) => rulesServer.close(resolve));
 
   const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
   const mediaBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_media').get().count;

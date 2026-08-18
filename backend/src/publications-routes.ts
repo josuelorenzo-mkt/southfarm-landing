@@ -11,6 +11,29 @@ type SqliteDatabase = Database.Database;
 type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 type UploadState = { uploadedPath?: string; finalPath?: string; mediaId?: number; jobId?: number; committed: boolean; aborted: boolean; cleaning: boolean };
 
+// Fail-closed media rules per platform, evaluated at creation time from the
+// ffprobe metadata captured during upload. Keeping the rules as data mirrors
+// the per-platform selectors of the publisher worker: the worker should never
+// receive a job whose media its platform adapters cannot handle (e.g. a 4K
+// HEVC file that Instagram's gallery refuses with MEDIA_UNSELECTABLE).
+export type PlatformMediaRules = { maxWidth: number; maxHeight: number; allowedVideoCodecs: readonly string[] };
+export const PLATFORM_MEDIA_RULES: Record<string, PlatformMediaRules> = {
+  instagram: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+  tiktok: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+  youtube: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+};
+
+export function mediaSupportedForPlatform(platform: string, metadata: { width: number | null; height: number | null; video_codec: string | null }): { supported: boolean; reason?: 'dimensions' | 'codec' | 'metadata' } {
+  const rules = PLATFORM_MEDIA_RULES[platform];
+  if (!rules) return { supported: false, reason: 'codec' };
+  if (typeof metadata.video_codec !== 'string' || !metadata.video_codec || typeof metadata.width !== 'number' || !Number.isInteger(metadata.width) || typeof metadata.height !== 'number' || !Number.isInteger(metadata.height)) {
+    return { supported: false, reason: 'metadata' };
+  }
+  if (metadata.width > rules.maxWidth || metadata.height > rules.maxHeight) return { supported: false, reason: 'dimensions' };
+  if (!rules.allowedVideoCodecs.includes(metadata.video_codec)) return { supported: false, reason: 'codec' };
+  return { supported: true };
+}
+
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MIME_EXTENSIONS: Record<string, string> = {
   'video/mp4': 'mp4',
@@ -273,6 +296,21 @@ export function registerPublicationRoutes({
         const sha256 = hashFile(state.uploadedPath!);
         let metadata;
         try { metadata = await inspectVideo(state.uploadedPath!); } catch { routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified'); }
+        // Fail-closed platform media rules: a job whose media the target
+        // platform cannot handle must be rejected here, before any phone
+        // minutes are spent on it (e.g. 4K HEVC clips that Instagram's
+        // gallery refuses with MEDIA_UNSELECTABLE after a long run).
+        const platformCheck = mediaSupportedForPlatform(input.platform, metadata);
+        if (!platformCheck.supported) {
+          const rules = PLATFORM_MEDIA_RULES[input.platform];
+          const ruleText = `max ${rules.maxWidth}x${rules.maxHeight} with ${rules.allowedVideoCodecs.join('/')}`;
+          const message = platformCheck.reason === 'dimensions'
+            ? `Video is ${metadata.video_codec} ${metadata.width}x${metadata.height} but platform allows ${ruleText}`
+            : platformCheck.reason === 'metadata'
+              ? `Video metadata is missing (codec or dimensions not inspected) but platform allows ${ruleText}`
+              : `Video codec ${metadata.video_codec} is not supported: platform allows ${ruleText}`;
+          routeError(400, 'MEDIA_UNSUPPORTED', message);
+        }
         if (state.aborted || req.aborted) routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
         const mediaInsert = db.prepare(`INSERT INTO publication_media
           (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)

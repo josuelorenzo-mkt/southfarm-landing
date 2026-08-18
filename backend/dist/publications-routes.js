@@ -4,6 +4,24 @@ import path from 'node:path';
 import multer, { MulterError } from 'multer';
 import { PublicationTransitionError, validatePublicationInput } from './publications-domain.js';
 import { inspectPublicationVideo } from './publication-media-inspector.js';
+export const PLATFORM_MEDIA_RULES = {
+    instagram: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+    tiktok: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+    youtube: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
+};
+export function mediaSupportedForPlatform(platform, metadata) {
+    const rules = PLATFORM_MEDIA_RULES[platform];
+    if (!rules)
+        return { supported: false, reason: 'codec' };
+    if (typeof metadata.video_codec !== 'string' || !metadata.video_codec || typeof metadata.width !== 'number' || !Number.isInteger(metadata.width) || typeof metadata.height !== 'number' || !Number.isInteger(metadata.height)) {
+        return { supported: false, reason: 'metadata' };
+    }
+    if (metadata.width > rules.maxWidth || metadata.height > rules.maxHeight)
+        return { supported: false, reason: 'dimensions' };
+    if (!rules.allowedVideoCodecs.includes(metadata.video_codec))
+        return { supported: false, reason: 'codec' };
+    return { supported: true };
+}
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MIME_EXTENSIONS = {
     'video/mp4': 'mp4',
@@ -337,6 +355,21 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 }
                 catch {
                     routeError(400, 'MEDIA_METADATA_INVALID', 'Video metadata could not be verified');
+                }
+                // Fail-closed platform media rules: a job whose media the target
+                // platform cannot handle must be rejected here, before any phone
+                // minutes are spent on it (e.g. 4K HEVC clips that Instagram's
+                // gallery refuses with MEDIA_UNSELECTABLE after a long run).
+                const platformCheck = mediaSupportedForPlatform(input.platform, metadata);
+                if (!platformCheck.supported) {
+                    const rules = PLATFORM_MEDIA_RULES[input.platform];
+                    const ruleText = `max ${rules.maxWidth}x${rules.maxHeight} with ${rules.allowedVideoCodecs.join('/')}`;
+                    const message = platformCheck.reason === 'dimensions'
+                        ? `Video is ${metadata.video_codec} ${metadata.width}x${metadata.height} but platform allows ${ruleText}`
+                        : platformCheck.reason === 'metadata'
+                            ? `Video metadata is missing (codec or dimensions not inspected) but platform allows ${ruleText}`
+                            : `Video codec ${metadata.video_codec} is not supported: platform allows ${ruleText}`;
+                    routeError(400, 'MEDIA_UNSUPPORTED', message);
                 }
                 if (state.aborted || req.aborted)
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
