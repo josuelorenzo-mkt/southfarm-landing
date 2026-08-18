@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SouthFarm — Invernadero</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Sora:wght@300;400;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Sora',sans-serif;min-height:100vh;background:#f2f7f2}
+.badge{position:fixed;top:20px;right:20px;background:linear-gradient(135deg,#3a7d44,#2d8a7e);color:#fff;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:600;z-index:100}
+header{display:flex;align-items:center;justify-content:space-between;padding:24px 48px;background:rgba(255,255,255,.7);backdrop-filter:blur(10px);border-bottom:1px solid rgba(58,125,68,.15)}
+.logo{font-family:'DM Serif Display',serif;font-size:24px;color:#2d4a30}
+.nav-pills{display:flex;gap:8px}
+.nav-pills a{padding:8px 20px;border-radius:24px;text-decoration:none;font-size:13px;font-weight:600;color:#4a6b4e;background:rgba(58,125,68,.08);transition:all .2s}
+.nav-pills a:hover,.nav-pills a.active{background:linear-gradient(135deg,#3a7d44,#2d8a7e);color:#fff}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);grid-template-rows:auto auto auto;gap:16px;padding:32px 48px}
+.card{background:rgba(255,255,255,.85);backdrop-filter:blur(8px);border:1px solid rgba(58,125,68,.12);border-radius:16px;padding:24px}
+.card-wide{grid-column:span 2}
+.card-tall{grid-row:span 2}
+.card-full{grid-column:span 4}
+.card-icon{width:32px;height:32px;margin-bottom:12px}
+.stat-num{font-family:'DM Serif Display',serif;font-size:40px;color:#2d4a30;line-height:1}
+.stat-label{font-size:12px;color:#6b8a6e;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;margin-top:4px}
+.section-label{font-family:'DM Serif Display',serif;font-size:18px;color:#2d4a30;margin-bottom:16px}
+.device-row{display:flex;gap:12px;flex-wrap:wrap}
+.device{background:linear-gradient(135deg,rgba(58,125,68,.1),rgba(45,138,126,.08));border-radius:12px;padding:14px 20px;flex:1;min-width:180px}
+.device-name{font-weight:700;font-size:14px;color:#2d4a30}
+.device-meta{font-size:12px;color:#6b8a6e;margin-top:2px}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3a7d44;margin-right:6px}
+.activity-item{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid rgba(58,125,68,.08)}
+.activity-item:last-child{border:none}
+.act-user{font-weight:600;font-size:14px;color:#2d4a30}
+.act-time{font-size:11px;color:#6b8a6e}
+.act-stats{font-size:13px;color:#4a6b4e;font-weight:500}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 2: Invernadero</div>
+<header>
+  <div class="logo">SouthFarm</div>
+  <nav class="nav-pills">
+    <a href="#" class="active">Dashboard</a><a href="#">Fleet</a><a href="#">Sessions</a><a href="#">Analytics</a><a href="#">Settings</a>
+  </nav>
+</header>
+<div class="grid">
+  <div class="card card-wide">
+    <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="#3a7d44" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    <div class="stat-num">12</div><div class="stat-label">Sessions</div>
+  </div>
+  <div class="card card-tall">
+    <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="#3a7d44" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+    <div class="stat-num">347</div><div class="stat-label">Reels</div>
+  </div>
+  <div class="card">
+    <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="#2d8a7e" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+    <div class="stat-num">89</div><div class="stat-label">Likes</div>
+  </div>
+  <div class="card">
+    <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="#2d8a7e" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    <div class="stat-num">84<span style="font-size:18px;color:#6b8a6e"> min</span></div><div class="stat-label">Watch Time</div>
+  </div>
+  <div class="card card-full">
+    <div class="section-label">Fleet</div>
+    <div class="device-row">
+      <div class="device"><span class="status-dot"></span><div class="device-name">POCO C71 #1</div><div class="device-meta">Android 14 · Online</div></div>
+      <div class="device"><span class="status-dot"></span><div class="device-name">POCO C71 #2</div><div class="device-meta">Android 14 · Online</div></div>
+    </div>
+  </div>
+  <div class="card card-full">
+    <div class="section-label">Recent Activity</div>
+    <div class="activity-item"><div><div class="act-user">@clipper1</div><div class="act-time">hace 2h</div></div><div class="act-stats">32 reels · 8 likes · 3 saves</div></div>
+    <div class="activity-item"><div><div class="act-user">@clipper2</div><div class="act-time">hace 5h</div></div><div class="act-stats">45 reels · 12 likes · 5 saves</div></div>
+    <div class="activity-item"><div><div class="act-user">@clipper3</div><div class="act-time">ayer</div></div><div class="act-stats">28 reels · 6 likes · 2 saves</div></div>
+  </div>
+</div>
+</body>
+</html>

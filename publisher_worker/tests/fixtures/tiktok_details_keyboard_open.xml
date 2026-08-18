@@ -1,0 +1,1 @@
+<hierarchy><node text="Add description..." resource-id="com.zhiliaoapp.musically:id/h00" class="android.widget.EditText" clickable="true" bounds="[20,200][700,450]"/><node text="Everyone can view this post" bounds="[20,800][700,900]"/><node text="Post" resource-id="com.zhiliaoapp.musically:id/st6" clickable="true" bounds="[500,1400][700,1520]"/></hierarchy>

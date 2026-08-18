@@ -2,7 +2,10 @@ import BetterSqlite3 from 'better-sqlite3';
 const Database = BetterSqlite3 as any;
 import path from 'path';
 
-const DB_PATH = path.join(__dirname, '..', 'data', 'southfarm.db');
+const configuredDbPath = String(process.env.SOUTHFARM_DB_PATH || '').trim();
+const DB_PATH = configuredDbPath
+  ? path.resolve(configuredDbPath)
+  : path.join(__dirname, '..', 'data', 'southfarm.db');
 
 const db = new Database(DB_PATH);
 

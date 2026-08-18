@@ -42,4 +42,10 @@ next-env.d.ts
 southfarm_app/
 backend/data/
 backend/node_modules/
+backend/backups/
+backend/logs/
+backend/run/
+.worktrees/
 # public/southfarm.apk  — needed for direct download
+__pycache__/
+*.egg-info/

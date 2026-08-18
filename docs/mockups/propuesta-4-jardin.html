@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1280">
+<title>SouthFarm — Propuesta 4: Jardín</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Satoshi:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#faf8f4;color:#3a3a2e;font-family:'Satoshi',sans-serif;min-height:100vh}
+.badge{position:fixed;top:16px;right:16px;background:#6b8f71;color:#fff;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700;z-index:100}
+nav{background:#fff;border-bottom:2px solid #e8e4dc;padding:0 32px;display:flex;align-items:center;height:56px;gap:32px}
+nav .logo{font-family:'DM Serif Display',serif;font-size:22px;color:#6b8f71}
+nav a{color:#3a3a2e;text-decoration:none;font-size:14px;font-weight:500;opacity:.7}
+nav a:hover{opacity:1}
+.ticker{background:#6b8f71;color:#fff;padding:14px 32px;display:flex;gap:48px;align-items:center}
+.ticker .stat{display:flex;align-items:center;gap:8px}
+.ticker .stat .num{font-family:'DM Serif Display',serif;font-size:28px}
+.ticker .stat .label{font-size:11px;opacity:.8;text-transform:uppercase;letter-spacing:1px}
+.main{display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:24px 32px;max-width:1280px}
+.card{background:#fff;border-radius:12px;padding:24px;border:1px solid #e8e4dc}
+.card h2{font-family:'DM Serif Display',serif;font-size:20px;margin-bottom:16px;color:#6b8f71}
+.fleet{grid-row:span 2}
+.device{display:flex;align-items:center;gap:12px;padding:12px;border-radius:8px;background:#faf8f4;margin-bottom:8px}
+.device .dot{width:10px;height:10px;border-radius:50%;background:#6b8f71}
+.device .dot.offline{background:#ccc}
+.device .info{flex:1}
+.device .name{font-weight:600;font-size:14px}
+.device .meta{font-size:11px;opacity:.6}
+.device .status{font-size:12px;color:#6b8f71;font-weight:600}
+.activity-item{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid #f0ece4;align-items:flex-start}
+.activity-item:last-child{border:none}
+.activity-item .icon{width:32px;height:32px;border-radius:50%;background:#e8f0e9;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.activity-item .icon svg{width:14px;height:14px;stroke:#6b8f71;fill:none;stroke-width:2}
+.activity-item .text{font-size:13px;line-height:1.5}
+.activity-item .text strong{color:#6b8f71}
+.activity-item .time{font-size:11px;opacity:.5;margin-top:2px}
+svg.icon{vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="badge">Propuesta 4: Jardín</div>
+<nav>
+  <div class="logo">SouthFarm</div>
+  <a href="#">Dashboard</a>
+  <a href="#">Devices</a>
+  <a href="#">Sessions</a>
+  <a href="#">Settings</a>
+</nav>
+<div class="ticker">
+  <div class="stat"><div><div class="num">12</div><div class="label">Sessions</div></div></div>
+  <div class="stat"><div><div class="num">347</div><div class="label">Reels Viewed</div></div></div>
+  <div class="stat"><div><div class="num">89</div><div class="label">Likes</div></div></div>
+  <div class="stat"><div><div class="num">84</div><div class="label">Minutes</div></div></div>
+</div>
+<div class="main">
+  <div class="card fleet">
+    <h2><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b8f71" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12" y2="18.01"/></svg> Fleet</h2>
+    <div class="device">
+      <div class="dot"></div>
+      <div class="info"><div class="name">POCO C71</div><div class="meta">192.168.0.6 · Android 14</div></div>
+      <div class="status">Active</div>
+    </div>
+    <div class="device">
+      <div class="dot"></div>
+      <div class="info"><div class="name">POCO C71 #2</div><div class="meta">192.168.0.7 · Android 14</div></div>
+      <div class="status">Active</div>
+    </div>
+    <div style="margin-top:16px;padding:16px;background:#e8f0e9;border-radius:8px;text-align:center">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#6b8f71" stroke-width="1.5"><path d="M12 22c4-4 8-7.5 8-12a8 8 0 10-16 0c0 4.5 4 8 8 12z"/><circle cx="12" cy="10" r="3"/></svg>
+      <div style="font-size:12px;margin-top:6px;opacity:.6">2 devices online</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b8f71" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> Activity</h2>
+    <div class="activity-item">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+      <div><div class="text"><strong>@clipper1</strong> completed warmup session — 42 reels, 15 likes</div><div class="time">2 min ago</div></div>
+    </div>
+    <div class="activity-item">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+      <div><div class="text"><strong>@clipper2</strong> started posting batch — 3 videos queued</div><div class="time">8 min ago</div></div>
+    </div>
+    <div class="activity-item">
+      <div class="icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+      <div><div class="text"><strong>@clipper3</strong> account verified — ready for warmup</div><div class="time">23 min ago</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2><svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6b8f71" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Quick Stats</h2>
+    <div style="display:flex;gap:16px">
+      <div style="flex:1;text-align:center;padding:12px;background:#faf8f4;border-radius:8px">
+        <div style="font-family:'DM Serif Display';font-size:24px;color:#6b8f71">347</div>
+        <div style="font-size:11px;opacity:.6">Reels today</div>
+      </div>
+      <div style="flex:1;text-align:center;padding:12px;background:#faf8f4;border-radius:8px">
+        <div style="font-family:'DM Serif Display';font-size:24px;color:#6b8f71">89</div>
+        <div style="font-size:11px;opacity:.6">Likes today</div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
