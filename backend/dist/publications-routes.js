@@ -197,7 +197,14 @@ function workspaceJob(db, workspaceId, rawId) {
         routeError(404, 'NOT_FOUND', 'Publication not found');
     return job;
 }
-function safePublication(job, media, events) {
+// Roles that may see the worker evidence captured in `result` (accessibility
+// tree dumps of the phone screen). This mirrors the managing-role set used by
+// requireRole for mutating endpoints, so `viewer` never receives evidence.
+const MANAGING_ROLES = ['owner', 'admin', 'operator'];
+function isManagingRole(role) {
+    return MANAGING_ROLES.includes(String(role || '').toLowerCase());
+}
+function safePublication(job, media, events, includeResult = false) {
     const view = {
         id: Number(job.id), workspace_id: Number(job.workspace_id), device_id: Number(job.device_id), social_account_id: Number(job.social_account_id),
         platform: job.platform, caption: job.caption, word_count: Number(job.word_count), scheduled_for: job.scheduled_for,
@@ -206,8 +213,9 @@ function safePublication(job, media, events) {
         verified_at: job.verified_at || null, remote_post_identity: job.remote_post_identity || null,
         error_code: job.error_code || null, error_message: job.error_message || null, cancel_requested_at: job.cancel_requested_at || null,
         created_at: job.created_at, updated_at: job.updated_at, completed_at: job.completed_at || null,
-        result: job.result || null,
     };
+    if (includeResult)
+        view.result = job.result || null;
     if (media)
         view.media = {
             id: Number(media.id), media_key: path.basename(String(media.private_path || '')),
@@ -363,7 +371,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
                 const job = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(state.jobId);
                 state.committed = true;
-                res.status(201).json({ publication: safePublication(job, mediaForJob(db, job)) });
+                res.status(201).json({ publication: safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role)) });
             }
             catch (error) {
                 compensateUpload(db, req, state);
@@ -387,7 +395,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 }
             }
             const jobs = db.prepare(`SELECT * FROM publication_jobs WHERE ${where.join(' AND ')} ORDER BY scheduled_for DESC, id DESC`).all(...values);
-            res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job))) });
+            res.json({ publications: jobs.map((job) => safePublication(job, mediaForJob(db, job), undefined, isManagingRole(req.user?.role))) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -399,7 +407,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
         try {
             const job = workspaceJob(db, Number(req.user.workspaceId), req.params.id);
             const events = db.prepare('SELECT * FROM publication_events WHERE publication_job_id = ? ORDER BY id ASC').all(job.id);
-            res.json({ publication: safePublication(job, mediaForJob(db, job), events) });
+            res.json({ publication: safePublication(job, mediaForJob(db, job), events, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -416,7 +424,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             const scheduledFor = parseSchedule(req.body?.scheduled_for);
             const publication = store.rescheduleJob(Number(job.id), scheduledFor, { type: 'user', id: String(req.user.userId) });
             const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
-            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -434,7 +442,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
             testHooks?.beforeCancel?.();
             const publication = store.requestCancellation(Number(job.id), { type: 'user', id: String(req.user.userId) });
             const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
-            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)
@@ -457,7 +465,7 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 routeError(400, 'VALIDATION_ERROR', 'note must be a string');
             const publication = store.resolveReview(Number(job.id), action === 'confirm' ? 'completed' : 'failed', { type: 'user', id: String(req.user.userId) }, { note });
             const refreshed = db.prepare('SELECT * FROM publication_jobs WHERE id = ?').get(publication.id);
-            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed)) });
+            res.json({ publication: safePublication(refreshed, mediaForJob(db, refreshed), undefined, isManagingRole(req.user?.role)) });
         }
         catch (error) {
             if (error instanceof PublicationRouteError)

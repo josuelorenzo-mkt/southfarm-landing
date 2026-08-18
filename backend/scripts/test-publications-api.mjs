@@ -263,6 +263,44 @@ try {
   const foreignAccount = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId: foreignAccountId }) });
   assert.equal(foreignAccount.response.status, 404);
 
+  // `result` carries worker evidence (phone accessibility dumps) and must only
+  // reach managing roles. Seed it on a job, then confirm list and detail expose
+  // it to owner/operator but strip it for viewer.
+  db.prepare(`INSERT INTO publication_jobs
+    (workspace_id, device_id, social_account_id, platform, caption, word_count, scheduled_for, status, current_step, result, created_at, updated_at)
+    VALUES (?, ?, ?, 'youtube', 'Evidence gating', 2, ?, 'completed', 'completed', ?, ?, ?)`)
+    .run(ownerWorkspace, deviceId, accountId, futureIso, JSON.stringify({ worker_dump: 'evidence-dump.txt' }), futureIso, futureIso);
+  const evidenceJobId = Number(db.prepare("SELECT id FROM publication_jobs WHERE social_account_id = ? AND status = 'completed' ORDER BY id DESC LIMIT 1").get(accountId).id);
+  const operatorEmail = `publication-operator-${Date.now()}@example.test`;
+  const operator = await createUser(operatorEmail);
+  const operatorId = Number(operator.user.id);
+  // register() created a private workspace for the operator; drop it so the
+  // operator resolves to the single owner-workspace membership like every
+  // other user under test (workspaceMembership orders by membership id).
+  db.prepare('DELETE FROM workspace_members WHERE user_id = ? AND workspace_id != ?').run(operatorId, ownerWorkspace);
+  db.prepare(`INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at, updated_at)
+    VALUES (?, ?, 'operator', 'active', ?, ?)`).run(ownerWorkspace, operatorId, futureIso, futureIso);
+  const operatorHeaders = { Authorization: `Bearer ${operator.token}` };
+  const operatorList = await request('/api/publications', { headers: operatorHeaders });
+  assert.equal(operatorList.response.status, 200);
+  const operatorEvidence = operatorList.body.publications.find((item) => item.id === evidenceJobId);
+  assert.ok(operatorEvidence, 'operator must see the evidence job in the list');
+  assert.equal(String(operatorEvidence.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'operator list exposes worker evidence');
+  const operatorDetail = await request(`/api/publications/${evidenceJobId}`, { headers: operatorHeaders });
+  assert.equal(operatorDetail.response.status, 200);
+  assert.equal(String(operatorDetail.body.publication.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'operator detail exposes worker evidence');
+  const ownerEvidence = await request(`/api/publications/${evidenceJobId}`, { headers: ownerHeaders });
+  assert.equal(ownerEvidence.response.status, 200);
+  assert.equal(String(ownerEvidence.body.publication.result), String(JSON.stringify({ worker_dump: 'evidence-dump.txt' })), 'owner detail exposes worker evidence');
+  db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, operatorId);
+  const viewerList = await request('/api/publications', { headers: operatorHeaders });
+  assert.equal(viewerList.response.status, 200);
+  assert.equal('result' in viewerList.body.publications.find((item) => item.id === evidenceJobId), false, 'viewer list must not expose worker evidence');
+  assert.equal(viewerList.body.publications.some((item) => Object.prototype.hasOwnProperty.call(item, 'result')), false, 'viewer list must not expose result on any publication');
+  const viewerDetail = await request(`/api/publications/${evidenceJobId}`, { headers: operatorHeaders });
+  assert.equal(viewerDetail.response.status, 200);
+  assert.equal('result' in viewerDetail.body.publication, false, 'viewer detail must not expose worker evidence');
+
   db.prepare("UPDATE workspace_members SET role = 'viewer' WHERE workspace_id = ? AND user_id = ?").run(ownerWorkspace, owner.user.id);
   const viewer = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
   assert.equal(viewer.response.status, 403);
