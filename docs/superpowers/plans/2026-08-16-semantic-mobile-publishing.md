@@ -13,6 +13,7 @@
 - La fuente de desarrollo es `C:\SouthFarm\source\.worktrees\semiorganic-publishing`; preservar los cambios preexistentes de `common.py` y `test_platform_adapters.py`, revisar sus diffs antes de cada staging e integrar en el commit funcional correspondiente sólo los hunks aprobados. No resetear ni revertir esos cambios. `phone-after-exit.png`, `phone-current.png` y `publisher_worker/southfarm_publisher_worker.egg-info/` se conservan fuera de todos los commits.
 - La interacción física móvil debe usar exclusivamente `adb -s SERIAL shell input tap X Y`; no usar `click`, `performClick`, `UiObject.click`, Appium ni métodos equivalentes.
 - No usar coordenadas fijas para botones ni fallback geométrico adivinado; todo tap y swipe se deriva de bounds válidos del snapshot inmediatamente anterior.
+- `ScreenSize` vive canónicamente en `publisher_worker/southfarm_publisher/ui_snapshot.py`, pero en producción sólo `SafeAdb.dump_snapshot(expected_package)` puede construirlo: consulta `adb shell wm size`, prefiere `Override size` sobre `Physical size`, prueba la orientación transpuesta cuando corresponde y falla cerrado si el tamaño o los bounds no se pueden validar. No se exige un `screen_size` externo ni se usa `self.screen_size`.
 - Cada acción física toma dump fresco antes y después, exige package/contexto esperado y evidencia positiva; el retorno `0` de ADB o la desaparición del control anterior no prueban éxito por sí solos.
 - La resolución exacta sigue `resource-id → content-desc → text`; cero resultados, colisiones, package incorrecto, target disabled, label sin ancestro accionable, bounds inválidos o transición no observable deben fallar cerrado.
 - Una identidad pasiva puede ser `clickable=false`; sólo un control directo enabled/clickable o su único ancestro enabled/clickable puede recibir el tap.
@@ -31,16 +32,16 @@
 
 El plan separa el modelo UI, las acciones físicas, el contrato común, los adaptadores, el runner, cleanup y la verificación. Los nombres de interfaz de cada tarea son el contrato para las tareas siguientes.
 
-- `publisher_worker/southfarm_publisher/ui_snapshot.py` (crear): `ScreenSize`, `Bounds`, `UiNode`, `UiSnapshot`, `SemanticSelector`, prioridad de atributos, validación geométrica y resolución de ancestros.
-- `publisher_worker/southfarm_publisher/adb_device.py` (modificar): captura de snapshots, wrapper seguro de subprocess, `input tap`, `keyevent 4`, `input text`, launch y swipe derivado de bounds.
+- `publisher_worker/southfarm_publisher/ui_snapshot.py` (crear): `ScreenSize`, `Bounds`, `UiNode` con `focusable`, `UiSnapshot`, `SemanticSelector`, prioridad de atributos, validación geométrica y resolución de ancestros.
+- `publisher_worker/southfarm_publisher/adb_device.py` (modificar): clase existente `SafeAdb`, captura de snapshots, consulta/parsing de `shell wm size`, wrapper seguro de subprocess, `input tap`, `keyevent 4`, `input text`, launch y swipe derivado de bounds.
 - `publisher_worker/southfarm_publisher/platforms/common.py` (modificar): guards de package/cuenta/contexto, `tap_and_wait`, identidad pasiva, target accionable, frescura y errores estables; retirar política permanente de cuentas prohibidas. El diff dirty preexistente se revisa antes de staging y sus hunks funcionales aprobados se integran aquí o en el commit común correspondiente.
 - `publisher_worker/southfarm_publisher/platforms/instagram.py` (modificar): selectores y flujo semántico de Instagram Reels, baseline, publicación, verificación y cleanup.
 - `publisher_worker/southfarm_publisher/platforms/tiktok.py` (modificar): flujo semántico TikTok, guards `Create`/`Post`, verificación de cover/contador y cleanup con guard hasta fixture live.
 - `publisher_worker/southfarm_publisher/platforms/youtube.py` (modificar): flujo semántico YouTube Shorts, canal, galería, visibilidad, publicación, verificación y cleanup.
-- `publisher_worker/southfarm_publisher/runner.py` (modificar): factory/config sin variables antiguas de cuenta prohibida, checkpoints, finish terminal y clasificación `review_required`.
+- `publisher_worker/southfarm_publisher/runner.py` (modificar): `WorkerConfig`, `AdapterFactory`, factory por job sin variables antiguas de cuenta prohibida, checkpoints, finish terminal y clasificación `review_required`.
 - `publisher_worker/southfarm_publisher/api_client.py` (modificar sólo si las firmas existentes no soportan los campos/llamadas del contrato): finish, validate/consume cleanup y no exposición de secretos.
-- `publisher_worker/southfarm_publisher/cleanup_cli.py` (modificar): orden validate sin ADB → preflight → consume one-use → primer tap destructivo → baseline restaurado.
-- `publisher_worker/southfarm_publisher/models.py` (modificar sólo si los tipos de estado/error/result existentes no cubren el contrato): errores y resultado compacto sin campo nuevo `final_action_uncertain`.
+- `publisher_worker/southfarm_publisher/cleanup_cli.py` (modificar): wrapper `execute_cleanup(argv, *, registry_factory, adapter_factory, authorization_client, emit)` existente, `CleanupManifest`/`CleanupResult` tipados y core interno validate sin ADB → open/preflight → selector readiness → consume one-use → primer tap destructivo → baseline restaurado.
+- `publisher_worker/southfarm_publisher/models.py` (modificar sólo si los tipos de estado/error/result existentes no cubren el contrato): reutilizar `PublicationJob`, `PublisherError` y `ClaimedJob`; no inventar `PreparedPublication` ni `VerificationResult`, porque `prepare` devuelve `None` y `verify` devuelve el `str` de identidad actual.
 - `publisher_worker/tests/test_ui_snapshot.py` (crear): parser, jerarquía, selectores, bounds y errores fail-closed.
 - `publisher_worker/tests/test_adb_device.py` (modificar): fake de subprocess, argv exacto, `shell=False`, acciones especiales y dumps frescos.
 - `publisher_worker/tests/test_platform_adapters.py` (modificar): fixtures/guards de los tres adaptadores y regresiones de usernames sin política prohibida. El test dirty preexistente se conserva, se revisa contra la implementación y sólo sus asserts funcionales aprobados se agregan al commit que los hace verdes.
@@ -65,11 +66,12 @@ Antes de cada commit que toque un archivo dirty se ejecuta `git diff -- <path>` 
 
 **Interfaces:**
 - `ScreenSize(width: int, height: int)` y `Bounds(left: int, top: int, right: int, bottom: int)` son dataclasses inmutables; `Bounds.validate(screen: ScreenSize) -> None` rechaza ausencia, inversión, tamaño cero y salida de pantalla.
-- `UiNode(node_id: str, parent_id: str | None, child_ids: tuple[str, ...], class_name: str, resource_id: str | None, content_desc: str | None, text: str | None, bounds: Bounds, enabled: bool, clickable: bool, visible_to_user: bool, focused: bool, selected: bool)` conserva la relación XML.
+- `UiNode(node_id: str, parent_id: str | None, child_ids: tuple[str, ...], class_name: str, resource_id: str | None, content_desc: str | None, text: str | None, bounds: Bounds, enabled: bool, clickable: bool, visible_to_user: bool, focusable: bool, focused: bool, selected: bool)` conserva la relación XML y el atributo Android `focusable`.
 - `SemanticSelector(resource_id: str | None = None, content_desc: str | None = None, text: str | None = None)` sólo acepta valores exactos no vacíos.
 - `ResolvedTarget(identity: UiNode, target: UiNode | None)` separa label pasivo y control físico.
 - `UiSnapshot.from_xml(xml: str | bytes, *, package: str, snapshot_id: str, captured_at: float, screen_size: ScreenSize) -> UiSnapshot` rechaza XML inválido, jerarquía incompleta y package vacío.
 - `UiSnapshot.resolve(selector: SemanticSelector, *, require_action: bool, require_visible: bool = True) -> ResolvedTarget` aplica exactamente `resource-id`, luego `content-desc`, luego `text`; levanta `SELECTOR_NOT_FOUND`, `SELECTOR_COLLISION`, `CONTROL_DISABLED` o `ACTION_TARGET_UNAVAILABLE` según el caso.
+- `TargetResolver = Callable[[UiSnapshot], ResolvedTarget]` y `UiExpectation = Callable[[UiSnapshot], bool]` son aliases de `ui_snapshot.py` para los controles dinámicos y la evidencia posterior; no introducen `PreparedPublication` ni `VerificationResult`.
 
 - [ ] **Step 1: Escribir la prueba roja de jerarquía y prioridad.** Añadir `ui_snapshot_hierarchy.xml` con una sola etiqueta `text="growtech.news"` bajo su único contenedor clickable, `content-desc="growtech.news"` en ese contenedor y dos nodos `text="Next"` en ramas separadas para el caso de colisión. La prueba de prioridad debe configurar ambos campos y demostrar que `content-desc` detiene la búsqueda antes del texto hijo; la prueba de ancestro usa sólo `text="growtech.news"`, que aparece una vez. Afirmar `parent_id`, `child_ids`, orden pre-order y `node_id` reproducible.
 
@@ -91,7 +93,7 @@ def test_passive_label_resolves_to_only_clickable_ancestor(self):
 ```
 
 - [ ] **Step 2: Ejecutar sólo el test nuevo y confirmar fallo.** Ejecutar `py -3 -m unittest publisher_worker.tests.test_ui_snapshot -v`; debe fallar porque aún no existe el módulo/modelo jerárquico.
-- [ ] **Step 3: Implementar el parser mínimo y la resolución fail-closed.** Parsear con `xml.etree.ElementTree`, construir rutas de hijos desde la raíz, indexar `nodes` por `node_id` y recorrer ancestros directos sin saltar subárboles.
+- [ ] **Step 3: Implementar el parser mínimo y la resolución fail-closed.** Parsear con `xml.etree.ElementTree`, construir rutas de hijos desde la raíz, indexar `nodes` por `node_id`, conservar `focusable` desde el atributo XML y recorrer ancestros directos sin saltar subárboles. `UiSnapshot.from_xml` recibe un `ScreenSize` ya validado sólo desde `SafeAdb.dump_snapshot` en producción; los tests pueden construirlo explícitamente.
 
 ```python
 @dataclass(frozen=True)
@@ -127,42 +129,43 @@ def resolve(self, selector: SemanticSelector, *, require_action: bool,
 - Create: `publisher_worker/tests/test_physical_actions.py`
 
 **Interfaces:**
-- `SafeAdb.dump_snapshot(expected_package: str, screen_size: ScreenSize) -> UiSnapshot` toma un solo dump, valida foreground/package y devuelve snapshot inmutable con `snapshot_id` nuevo.
-- `SafeAdb.tap_bounds(bounds: Bounds) -> None` ejecuta argv `['adb', '-s', serial, 'shell', 'input', 'tap', str(x), str(y)]` con `shell=False`.
-- `SafeAdb.swipe_bounds(container: Bounds, *, direction: Literal['left', 'right', 'up', 'down'], duration_ms: int) -> None` calcula start/end acotados del rectángulo actual.
-- `GuardedPublisher.tap_and_wait(selector: SemanticSelector, *, expected_package: str, expect: Callable[[UiSnapshot], bool], label: str) -> UiSnapshot` obtiene snapshot antes, resuelve identidad/target, ejecuta un tap y obtiene un snapshot posterior que satisface `expect` o lanza un error estable.
-- `GuardedPublisher.back_and_wait`, `input_text_and_wait`, `launch_and_wait` y `swipe_and_wait` aplican el mismo contrato antes/después, con sus excepciones explícitas.
+- `SafeAdb.dump_snapshot(expected_package: str) -> UiSnapshot` valida foreground, ejecuta `shell wm size` y `exec-out uiautomator dump /dev/tty`, obtiene el `ScreenSize` lógico actual (incluidas las dos orientaciones candidatas) y devuelve un snapshot inmutable con `snapshot_id` nuevo; no recibe tamaño externo.
+- `SafeAdb.tap_bounds(bounds: Bounds, *, screen_size: ScreenSize, delay_seconds: float = 0.2) -> None` valida bounds contra el `snapshot.screen_size` que le pasa el caller y ejecuta argv `['adb', '-s', serial, 'shell', 'input', 'tap', str(x), str(y)]` con `shell=False`.
+- `SafeAdb.swipe_bounds(container: Bounds, *, screen_size: ScreenSize, direction: Literal['left', 'right', 'up', 'down'], duration_ms: int) -> None` calcula start/end acotados del rectángulo actual; `SafeAdb.swipe(...)` queda como primitive low-level sólo para tests del wrapper y no se llama con literales desde adapters.
+- `GuardedPublisher.tap_and_wait(device: SafeAdb, target: SemanticSelector | TargetResolver, *, error: str, expect: UiExpectation) -> UiNode` recibe explícitamente el `device`, obtiene un snapshot fresco de `self.package`, resuelve el selector exacto o el `TargetResolver` dinámico, llama `device.tap_bounds(resolved.target.bounds, screen_size=before.screen_size)`, y espera un snapshot posterior que satisfaga `expect`.
+- `GuardedPublisher.back_and_wait(device: SafeAdb, *, error: str, expect: UiExpectation)`, `input_text_and_wait(device: SafeAdb, caption: str, *, expect_prefix: Callable[[UiSnapshot, str], bool])`, `launch_and_wait(device: SafeAdb)` y `swipe_and_wait(device: SafeAdb, target: SemanticSelector | TargetResolver, *, direction: str, error: str, expect: UiExpectation)` aplican el mismo contrato antes/después, con sus excepciones explícitas.
 
 - [ ] **Step 1: Revisar el diff dirty y añadir pruebas rojas con fake de subprocess.** Ejecutar `git diff -- publisher_worker/southfarm_publisher/platforms/common.py` para conservar la distinción de identidad pasiva ya existente; luego capturar `argv`, `shell` y la secuencia de dumps, afirmar que el centro de `[100,200][500,600]` produce `300,400`, que no aparece `.click`/`performClick`/`UiObject.click`, y que un target del snapshot anterior no se reutiliza.
 
 ```python
 def test_tap_uses_current_bounds_and_shell_false(self):
-    adb, calls = fake_adb_with_snapshots(before_xml, after_xml)
-    publisher = GuardedPublisher(adb)
+    device, calls = fake_safe_adb_with_snapshots(before_xml, after_xml)
+    publisher = InstagramPublisher(expected_account="growtech.news")
     publisher.tap_and_wait(
+        device,
         SemanticSelector(resource_id="button.publish"),
-        expected_package="com.instagram.android",
+        error="share",
         expect=lambda snap: snap.resolve(
             SemanticSelector(text="Processing"), require_action=False
         ).identity.text == "Processing",
-        label="share",
     )
     self.assertEqual(calls[-1].argv[-3:], ["tap", "300", "400"])
     self.assertFalse(calls[-1].shell)
 ```
 
 - [ ] **Step 2: Ejecutar pruebas focalizadas y confirmar fallo.** Ejecutar `py -3 -m unittest publisher_worker.tests.test_adb_device publisher_worker.tests.test_physical_actions -v`; debe fallar ante la falta de snapshot jerárquico/contrato de frescura.
-- [ ] **Step 3: Implementar la captura y wrappers físicos mínimos.** Conectar `SafeAdb` a `UiSnapshot.from_xml`, validar foreground y `screen_size`, mantener `shell=False`, y hacer que cada helper tome un snapshot nuevo tanto antes como después del único comando físico.
+- [ ] **Step 3: Implementar la captura y wrappers físicos mínimos.** En `SafeAdb.dump_snapshot(expected_package)`, consultar primero `shell wm size`, elegir `Override size` si está presente y, si los bounds del XML sólo caben al invertir ancho/alto, usar la orientación transpuesta; si ninguna orientación valida todos los bounds, lanzar `UI_SCREEN_SIZE_INVALID`. Después conectar el XML a `UiSnapshot.from_xml`, mantener `shell=False`, y hacer que cada helper tome un snapshot nuevo tanto antes como después del único comando físico.
 
 ```python
-def tap_bounds(self, bounds: Bounds) -> None:
-    bounds.validate(self.screen_size)
+def tap_bounds(self, bounds: Bounds, *, screen_size: ScreenSize,
+               delay_seconds: float = 0.2) -> None:
+    bounds.validate(screen_size)
     x, y = bounds.center()
     self._run(["adb", "-s", self.serial, "shell", "input", "tap",
                str(x), str(y)], shell=False)
 ```
 
-- [ ] **Step 4: Implementar input/back/launch/swipe y pruebas verdes.** `input_text_and_wait` debe localizar un `EditText` visible/enabled/focusable y verificar cada prefijo sin loguear tokens; `back_and_wait` debe exigir perfil/cuenta/destino; `launch_and_wait` puede usar sólo `monkey` antes del primer package check; `swipe_and_wait` debe usar proporciones del contenedor y validar contexto posterior. Un `adb` return code exitoso sin evidencia positiva debe fallar.
+- [ ] **Step 4: Implementar input/back/launch/swipe y pruebas verdes.** `input_text_and_wait` debe localizar un `EditText` visible, enabled, `focusable=true` y verificar cada prefijo sin loguear tokens; `back_and_wait` debe exigir perfil/cuenta/destino; `launch_and_wait` puede usar sólo `monkey` antes del primer package check; `swipe_and_wait` debe usar proporciones del contenedor y validar contexto posterior. Un `adb` return code exitoso sin evidencia positiva debe fallar. Añadir tests de `wm size` válido, `Override size`, orientación transpuesta y parse/bounds inválidos.
 - [ ] **Step 5: Ejecutar estático y commit.** Ejecutar `rg -n "\.click\(|performClick|UiObject\.click|900,900|100,900" publisher_worker/southfarm_publisher` y revisar manualmente que cualquier coincidencia sea texto de prueba/documentación, no un gesto productivo. Revisar de nuevo `git diff -- publisher_worker/southfarm_publisher/platforms/common.py`, stagear sólo los hunks funcionales aprobados de ese archivo y excluir PNG/egg-info. Commit: `feat(worker): enforce fresh semantic physical actions`.
 
 ### Task 3: Unificar identidad de cuenta y retirar la política permanente prohibida
