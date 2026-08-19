@@ -19,6 +19,8 @@ param(
   [switch]$AllowAllInstagramAccounts,
   [switch]$LegacyAppIdentity,
   [string]$SouthFarmPackage = "com.example.southfarm_app",
+  [ValidateSet("auto", "service", "uiautomator")]
+  [string]$UiSource = "auto",
   [string]$WorkerToken,
   [switch]$ValidationOnly
 )
@@ -107,7 +109,7 @@ Set-ProtectedDirectoryAcl $evidenceRoot @{ $systemSid="FullControl"; $adminsSid=
 Set-ProtectedDirectoryAcl (Split-Path -Parent $toolPath) @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 Copy-Item -LiteralPath $FfprobeSourcePath -Destination $toolPath -Force
 Set-ProtectedFileAcl $toolPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
-$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; legacy_app_identity=[bool]$LegacyAppIdentity; southfarm_package=$SouthFarmPackage; legacy_device_id=if ($LegacyAppIdentity) { [string]$appIdentity.device_id } else { "" }; legacy_installation_id=if ($LegacyAppIdentity) { [string]$appIdentity.installation_id } else { "" }; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
+$workerConfig = [ordered]@{ python_path=$PythonPath; worker_path=$WorkerPath; adb_path=$AdbPath; ffprobe_path=$toolPath; api_url=$ApiUrl.TrimEnd('/'); worker_id=("windows-{0}" -f $DeviceId); run_as_user=$RunAsUser; run_as_sid=$requestedSid; device_id=$DeviceId; device_serial=$DeviceSerial; android_id=$androidId; legacy_app_identity=[bool]$LegacyAppIdentity; southfarm_package=$SouthFarmPackage; ui_source=$UiSource; legacy_device_id=if ($LegacyAppIdentity) { [string]$appIdentity.device_id } else { "" }; legacy_installation_id=if ($LegacyAppIdentity) { [string]$appIdentity.installation_id } else { "" }; worker_token=$WorkerToken; media_root=$MediaRoot; evidence_root=$evidenceRoot; log_root=$logDir; forbidden_instagram_accounts=$ForbiddenInstagramAccounts; allow_all_instagram_accounts=[bool]$AllowAllInstagramAccounts }
 [IO.File]::WriteAllText($workerConfigPath, ($workerConfig | ConvertTo-Json -Compress))
 Set-ProtectedFileAcl $workerConfigPath @{ $systemSid="FullControl"; $adminsSid="FullControl"; $requestedSid="ReadAndExecute" }
 

@@ -59,6 +59,9 @@ try {
   if (!(Test-Path -LiteralPath ([string]$config.worker_path) -PathType Container)) { throw "Configured worker_path is unavailable." }
   if ([Convert]::FromBase64String([string]$config.worker_token).Length -ne 32) { throw "Publisher worker token is not 32 bytes." }
   if ([string]::IsNullOrWhiteSpace([string]$config.forbidden_instagram_accounts) -and -not [bool]$config.allow_all_instagram_accounts) { throw "Instagram forbidden-account policy must be explicit." }
+  $uiSource = [string]$config.ui_source
+  if ([string]::IsNullOrWhiteSpace($uiSource)) { $uiSource = "auto" }
+  if ($uiSource -notin @("auto", "service", "uiautomator")) { throw "Publisher worker ui_source must be auto, service, or uiautomator." }
 
   Assert-ConfiguredDeviceIdentity $config
   if ($ValidateOnly) { Write-Output "Publisher worker supervisor identity validation passed."; return }
@@ -71,6 +74,7 @@ try {
   $env:SOUTHFARM_EXPECTED_ANDROID_ID = [string]$config.android_id
   $env:SOUTHFARM_BACKEND_DEVICE_ID = if ([bool]$config.legacy_app_identity) { [string]$config.legacy_device_id } else { [string]$config.device_id }
   $env:SOUTHFARM_ADB = [string]$config.adb_path
+  $env:SOUTHFARM_UI_SOURCE = $uiSource
   $env:SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS = [string]$config.forbidden_instagram_accounts
   $env:SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS = if ([bool]$config.allow_all_instagram_accounts) { "true" } else { "false" }
   $env:PYTHONPATH = [string]$config.worker_path

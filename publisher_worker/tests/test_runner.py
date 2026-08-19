@@ -613,7 +613,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(device_id, 5)
         self.assertEqual(registry.expected_serial, "usb-exact")
         self.assertEqual(registry.expected_android_id, "0123456789abcdef")
-        self.assertEqual(registry.ui_source, "service")
+        self.assertEqual(registry.ui_source, "auto")
 
     def test_config_reads_and_validates_ui_source(self):
         base = {"SOUTHFARM_API_URL": "https://api.test", "SOUTHFARM_PUBLISHER_WORKER_TOKEN": "secret", "SOUTHFARM_PUBLISHER_WORKER_ID": "worker", "SOUTHFARM_PUBLISHER_DEVICE_ID": "5", "SOUTHFARM_ADB": "C:/adb.exe", "SOUTHFARM_ADB_SERIAL": "usb-exact", "SOUTHFARM_EXPECTED_ANDROID_ID": "0123456789abcdef", "SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS": "protected"}

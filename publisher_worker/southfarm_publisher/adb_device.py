@@ -50,8 +50,13 @@ class SafeAdb:
     NETWORK_DUMPSYS_COMMAND_TIMEOUT = 15.0
 
     def __init__(self, serial: str, *, adb_path: str = DEFAULT_ADB, run: Callable[..., Any] = subprocess.run, timeout: float = 20.0, ui_source: str = "service", pause: Callable[[float], None] = time.sleep):
-        if ui_source not in ("service", "uiautomator"): raise PublisherError("CONFIG_INVALID", "ui_source must be 'service' or 'uiautomator'")
+        if ui_source not in ("service", "uiautomator", "auto"): raise PublisherError("CONFIG_INVALID", "ui_source must be 'service', 'uiautomator', or 'auto'")
         self.serial, self.adb_path, self._run, self.timeout, self.ui_source, self._pause = serial, adb_path, run, timeout, ui_source, pause
+        # Legacy 1.1.x builds do not implement DUMP_UI.  In auto mode the
+        # service is probed once per device session, then the worker keeps
+        # using uiautomator instead of paying the service deadline on every
+        # selector action.
+        self._service_unavailable = False
         # Highest service-dump seq accepted so far; the app stamps each dump
         # with a monotonic seq on <hierarchy> so leftovers from a previous
         # request (whose renameTo raced past our rm) can be told apart.
@@ -85,7 +90,30 @@ class SafeAdb:
         for node in nodes: unique.setdefault(frozenset(node.items()), node)
         return list(unique.values())
     def dump_ui(self) -> list[dict[str, str]]:
-        return self.dump_ui_explicit(self.ui_source)
+        if self.ui_source != "auto":
+            return self.dump_ui_explicit(self.ui_source)
+        if self._service_unavailable:
+            return self.dump_ui_explicit("uiautomator")
+        try:
+            return self.dump_ui_explicit("service")
+        except PublisherError as error:
+            if error.code != "UI_DUMP_UNAVAILABLE":
+                raise
+            self._service_unavailable = True
+            try:
+                return self.dump_ui_explicit("uiautomator")
+            except PublisherError as fallback_error:
+                # A malformed/empty legacy hierarchy is a UI-source failure,
+                # not a reason to continue with an unsafe blind tap.  Keep
+                # transport errors intact so the retry policy can distinguish
+                # a disconnected device from a missing service snapshot.
+                if fallback_error.code == "UI_XML_INVALID":
+                    raise PublisherError(
+                        "UI_DUMP_UNAVAILABLE",
+                        "Neither the app UI service nor uiautomator returned a usable hierarchy",
+                        retryable=True,
+                    ) from fallback_error
+                raise
     def dump_ui_explicit(self, source: str) -> list[dict[str, str]]:
         """Force ONE dump via `source`, regardless of the configured default.
 
@@ -229,8 +257,30 @@ class SafeAdb:
         social app is opened.  uiautomator-only configurations never depend
         on the service and skip the check.
         """
-        if self.ui_source != "service":
+        if self.ui_source == "uiautomator":
             return
+        if self.ui_source == "auto":
+            if self._service_answers():
+                return
+            self._service_unavailable = True
+            try:
+                # A legacy 1.1.x app has no DUMP_UI receiver, but the Android
+                # accessibility hierarchy can still be queried directly.
+                self.dump_ui_explicit("uiautomator")
+                return
+            except PublisherError as legacy_error:
+                # Give the existing repair path one chance for a current app
+                # whose service is merely crashed.  A genuinely legacy build
+                # will fail this service re-check and abort safely below.
+                if self._repair_accessibility_service():
+                    self._service_unavailable = False
+                    if self._service_answers():
+                        return
+                raise PublisherError(
+                    "ACCESSIBILITY_SERVICE_DOWN",
+                    "Neither the SouthFarm UI service nor uiautomator produced a usable hierarchy",
+                    retryable=True,
+                ) from legacy_error
         if self._service_answers():
             return
         if not self._repair_accessibility_service():

@@ -44,6 +44,23 @@ class SeqDumpRun:
         return subprocess.CompletedProcess(argv, 0, payload, "")
 
 
+class AutoUiSourceRun:
+    """Fake legacy device: the app service never writes a dump, while
+    uiautomator can still return the OS-owned hierarchy."""
+
+    def __init__(self, uiautomator_xml="<hierarchy><node text=\"Legacy ready\" bounds=\"[0,0][1,1]\"/></hierarchy>"):
+        self.uiautomator_xml = uiautomator_xml
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if argv[-3:] == ["uiautomator", "dump", "/dev/tty"]:
+            return subprocess.CompletedProcess(argv, 0, self.uiautomator_xml, "")
+        if "cat" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
 class AdbDeviceTests(unittest.TestCase):
     def test_registry_maps_android_id_and_collapses_duplicate_endpoints(self):
         fake = FakeRun()
@@ -315,6 +332,45 @@ class AdbBezierTests(unittest.TestCase):
         self.assertTrue(raised.exception.retryable)
         self.assertGreaterEqual(fake.cats - cats_before, 2, "polling must retry the cat before giving up")
 
+    def test_auto_ui_source_falls_back_to_uiautomator_when_service_is_unavailable(self):
+        fake = AutoUiSourceRun()
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="auto", pause=lambda seconds: None)
+        clock = iter([0.0, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0])
+        with patch("southfarm_publisher.adb_device.time") as fake_time:
+            fake_time.monotonic = lambda: next(clock, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0)
+            fake_time.sleep = lambda seconds: None
+            nodes = adb.dump_ui()
+        self.assertEqual(nodes[0]["text"], "Legacy ready")
+        self.assertTrue(adb._service_unavailable)
+        self.assertTrue(any("broadcast" in call[0] for call in fake.calls), "auto mode probes the app service first")
+        self.assertTrue(any(call[0][-3:] == ["uiautomator", "dump", "/dev/tty"] for call in fake.calls), "auto mode falls back to uiautomator")
+
+    def test_auto_ui_source_caches_service_unavailable_for_following_dumps(self):
+        fake = AutoUiSourceRun()
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="auto", pause=lambda seconds: None)
+        clock = iter([0.0, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0])
+        with patch("southfarm_publisher.adb_device.time") as fake_time:
+            fake_time.monotonic = lambda: next(clock, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0)
+            fake_time.sleep = lambda seconds: None
+            adb.dump_ui()
+        calls_after_probe = len(fake.calls)
+        self.assertEqual(adb.dump_ui()[0]["text"], "Legacy ready")
+        self.assertEqual(len(fake.calls), calls_after_probe + 1, "cached fallback performs only the uiautomator dump")
+        self.assertEqual(sum("broadcast" in call[0] for call in fake.calls), 1, "service is not retried on every selector action")
+
+    def test_auto_ui_source_converts_invalid_fallback_tree_to_retryable_dump_error(self):
+        fake = AutoUiSourceRun(uiautomator_xml="not xml")
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="auto", pause=lambda seconds: None)
+        clock = iter([0.0, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0])
+        with patch("southfarm_publisher.adb_device.time") as fake_time:
+            fake_time.monotonic = lambda: next(clock, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0)
+            fake_time.sleep = lambda seconds: None
+            with self.assertRaises(PublisherError) as raised:
+                adb.dump_ui()
+        self.assertEqual(raised.exception.code, "UI_DUMP_UNAVAILABLE")
+        self.assertTrue(raised.exception.retryable)
+        self.assertFalse(any("input" in call[0] and "tap" in call[0] for call in fake.calls), "a failed dump never emits a tap")
+
     def test_explicit_uiautomator_dump_forces_uiautomator_even_under_service_default(self):
         class DeviceRun(FakeRun):
             def __call__(self, argv, **kwargs):
@@ -438,6 +494,32 @@ class AccessibilityHealthTests(unittest.TestCase):
         adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="uiautomator", pause=lambda seconds: None)
         adb.ensure_accessibility_healthy()
         self.assertEqual(fake.calls, [], "uiautomator-only jobs never depend on the service")
+
+    def test_ensure_accessibility_healthy_auto_accepts_legacy_uiautomator_tree(self):
+        fake = AutoUiSourceRun()
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="auto", pause=lambda seconds: None)
+        clock = iter([0.0, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0])
+        with patch("southfarm_publisher.adb_device.time") as fake_time:
+            fake_time.monotonic = lambda: next(clock, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0)
+            fake_time.sleep = lambda seconds: None
+            adb.ensure_accessibility_healthy()
+        self.assertTrue(adb._service_unavailable)
+        self.assertTrue(any(call[0][-3:] == ["uiautomator", "dump", "/dev/tty"] for call in fake.calls))
+        self.assertFalse(any("force-stop" in call[0] or ("settings" in call[0] and "put" in call[0]) for call in fake.calls), "a usable legacy tree must not trigger a repair")
+
+    def test_ensure_accessibility_healthy_auto_aborts_when_both_sources_fail(self):
+        fake = AutoUiSourceRun(uiautomator_xml="not xml")
+        adb = SafeAdb("serial-1", run=fake, adb_path="adb-test", ui_source="auto", pause=lambda seconds: None)
+        adb._repair_accessibility_service = lambda: False
+        clock = iter([0.0, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0])
+        with patch("southfarm_publisher.adb_device.time") as fake_time:
+            fake_time.monotonic = lambda: next(clock, SafeAdb.SERVICE_DUMP_DEADLINE_SECONDS + 1.0)
+            fake_time.sleep = lambda seconds: None
+            with self.assertRaises(PublisherError) as raised:
+                adb.ensure_accessibility_healthy()
+        self.assertEqual(raised.exception.code, "ACCESSIBILITY_SERVICE_DOWN")
+        self.assertTrue(raised.exception.retryable)
+        self.assertFalse(any("input" in call[0] and "tap" in call[0] for call in fake.calls), "failed health checks never tap")
 
     def test_ensure_accessibility_healthy_repairs_crashed_service_and_continues(self):
         preserved = "com.other.app/.OtherService:com.example.southfarm_app/com.example.southfarm_app.SouthFarmAccessibilityService"
