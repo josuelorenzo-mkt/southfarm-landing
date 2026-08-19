@@ -70,4 +70,3 @@
 
 - Run final worker/web verification commands and capture concise evidence: tests, package versions/signatures, production download metadata, task state, and device IDs.
 - Update the Spanish handoff with exact recovery commands, compatibility behavior, known limitations, and whether fleet rollout was completed.
-

@@ -74,4 +74,3 @@ Elegir siempre la firma que coincide con el teléfono. Usar únicamente `adb ins
 ## Estado de las pruebas de publicación
 
 La validación realizada en esta etapa fue de instalación, identidad, accesibilidad y fallback UI. El teléfono 08 quedó bloqueado por un keyguard seguro durante el smoke test; por eso todavía no se ejecutó un post real de Instagram/TikTok/YouTube después del rollback. Antes de afirmar que el flujo social end-to-end está aprobado, desbloquear manualmente el teléfono y repetir las pruebas semiorgánicas con las cuentas autorizadas (`marczell.vibes` y `marczellwisdom`), verificando el post desde el perfil y sin usar `santilorennzo`.
-
