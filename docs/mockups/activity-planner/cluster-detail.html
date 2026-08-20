@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cluster · Marczell Clips · Activity Planner</title>
+<link rel="stylesheet" href="planner.css">
+<style>
+  /* ============ Barra superior del detalle ============ */
+  .ap-detail-topbar {
+    min-height: 76px;
+    display: flex; align-items: center; justify-content: space-between; gap: 18px;
+    padding: 12px 34px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: rgba(9, 9, 11, 0.68);
+    backdrop-filter: blur(16px);
+    position: sticky; top: 0; z-index: 40;
+  }
+  .ap-crumb { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: 11px; min-width: 0; }
+  .ap-crumb a { color: var(--text-secondary); }
+  .ap-crumb a:hover { color: var(--accent); }
+  .ap-crumb strong { color: var(--text-primary); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ap-detail-nav { display: flex; align-items: center; gap: 8px; }
+
+  /* header del cluster expandido */
+  .ap-detail-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 26px; align-items: center;
+    padding: 26px 28px;
+    border: 1px solid rgba(34, 197, 94, 0.16);
+    border-radius: 16px;
+    background: linear-gradient(120deg, rgba(34, 197, 94, 0.09), rgba(16, 24, 20, 0.78) 55%, rgba(16, 24, 20, 0.45));
+    position: relative; overflow: hidden;
+  }
+  .ap-detail-hero::after {
+    width: 420px; height: 220px; content: "";
+    position: absolute; right: 90px; top: -170px;
+    border: 1px solid rgba(34, 197, 94, 0.15); border-radius: 50%;
+    box-shadow: 0 0 0 26px rgba(34, 197, 94, 0.025), 0 0 0 54px rgba(34, 197, 94, 0.02);
+    transform: rotate(-14deg);
+    pointer-events: none;
+  }
+  .ap-hero-copy { min-width: 0; position: relative; z-index: 1; }
+  .ap-hero-name-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .ap-hero-name { font-size: clamp(25px, 3vw, 36px); line-height: 1.04; letter-spacing: -0.055em; }
+  .ap-hero-copy p:not(.ap-eyebrow) { margin-top: 10px; color: var(--text-secondary); font-size: 12px; }
+  .ap-name-edit { display: inline-flex; align-items: center; gap: 8px; }
+  .ap-name-edit input {
+    min-width: 0; width: 320px; max-width: 100%;
+    min-height: 38px; padding: 0 12px;
+    color: var(--text-primary); font-size: 19px; font-weight: 700; letter-spacing: -0.03em;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid var(--border-subtle); border-radius: 9px; outline: none;
+  }
+  .ap-name-edit input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.1); }
+  .ap-hero-stats { display: flex; gap: 34px; position: relative; z-index: 1; flex-wrap: wrap; }
+  .ap-hero-stat strong { display: block; color: var(--text-primary); font-size: 25px; line-height: 1; letter-spacing: -0.06em; }
+  .ap-hero-stat span { display: block; margin-top: 7px; color: var(--text-muted); font-size: 9px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+
+  /* layout de dos columnas */
+  .ap-detail-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr); gap: 16px; align-items: start; }
+  .ap-side-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  /* cuentas grandes */
+  .ap-account-list { display: flex; flex-direction: column; gap: 10px; }
+  .ap-account-row {
+    display: flex; align-items: center; gap: 13px;
+    padding: 14px 15px;
+    border: 1px solid var(--border-subtle); border-radius: 12px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .ap-account-row .ap-bubble { width: 44px; height: 44px; flex-basis: 44px; font-size: 13px; border-radius: 13px; }
+  .ap-account-main { min-width: 0; flex: 1; }
+  .ap-account-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ap-account-top strong { color: var(--text-primary); font-size: 13px; }
+  .ap-account-main > span { display: block; margin-top: 5px; color: var(--text-muted); font-size: 10px; }
+  .ap-account-main > small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 9px; }
+  .ap-account-state { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  .ap-account-add {
+    width: 100%; min-height: 46px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    color: var(--text-muted); font-size: 11px; font-weight: 600;
+    border: 1px dashed var(--border-default); border-radius: 12px;
+    background: transparent; transition: 0.16s ease;
+  }
+  .ap-account-add:hover { color: var(--accent); border-color: rgba(34, 197, 94, 0.38); background: var(--accent-dim); }
+
+  /* publicaciones */
+  .ap-pub-list { display: flex; flex-direction: column; gap: 10px; }
+  .ap-pub-row {
+    display: grid; grid-template-columns: 64px 1fr auto; gap: 14px; align-items: center;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle); border-radius: 12px;
+    background: rgba(255, 255, 255, 0.015);
+  }
+  .ap-pub-thumb {
+    width: 64px; height: 84px; border-radius: 9px;
+    display: grid; place-items: center;
+    color: rgba(255, 255, 255, 0.55); font-size: 9px; font-weight: 800; letter-spacing: 0.06em;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    position: relative; overflow: hidden;
+  }
+  .ap-pub-thumb::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.14), transparent 55%);
+  }
+  .ap-pub-thumb.t-ig { background: linear-gradient(160deg, #3b1d31, #1a0f17 70%); }
+  .ap-pub-thumb.t-tt { background: linear-gradient(160deg, #12333b, #0e171d 70%); }
+  .ap-pub-thumb.t-yt { background: linear-gradient(160deg, #3b1a1f, #171014 70%); }
+  .ap-pub-thumb svg { position: relative; z-index: 1; opacity: 0.8; }
+  .ap-pub-main { min-width: 0; }
+  .ap-pub-main strong { display: block; overflow: hidden; color: var(--text-primary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .ap-pub-main span { display: block; margin-top: 5px; color: var(--text-muted); font-size: 10px; }
+  .ap-pub-main small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 9px; }
+  .ap-pub-metric { text-align: right; }
+  .ap-pub-metric strong { display: block; color: var(--text-secondary); font-size: 12px; }
+  .ap-pub-metric span { display: block; margin-top: 4px; color: var(--text-dim); font-size: 9px; }
+
+  /* views placeholder */
+  .ap-views-ph {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; min-height: 190px; text-align: center;
+    border: 1px dashed rgba(245, 158, 11, 0.3); border-radius: 12px;
+    background: rgba(245, 158, 11, 0.04);
+    padding: 20px;
+  }
+  .ap-views-ph-mark {
+    width: 38px; height: 38px; display: grid; place-items: center;
+    color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.25); border-radius: 12px;
+    background: rgba(245, 158, 11, 0.08);
+  }
+  .ap-views-ph strong { color: var(--text-secondary); font-size: 12px; }
+  .ap-views-ph span { max-width: 300px; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+
+  /* warmup chart por cuenta */
+  .ap-wchart { display: flex; flex-direction: column; gap: 12px; }
+  .ap-wchart-row { display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center; }
+  .ap-wchart-row > span { color: var(--text-secondary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ap-wchart-row svg { display: block; width: 100%; height: 44px; }
+  .ap-wchart-row > small { color: var(--text-dim); font-size: 9px; white-space: nowrap; }
+  .ap-wline { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .ap-warea { opacity: 0.12; }
+  .ap-wtarget { stroke: rgba(255, 255, 255, 0.14); stroke-width: 1; stroke-dasharray: 2 4; }
+
+  /* rutinas activas */
+  .ap-routine-list { display: flex; flex-direction: column; gap: 10px; }
+  .ap-routine-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 14px;
+    border: 1px solid var(--border-subtle); border-radius: 11px;
+    background: rgba(255, 255, 255, 0.015);
+  }
+  .ap-routine-icon {
+    width: 32px; height: 32px; flex: 0 0 32px;
+    display: grid; place-items: center;
+    border: 1px solid currentColor; border-radius: 9px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+  .ap-routine-main { min-width: 0; flex: 1; }
+  .ap-routine-main strong { display: block; color: var(--text-primary); font-size: 12px; }
+  .ap-routine-main span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 10px; }
+
+  /* kpis del side */
+  .ap-side-kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .ap-side-kpi { padding: 13px 14px; border: 1px solid var(--border-subtle); border-radius: 11px; background: rgba(255, 255, 255, 0.018); }
+  .ap-side-kpi span { color: var(--text-muted); font-size: 9px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+  .ap-side-kpi strong { display: block; margin-top: 9px; color: var(--text-primary); font-size: 21px; letter-spacing: -0.04em; }
+  .ap-side-kpi small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 9px; }
+
+  @media (max-width: 1180px) {
+    .ap-detail-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 900px) {
+    .ap-detail-topbar { padding: 10px 18px; flex-wrap: wrap; }
+    .ap-detail-hero { grid-template-columns: 1fr; padding: 20px; }
+    .ap-name-edit input { width: 100%; }
+    .ap-pub-row { grid-template-columns: 56px 1fr; }
+    .ap-pub-metric { grid-column: 2; text-align: left; }
+    .ap-wchart-row { grid-template-columns: 100px 1fr; }
+    .ap-wchart-row > small { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="ap-app">
+
+  <!-- ==================== SIDEBAR ==================== -->
+  <aside class="ap-sidebar">
+    <div class="ap-sidebar-top">
+      <div class="ap-brand-lockup">
+        <div class="ap-brand-mark">SF</div>
+        <div><strong>SouthFarm</strong><small>command center</small></div>
+      </div>
+      <div class="ap-workspace-chip"><span class="ap-online-dot"></span>Agencia Sur</div>
+    </div>
+    <nav class="ap-side-nav" aria-label="Navegación del workspace">
+      <p class="ap-nav-caption">WORKSPACE</p>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M10 20v-5h4v5"/></svg>
+      </span><span>Command center</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </span><span>Crear publicación</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="19" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      </span><span>Device fleet</span></a>
+      <a class="ap-nav-item is-active" href="planner-week.html" aria-current="page"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="16" rx="2.5"/><path d="M3.5 9.5h17M8 3v3M16 3v3"/><path d="m9 15 2 2 4-4.5"/></svg>
+      </span><span>Activity Planner</span><b>NEW</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2.5"/></svg>
+      </span><span>Activity history</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/><path d="M16 8.5a3 3 0 1 1 4.2 4"/></svg>
+      </span><span>Team</span><b>RBAC</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.15-1.4l2-1.55-2-3.4-2.4.9A7 7 0 0 0 14 4.7L13.6 2h-3.2L10 4.7a7 7 0 0 0-2.45 1.4l-2.4-.9-2 3.4 2 1.55A7 7 0 0 0 5 12c0 .48.05.95.15 1.4l-2 1.55 2 3.4 2.4-.9A7 7 0 0 0 10 19.3l.4 2.7h3.2l.4-2.7a7 7 0 0 0 2.45-1.4l2.4.9 2-3.4-2-1.55c.1-.45.15-.92.15-1.4Z"/></svg>
+      </span><span>Settings</span></a>
+    </nav>
+    <div class="ap-sidebar-bottom">
+      <div class="ap-user-chip">
+        <div class="ap-avatar">J</div>
+        <div class="ap-user-copy"><strong>Josué</strong><span>owner</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==================== MAIN ==================== -->
+  <div class="ap-main">
+
+    <!-- Barra con navegación propia del detalle -->
+    <header class="ap-detail-topbar">
+      <div class="ap-crumb">
+        <a href="planner-week.html">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+          Semana
+        </a>
+        <span>/</span>
+        <strong id="crumbName">Marczell Clips</strong>
+        <span class="ap-badge ap-badge-live" style="margin-left:6px"><span class="ap-badge-dot"></span>En vivo</span>
+      </div>
+      <div class="ap-detail-nav">
+        <button class="ap-btn ap-btn-ghost ap-btn-sm" id="prevCluster" title="Cluster anterior">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          Anterior
+        </button>
+        <span style="color:var(--text-dim);font-size:10px" id="clusterPos">1 / 5</span>
+        <button class="ap-btn ap-btn-ghost ap-btn-sm" id="nextCluster" title="Cluster siguiente">
+          Siguiente
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+        <a class="ap-btn ap-btn-ghost ap-btn-sm" href="routine-editor.html" title="Editar rutinas de este cluster">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z"/><path d="m13.5 6.5 3 3"/></svg>
+          Rutinas
+        </a>
+        <a class="ap-btn ap-btn-sm" href="index.html">Hub</a>
+      </div>
+    </header>
+
+    <main class="ap-content">
+      <div class="ap-page-stack">
+
+        <!-- Hero editable -->
+        <section class="ap-detail-hero">
+          <div class="ap-hero-copy">
+            <p class="ap-eyebrow ap-eyebrow-accent">CLUSTER · SEMANA 17–23 AGO</p>
+            <div class="ap-hero-name-row" style="margin-top:9px">
+              <div class="ap-name-edit">
+                <input id="clusterName" value="Marczell Clips" aria-label="Nombre del cluster" maxlength="48">
+                <button class="ap-icon-btn" id="saveName" title="Guardar nombre">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z"/><path d="m13.5 6.5 3 3"/></svg>
+                </button>
+              </div>
+              <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Todo ok</span>
+            </div>
+            <p>3 cuentas en Instagram, TikTok y YouTube · rutina activa desde feb 2026 · ventana 12:00–22:00 BA</p>
+          </div>
+          <div class="ap-hero-stats">
+            <div class="ap-hero-stat"><strong>96%</strong><span>Cumplimiento</span></div>
+            <div class="ap-hero-stat"><strong>7h 24m</strong><span>Warmup semanal</span></div>
+            <div class="ap-hero-stat"><strong>6</strong><span>Posts esta semana</span></div>
+          </div>
+        </section>
+
+        <div class="ap-detail-grid">
+          <!-- ============ Columna principal ============ -->
+          <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+
+            <!-- Cuentas -->
+            <section class="ap-card">
+              <div class="ap-card-heading">
+                <div>
+                  <p class="ap-eyebrow">ACCOUNTS IN CLUSTER</p>
+                  <h3>Cuentas del cluster</h3>
+                  <p class="ap-card-subtitle">Burbuja grande por plataforma. Sacá una cuenta para excluirla de la rutina sin borrarla de la flota.</p>
+                </div>
+                <span style="color:var(--text-dim);font-size:10px">3 activas</span>
+              </div>
+              <div class="ap-account-list" id="accountList"></div>
+              <button class="ap-account-add" id="addAccount" style="margin-top:10px">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                Agregar cuenta al cluster
+              </button>
+            </section>
+
+            <!-- Publicaciones -->
+            <section class="ap-card">
+              <div class="ap-card-heading">
+                <div>
+                  <p class="ap-eyebrow">PUBLISH HISTORY</p>
+                  <h3>Historial de publicaciones</h3>
+                  <p class="ap-card-subtitle">Últimos videos publicados por las cuentas del cluster.</p>
+                </div>
+                <a class="ap-link-button" href="#">Ver todas →</a>
+              </div>
+              <div class="ap-pub-list" id="pubList"></div>
+            </section>
+
+            <!-- Warmup histórico -->
+            <section class="ap-card">
+              <div class="ap-card-heading">
+                <div>
+                  <p class="ap-eyebrow">WARMUP HISTORY · ÚLTIMOS 14 DÍAS</p>
+                  <h3>Warmup por cuenta</h3>
+                  <p class="ap-card-subtitle">Minutos por día · línea de objetivo: 40 min/cuenta/día.</p>
+                </div>
+                <div class="ap-segmented" style="min-width:170px" role="tablist" aria-label="Modo del chart de warmup">
+                  <button class="is-selected">Por cuenta</button>
+                  <button id="aggBtn">Agregado</button>
+                </div>
+              </div>
+              <div class="ap-wchart" id="wchart"></div>
+            </section>
+
+          </div>
+
+          <!-- ============ Columna lateral ============ -->
+          <aside class="ap-side-stack">
+
+            <!-- Estadísticas / views placeholder -->
+            <section class="ap-card">
+              <div class="ap-card-heading">
+                <div>
+                  <p class="ap-eyebrow">STATS</p>
+                  <h3>Estadísticas</h3>
+                </div>
+              </div>
+              <div class="ap-views-ph">
+                <span class="ap-views-ph-mark">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </span>
+                <strong>Views trackeadas — próximamente</strong>
+                <span>Cuando el tracking de views esté activo, vas a ver el rendimiento orgánico de cada video del cluster, por plataforma, sin salir de acá.</span>
+              </div>
+              <div class="ap-side-kpis" style="margin-top:14px">
+                <div class="ap-side-kpi"><span>Warmup 7d</span><strong>7h 24m</strong><small>objetivo 8h 24m</small></div>
+                <div class="ap-side-kpi"><span>Scans 7d</span><strong>14</strong><small>2 por día · regla ok</small></div>
+                <div class="ap-side-kpi"><span>Posts 7d</span><strong>6</strong><small>2 por cuenta · regla ok</small></div>
+                <div class="ap-side-kpi"><span>Overdue 7d</span><strong>0</strong><small>sin atrasos</small></div>
+              </div>
+            </section>
+
+            <!-- Rutinas activas -->
+            <section class="ap-card">
+              <div class="ap-card-heading">
+                <div>
+                  <p class="ap-eyebrow">ACTIVE ROUTINES</p>
+                  <h3>Rutinas activas</h3>
+                </div>
+                <a class="ap-link-button" href="routine-editor.html">Editar →</a>
+              </div>
+              <div class="ap-routine-list">
+                <div class="ap-routine-row" style="color:#4ade80">
+                  <span class="ap-routine-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l3.5-3.5"/><circle cx="12" cy="15" r="1.6"/></svg></span>
+                  <div class="ap-routine-main"><strong>Warmup diario</strong><span>Mínimo 40 min por cuenta · todos los días</span></div>
+                  <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Activa</span>
+                </div>
+                <div class="ap-routine-row" style="color:#93c5fd">
+                  <span class="ap-routine-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg></span>
+                  <div class="ap-routine-main"><strong>Scan automático</strong><span>2 veces por día · separación mínima 9 h</span></div>
+                  <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Activa</span>
+                </div>
+                <div class="ap-routine-row" style="color:#e879f9">
+                  <span class="ap-routine-icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="m10.5 9.5 5 3-5 3z"/></svg></span>
+                  <div class="ap-routine-main"><strong>Publicaciones</strong><span>Mínimo 2 videos/semana por cuenta</span></div>
+                  <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Activa</span>
+                </div>
+              </div>
+              <a class="ap-btn ap-btn-primary" href="routine-editor.html" style="width:100%;margin-top:14px">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                Nueva publicación de cluster
+              </a>
+            </section>
+
+          </aside>
+        </div>
+
+        <div class="ap-mockup-note">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+          <span><strong>Mockup 2/4</strong> · Este estado representa la card expandida desde la semana: nombre editable, cuentas, históricos y rutinas. Probá <em>Anterior / Siguiente</em> arriba a la derecha.</span>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="ap-toast" id="toast" role="status"></div>
+
+<script>
+/* ============================================================
+   Datos ficticios del cluster (Marczell Clips)
+   ============================================================ */
+
+var DAYS14 = ['L4','M5','J6','V7','S8','D9','L10','M11','J12','V13','S14','D15','L16','M17','Mié18','Mié19'];
+
+var ACCOUNTS = [
+  { u: 'marczell.clips', p: 'ig', plabel: 'Instagram', device: 'n9', policy: 'warming', state: 'Ejecutando warmup · 24 min', series: [42,40,41,38,42,41,43,40,42,39,41,44,40,38,42,41] },
+  { u: 'marczellclips', p: 'tt', plabel: 'TikTok', device: 'n07', policy: 'warm', state: 'En cola · scan 21:15', series: [40,41,39,40,42,38,41,40,40,42,41,39,40,41,43,40] },
+  { u: 'Marczell Clips', p: 'yt', plabel: 'YouTube', device: 'n08', policy: 'automatic', state: 'OK hoy · 43 min', series: [38,42,40,41,39,40,42,41,40,43,42,40,41,39,40,42] }
+];
+
+var PUBS = [
+  { title: 'Skate park al atardecer — cut fijo', p: 'ig', pcol: 't-ig', plabel: 'Instagram Reel', date: 'Mié 19 ago · 13:05', device: 'n9', status: 'Publicado', statusCls: 'ap-badge ap-badge-live', views: '4,2K', dur: '0:34' },
+  { title: 'Esto pasó en el local ayer', p: 'tt', pcol: 't-tt', plabel: 'TikTok video', date: 'Lun 17 ago · 18:20', device: 'n07', status: 'Publicado', statusCls: 'ap-badge ap-badge-live', views: '9,8K', dur: '0:28' },
+  { title: 'Best clips de la semana #12', p: 'yt', pcol: 't-yt', plabel: 'YouTube Short', date: 'Dom 16 ago · 12:40', device: 'n08', status: 'Publicado', statusCls: 'ap-badge ap-badge-live', views: '3,1K', dur: '0:45' },
+  { title: 'Reacting a los comentarios', p: 'ig', pcol: 't-ig', plabel: 'Instagram Reel', date: 'Sáb 15 ago · 16:10', device: 'n9', status: 'Publicado', statusCls: 'ap-badge ap-badge-live', views: '5,6K', dur: '0:31' }
+];
+
+var POLICY_LABEL = { warming: 'Warming', warm: 'Warm · excluir', automatic: 'Automático' };
+
+var PLAY_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>';
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function smoothPath(points) {
+  if (points.length < 2) return '';
+  var d = 'M' + points[0][0] + ' ' + points[0][1];
+  for (var i = 0; i < points.length - 1; i++) {
+    var p0 = points[i - 1] || points[i];
+    var p1 = points[i];
+    var p2 = points[i + 1];
+    var p3 = points[i + 2] || p2;
+    d += ' C' + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + ' ' + (p1[1] + (p2[1] - p0[1]) / 6).toFixed(1)
+      + ',' + (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + ' ' + (p2[1] - (p3[1] - p1[1]) / 6).toFixed(1)
+      + ',' + p2[0].toFixed(1) + ' ' + p2[1].toFixed(1);
+  }
+  return d;
+}
+
+/* mini sparkline de warmup por cuenta */
+function wchartRow(acc) {
+  var W = 320, H = 44, T = 8, B = 8, P = 4;
+  var max = 48;
+  var pts = acc.series.map(function (v, i) {
+    return [P + (W - P * 2) / (acc.series.length - 1) * i, T + (H - T - B) - (v / max) * (H - T - B)];
+  });
+  var line = smoothPath(pts);
+  var area = line + ' L' + (W - P) + ' ' + (H - B) + ' L' + P + ' ' + (H - B) + ' Z';
+  var targetY = T + (H - T - B) - (40 / max) * (H - T - B);
+  var last = pts[pts.length - 1];
+  var gid = 'wa-' + acc.p;
+  return '<div class="ap-wchart-row">'
+    + '<span>@' + esc(acc.u) + '</span>'
+    + '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">'
+    + '<defs><linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">'
+    + '<stop offset="0%" stop-color="#22c55e" stop-opacity="0.25"/><stop offset="100%" stop-color="#22c55e" stop-opacity="0"/></linearGradient></defs>'
+    + '<line class="ap-wtarget" x1="' + P + '" y1="' + targetY + '" x2="' + (W - P) + '" y2="' + targetY + '"/>'
+    + '<path class="ap-warea" d="' + area + '" fill="url(#' + gid + ')"/>'
+    + '<path class="ap-wline" d="' + line + '" stroke="#22c55e"/>'
+    + '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="3" fill="#22c55e" stroke="#09090b" stroke-width="1.5"/>'
+    + '</svg>'
+    + '<small>prom 41 min/día</small>'
+    + '</div>';
+}
+
+/* cuentas */
+var accountList = document.getElementById('accountList');
+accountList.innerHTML = ACCOUNTS.map(function (acc) {
+  return '<div class="ap-account-row">'
+    + '<span class="ap-bubble ap-bubble-' + acc.p + ' ap-bubble-lg" role="img" aria-label="' + acc.plabel + '">@' + esc(acc.u).charAt(0).toUpperCase() + '</span>'
+    + '<div class="ap-account-main">'
+    + '<div class="ap-account-top"><strong>@' + esc(acc.u) + '</strong><span class="ap-pill ap-pill-' + acc.p + '">' + acc.plabel + '</span></div>'
+    + '<span>' + esc(acc.state) + ' · celular <b style="color:var(--text-secondary)">' + acc.device + '</b></span>'
+    + '<small>Política: ' + POLICY_LABEL[acc.policy] + '</small>'
+    + '</div>'
+    + '<div class="ap-account-state">'
+    + '<button class="ap-btn ap-btn-ghost ap-btn-sm" data-fake="Ver cola del día">Cola</button>'
+    + '<button class="ap-icon-btn" title="Quitar del cluster" data-remove="1"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>'
+    + '</div>'
+    + '</div>';
+}).join('');
+
+/* publicaciones */
+document.getElementById('pubList').innerHTML = PUBS.map(function (pub) {
+  return '<div class="ap-pub-row">'
+    + '<div class="ap-pub-thumb ' + pub.pcol + '">' + PLAY_ICON + '<span style="position:relative;z-index:1;margin-top:4px">' + pub.dur + '</span></div>'
+    + '<div class="ap-pub-main">'
+    + '<strong>' + esc(pub.title) + '</strong>'
+    + '<span>@' + (pub.p === 'ig' ? 'marczell.clips' : pub.p === 'tt' ? 'marczellclips' : 'Marczell Clips') + ' · ' + pub.plabel + '</span>'
+    + '<small>' + pub.date + ' · celular ' + pub.device + '</small>'
+    + '</div>'
+    + '<div class="ap-pub-metric">'
+    + '<strong>' + pub.views + '</strong><span>views</span>'
+    + '<div style="margin-top:8px"><span class="' + pub.statusCls + '"><span class="ap-badge-dot"></span>' + pub.status + '</span></div>'
+    + '</div>'
+    + '</div>';
+}).join('');
+
+/* warmup chart */
+var wchart = document.getElementById('wchart');
+function renderWchart(mode) {
+  if (mode === 'agg') {
+    var agg = DAYS14.map(function (_, i) {
+      return ACCOUNTS.reduce(function (s, a) { return s + a.series[i]; }, 0);
+    });
+    var acc = { u: 'Cluster (agregado)', p: 'agg', series: agg };
+    wchart.innerHTML = wchartRow(acc).replace('prom 41 min/día', 'prom 2h 03m/día');
+  } else {
+    wchart.innerHTML = ACCOUNTS.map(wchartRow).join('');
+  }
+}
+renderWchart('per');
+document.getElementById('aggBtn').addEventListener('click', function () { renderWchart('agg'); showToast('Warmup agregado del cluster: 2h 03m promedio por día.'); });
+
+/* toast */
+var toast = document.getElementById('toast');
+var toastTimer = null;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('is-visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toast.classList.remove('is-visible'); }, 2600);
+}
+
+/* nombre editable */
+document.getElementById('saveName').addEventListener('click', function () {
+  var val = document.getElementById('clusterName').value.trim() || 'Marczell Clips';
+  document.getElementById('crumbName').textContent = val;
+  showToast('Nombre del cluster guardado: "' + val + '"');
+});
+
+/* quitar cuenta / agregar cuenta */
+Array.prototype.forEach.call(document.querySelectorAll('[data-remove]'), function (btn) {
+  btn.addEventListener('click', function () {
+    var row = btn.closest('.ap-account-row');
+    row.style.transition = 'opacity .3s ease, transform .3s ease';
+    row.style.opacity = '0';
+    row.style.transform = 'translateX(12px)';
+    setTimeout(function () { row.remove(); showToast('Cuenta sacada del cluster. La rutina se replanifica al guardar.'); }, 300);
+  });
+});
+document.getElementById('addAccount').addEventListener('click', function () {
+  showToast('Abriría el picker de cuentas escaneadas en la flota (mockup).');
+});
+
+/* navegación entre clusters */
+var CLUSTER_NAMES = ['Marczell Clips', 'Nova Gaming', 'Cocina Sur', 'FitZone', 'Sugerido: UrbanStyle'];
+var clusterIdx = 0;
+function renderPos() {
+  document.getElementById('clusterPos').textContent = (clusterIdx + 1) + ' / ' + CLUSTER_NAMES.length;
+  document.getElementById('crumbName').textContent = CLUSTER_NAMES[clusterIdx];
+}
+document.getElementById('prevCluster').addEventListener('click', function () {
+  clusterIdx = (clusterIdx + CLUSTER_NAMES.length - 1) % CLUSTER_NAMES.length;
+  renderPos();
+  showToast('En la app real, el panel se actualizaría con los datos de "' + CLUSTER_NAMES[clusterIdx] + '".');
+});
+document.getElementById('nextCluster').addEventListener('click', function () {
+  clusterIdx = (clusterIdx + 1) % CLUSTER_NAMES.length;
+  renderPos();
+  showToast('En la app real, el panel se actualizaría con los datos de "' + CLUSTER_NAMES[clusterIdx] + '".');
+});
+
+/* botones genéricos de mockup */
+Array.prototype.forEach.call(document.querySelectorAll('[data-fake]'), function (btn) {
+  btn.addEventListener('click', function () { showToast('[' + btn.dataset.fake + '] Acción simulada en el mockup.'); });
+});
+</script>
+</body>
+</html>
