@@ -11,21 +11,23 @@
     "test:auth": "npm run build && node scripts/test-refresh-auth.mjs"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "better-sqlite3": "^11.7.0",
-    "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.7.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/express": "^5.0.0",
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/jsonwebtoken": "^9.0.7",
     "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.12",
     "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/multer": "^2.2.0",
     "@types/node": "^22.10.0",
-    "ts-node": "^10.9.2"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
   }
 }

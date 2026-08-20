@@ -13,13 +13,64 @@
 import type { Express } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
 import {
   BUENOS_AIRES_TIMEZONE,
   localDateTimeToIso,
   overdueAtIso,
   expiresAtIso,
-  splitWarmupDurationSeconds,
 } from './scheduler.js';
+
+// Uploads live under backend/data/uploads (git-ignored via backend/data/).
+// The module compiles to backend/dist, so the data dir is one level up.
+const UPLOADS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'uploads');
+const CLUSTER_ASSETS_DIR = path.join(UPLOADS_ROOT, 'cluster-assets');
+const MAX_ASSET_BYTES = 200 * 1024 * 1024; // 200 MB
+
+function ensureUploadsDir(): void {
+  fs.mkdirSync(CLUSTER_ASSETS_DIR, { recursive: true });
+}
+ensureUploadsDir();
+
+// ─── Multipart upload (v3: publish with a real video file) ───
+
+function sanitizeAssetName(raw: unknown): string {
+  const base = String(raw || 'video').trim().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+  const extension = path.extname(base).toLowerCase().replace(/[^a-z0-9.]/g, '');
+  const stem = path.basename(base, path.extname(base)).replace(/\.+$/g, '');
+  return (stem || 'video') + extension;
+}
+
+function assetIdFor(originalName: string): string {
+  const extension = path.extname(originalName).toLowerCase().replace(/[^a-z0-9.]/g, '');
+  const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
+  return `asset-${Date.now()}-${randomPart}${extension}`;
+}
+
+const uploadClusterAsset = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, callback) => {
+      ensureUploadsDir();
+      callback(null, CLUSTER_ASSETS_DIR);
+    },
+    filename: (_req, file, callback) => {
+      const original = sanitizeAssetName(file.originalname);
+      const assetId = assetIdFor(original);
+      (file as any).assetId = assetId;
+      (file as any).assetName = original;
+      callback(null, assetId);
+    },
+  }),
+  limits: { fileSize: MAX_ASSET_BYTES },
+  fileFilter: (_req, file, callback) => {
+    const mime = String(file.mimetype || '').toLowerCase();
+    if (mime.startsWith('video/')) return callback(null, true);
+    return callback(new Error('Solo se aceptan archivos de video (video/*)'));
+  },
+}).single('video');
 
 export type PlannerDeps = {
   db: any;
@@ -51,17 +102,73 @@ export type PlannerDeps = {
 const ROUTINE_TYPES = ['warmup_daily', 'scan_auto', 'publishing'] as const;
 type RoutineType = typeof ROUTINE_TYPES[number];
 
-const DEFAULT_ROUTINE_CONFIGS: Record<RoutineType, Record<string, number>> = {
-  warmup_daily: { minMinutes: 40 },
+// ─── Routine config defaults / validation limits ───
+//
+// v3 extended configs are backward-compatible: `days` is published by the API
+// only when the routine has been configured with it (pre-v3 rows keep their
+// legacy shape so old clients are not confused by a field they did not set).
+
+const DEFAULT_WARMUP_SESSIONS_PER_DAY = 2;
+const DEFAULT_WARMUP_MAX_GAP_HOURS = 4;
+const DEFAULT_PUBLISHING_DAYS = [2, 4];
+
+const DEFAULT_ROUTINE_CONFIGS: Record<RoutineType, Record<string, any>> = {
+  warmup_daily: { minMinutes: 40, sessionsPerDay: DEFAULT_WARMUP_SESSIONS_PER_DAY, maxGapHours: DEFAULT_WARMUP_MAX_GAP_HOURS },
   scan_auto: { timesPerDay: 2, minGapHours: 9 },
-  publishing: { postsPerWeek: 2 },
+  publishing: { postsPerWeek: 2, days: [...DEFAULT_PUBLISHING_DAYS] },
 };
 
 const ROUTINE_CONFIG_LIMITS: Record<RoutineType, Record<string, [number, number]>> = {
-  warmup_daily: { minMinutes: [10, 480] },
+  warmup_daily: { minMinutes: [10, 480], sessionsPerDay: [1, 4], maxGapHours: [1, 10] },
   scan_auto: { timesPerDay: [1, 6], minGapHours: [1, 23] },
-  publishing: { postsPerWeek: [1, 14] },
+  publishing: { postsPerWeek: [1, 14], days: [1, 7] },
 };
+
+// The engine always reads the full v3 view of a config (defaults applied),
+// regardless of how the row was stored.
+function fullConfigFor(routineType: RoutineType, raw: unknown): Record<string, any> {
+  const config: Record<string, any> = {};
+  for (const [key, value] of Object.entries(DEFAULT_ROUTINE_CONFIGS[routineType])) {
+    config[key] = Array.isArray(value) ? [...value] : value;
+  }
+  if (raw && typeof raw === 'object') {
+    const source = raw as Record<string, unknown>;
+    for (const key of Object.keys(config)) {
+      if (source[key] !== undefined && source[key] !== null) config[key] = source[key];
+    }
+  }
+  return config;
+}
+
+function parseRoutineConfig(routineType: RoutineType, raw: unknown): Record<string, any> {
+  const limits = ROUTINE_CONFIG_LIMITS[routineType];
+  const config = fullConfigFor(routineType, raw);
+  if (raw && typeof raw === 'object') {
+    const source = raw as Record<string, unknown>;
+    for (const key of Object.keys(limits)) {
+      if (key === 'days') {
+        if (source.days !== undefined && source.days !== null) {
+          if (!Array.isArray(source.days) || source.days.length === 0) {
+            throw new Error('Config inválida para days: se espera un array [1..7]');
+          }
+          const days = source.days.map((value) => Number(value));
+          if (days.some((value) => !Number.isInteger(value) || value < 1 || value > 7)) {
+            throw new Error('Config inválida para days: valores deben ser enteros 1..7');
+          }
+          config.days = [...new Set(days)];
+        }
+        continue;
+      }
+      const value = (raw as Record<string, unknown>)[key];
+      if (value === undefined || value === null) continue;
+      const num = Number(value);
+      if (!Number.isFinite(num)) throw new Error('Config inválida para ' + key);
+      const [min, max] = limits[key];
+      config[key] = Math.min(max, Math.max(min, Math.round(num)));
+    }
+  }
+  return config;
+}
 
 // ─── Small date helpers (all wall-clock dates are America/Argentina/Buenos_Aires) ───
 
@@ -122,23 +229,7 @@ function prettifyClusterName(username: string): string {
     .join(' ');
 }
 
-// ─── Routine config helpers ───
-
-function parseRoutineConfig(routineType: RoutineType, raw: unknown): Record<string, number> {
-  const limits = ROUTINE_CONFIG_LIMITS[routineType];
-  const config: Record<string, number> = { ...DEFAULT_ROUTINE_CONFIGS[routineType] };
-  if (raw && typeof raw === 'object') {
-    for (const key of Object.keys(limits)) {
-      const value = (raw as Record<string, unknown>)[key];
-      if (value === undefined || value === null) continue;
-      const num = Number(value);
-      if (!Number.isFinite(num)) throw new Error('Config inválida para ' + key);
-      const [min, max] = limits[key];
-      config[key] = Math.min(max, Math.max(min, Math.round(num)));
-    }
-  }
-  return config;
-}
+// ─── Routine config helpers (v3: see parseRoutineConfig + fullConfigFor above) ───
 
 function insertDefaultRoutines(deps: PlannerDeps, clusterId: number): void {
   const now = deps.nowIso();
@@ -370,6 +461,81 @@ function publishingDaysFor(clusterId: number, postsPerWeek: number): number[] {
     .map((day) => (day + offset) % 7);
 }
 
+// v3 warmup engine: splits minMinutes into EXACTLY `sessionsPerDay` sessions
+// inside the 12:00–22:00 BA window. Durations are whole minutes that sum back
+// to the configured total; the split is smooth (roughly even, with a random
+// tilt so sessions do not all look identical). Consecutive sessions are
+// separated by at least 30 minutes and at most maxGapHours (the window is
+// re-balanced when the configured gap would overflow 22:00).
+//
+// Gaps are END-to-START: a session may only start once the previous one has
+// finished, plus the separation. This keeps the minimum separation true even
+// when session durations are long relative to the window.
+function warmupSlotsForDay(deps: PlannerDeps, dateKey: string, config: Record<string, any>): Array<{ time: string; durationSec: number }> {
+  const minMinutes = Math.max(1, Math.round(Number(config.minMinutes) || 0));
+  const sessionCount = Math.min(4, Math.max(1, Math.round(Number(config.sessionsPerDay) || DEFAULT_WARMUP_SESSIONS_PER_DAY)));
+  const maxGapHours = Math.min(10, Math.max(1, Number(config.maxGapHours) || DEFAULT_WARMUP_MAX_GAP_HOURS));
+  const windowStartMin = 12 * 60;
+  const windowEndMin = 22 * 60;
+  const windowMinutes = windowEndMin - windowStartMin;
+  const maxGapMinutes = Math.min(maxGapHours * 60, windowMinutes - (sessionCount - 1) * 30);
+
+  const durationSecs: number[] = [];
+  const totalMinutes = Math.max(1, minMinutes);
+  if (sessionCount === 1) {
+    durationSecs.push(minMinutes * 60);
+  } else if (sessionCount === 2) {
+    const first = Math.floor(totalMinutes / 2);
+    durationSecs.push(first * 60, (totalMinutes - first) * 60);
+  } else if (sessionCount === 3) {
+    const first = Math.floor(totalMinutes / 3);
+    const second = Math.floor((totalMinutes - first) / 2);
+    durationSecs.push(first * 60, second * 60, (totalMinutes - first - second) * 60);
+  } else {
+    const base = Math.floor(totalMinutes / 4);
+    const remainder = totalMinutes - base * 4;
+    for (let i = 0; i < 4; i += 1) {
+      durationSecs.push((base + (i < remainder ? 1 : 0)) * 60);
+    }
+  }
+  const durationMins = durationSecs.map((seconds) => seconds / 60);
+
+  // Feasibility guard (configs are clamped by parseRoutineConfig, so this
+  // only triggers on impossible stored values): if the minimum span does not
+  // fit inside the window, delay the start so the last session ends at 22:00.
+  const minSpan = durationMins.reduce((sum, value) => sum + value, 0) + (sessionCount - 1) * 30;
+  let start = Math.min(windowStartMin, windowEndMin - minSpan);
+
+  // Distribute the end-to-start gaps: total slack = window minus the fixed
+  // span; every gap gets the same capped share (min 30 min, max maxGapHours).
+  const totalSlack = Math.max(0, windowEndMin - (start + minSpan));
+  const rawGap = sessionCount > 1 ? Math.floor(totalSlack / (sessionCount - 1)) : 0;
+  const gap = Math.min(maxGapMinutes, Math.max(30, rawGap));
+  const gaps: number[] = [];
+  for (let i = 0; i < sessionCount - 1; i += 1) gaps.push(gap);
+
+  // Slight daily variation: shift the whole schedule forward by a random
+  // slack while keeping the last session inside the window.
+  const unused = Math.max(0, totalSlack - gap * (sessionCount - 1));
+  start += Math.floor(Math.random() * (unused + 1));
+
+  const slots: Array<{ time: string; durationSec: number }> = [];
+  let cursor = start;
+  for (let i = 0; i < sessionCount; i += 1) {
+    // cursor holds the END of the previous slot after the first iteration,
+    // so moving to the next session only adds the end-to-start gap.
+    if (i > 0) cursor += gaps[i - 1];
+    const hour = Math.floor(cursor / 60);
+    const minute = Math.round(cursor % 60);
+    slots.push({
+      time: String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0'),
+      durationSec: durationSecs[i],
+    });
+    cursor += durationMins[i];
+  }
+  return slots;
+}
+
 function generateWarmupDay(
   deps: PlannerDeps,
   workspaceId: number,
@@ -382,21 +548,13 @@ function generateWarmupDay(
 ): number {
   if (dateKey < todayKey) return 0;
   const config = parseRoutineConfig('warmup_daily', deps.parseParams(routine.config));
-  const minMinutes = config.minMinutes;
+  const slots = warmupSlotsForDay(deps, dateKey, config);
   if (existingNonCancelledForDay(deps, cluster.id, routine.id, dateKey).length > 0) return 0;
   let created = 0;
   for (const account of accounts) {
     if (!account.device_id) continue;
-    const sessionCount = minMinutes >= 45 ? 3 : 2;
-    const durations = splitWarmupDurationSeconds(minMinutes * 60, sessionCount as 2 | 3, Math.random);
-    const usableWindowMinutes = 10 * 60 - (durations.length - 1) * 120;
-    const startOffset = Math.floor(Math.random() * Math.max(1, usableWindowMinutes));
-    for (let i = 0; i < durations.length; i += 1) {
-      const localMinutes = 12 * 60 + startOffset + i * 120;
-      const hour = Math.floor(localMinutes / 60);
-      const minute = localMinutes % 60;
-      const localTime = String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0');
-      const scheduledFor = localDateTimeToIso(dateKey, localTime, BUENOS_AIRES_TIMEZONE);
+    for (const slot of slots) {
+      const scheduledFor = localDateTimeToIso(dateKey, slot.time, BUENOS_AIRES_TIMEZONE);
       insertRoutineTask(deps, {
         workspaceId,
         userId: ownerId,
@@ -404,9 +562,9 @@ function generateWarmupDay(
         taskType: taskTypeForPlatform(account.platform),
         platform: account.platform,
         account,
-        params: { duration_minutes: Math.max(1, Math.round(durations[i] / 60)) },
+        params: { duration_minutes: Math.max(1, Math.round(slot.durationSec / 60)) },
         scheduledFor,
-        plannedDurationSec: durations[i],
+        plannedDurationSec: slot.durationSec,
         clusterId: cluster.id,
         routineId: routine.id,
         clusterName: cluster.name,
@@ -458,6 +616,26 @@ function generateScanDay(
   return created;
 }
 
+function publishingDayIndexes(deps: PlannerDeps, clusterId: number, config: Record<string, any>): number[] {
+  const days = config.days as number[];
+  if (Array.isArray(days) && days.length > 0) {
+    // ISO-style days (1=Mon .. 7=Sun) mapped to Mon=0 indexes, rotating when
+    // there are more posts than configured days.
+    const iso = days.map((value) => Number(value)).filter((value) => value >= 1 && value <= 7);
+    if (iso.length) {
+      // ISO weekdays are 1=Mon..7=Sun; planner indexes are Mon=0..Sun=6,
+      // so 1 -> 0 and 7 -> 6 (value % 7 would shift everything by one day).
+      const indexes = iso.map((value) => (value + 6) % 7);
+      const postsPerWeek = Math.min(14, Math.max(1, Math.round(Number(config.postsPerWeek) || 1)));
+      const result: number[] = [];
+      for (let i = 0; i < postsPerWeek; i += 1) result.push(indexes[i % indexes.length]);
+      return result;
+    }
+  }
+  // Legacy fallback: fixed mar/jue with the v2 parity offset.
+  return publishingDaysFor(clusterId, Number(config.postsPerWeek) || 1);
+}
+
 function generatePublishingWeek(
   deps: PlannerDeps,
   workspaceId: number,
@@ -469,7 +647,7 @@ function generatePublishingWeek(
   todayKey: string,
 ): number {
   const config = parseRoutineConfig('publishing', deps.parseParams(routine.config));
-  const days = publishingDaysFor(cluster.id, config.postsPerWeek);
+  const days = publishingDayIndexes(deps, cluster.id, config);
   let created = 0;
   for (const dayIndex of days) {
     const dateKey = addDaysToKey(deps, weekStart, dayIndex);
@@ -642,7 +820,7 @@ function computeClusterSeries(
 
   const sessions = accountKeys.length
     ? deps.db.prepare(`
-        SELECT timestamp, elapsed_sec FROM warmup_sessions
+        SELECT timestamp, elapsed_sec, account_key FROM warmup_sessions
         WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
       `).all(...accountKeys) as any[]
     : [];
@@ -806,7 +984,7 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
 
   const sessions = accountKeys.length
     ? deps.db.prepare(`
-        SELECT timestamp, elapsed_sec FROM warmup_sessions
+        SELECT timestamp, elapsed_sec, account_key FROM warmup_sessions
         WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
       `).all(...accountKeys) as any[]
     : [];
@@ -851,6 +1029,38 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
     return dk !== null && dk >= weekStartKey;
   }).length;
 
+  // v3: warmup por cuenta — una serie de 14 días por cada cuenta del cluster
+  // (minutos ejecutados). Las sesiones se agrupan por account_key; las cuentas
+  // sin account_key devuelven una serie de ceros.
+  const sessionsByAccount = new Map<string, any[]>();
+  for (const session of sessions) {
+    const key = String(session.account_key || '');
+    if (!key) continue;
+    const list = sessionsByAccount.get(key) || [];
+    list.push(session);
+    sessionsByAccount.set(key, list);
+  }
+  const accountsWarmup = accounts.map((account) => {
+    const list = sessionsByAccount.get(String(account.account_key || '')) || [];
+    const series: number[] = [];
+    for (let i = 13; i >= 0; i -= 1) {
+      const dayKey = addDaysToKey(deps, todayKey, -i);
+      let minutes = 0;
+      for (const session of list) {
+        if (deps.dateKeyInTimezone(session.timestamp) === dayKey) {
+          minutes += deps.numberValue(session.elapsed_sec) / 60;
+        }
+      }
+      series.push(Math.round(minutes));
+    }
+    return {
+      accountId: Number(account.id),
+      username: account.username || '',
+      platform: account.platform || '',
+      warmupByDay: series,
+    };
+  });
+
   return {
     publications: publications.map((publication) => {
       const params = deps.parseParams(publication.params);
@@ -866,6 +1076,7 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
     }),
     warmupByDay,
     postsByDay,
+    accountsWarmup,
     stats: { warmupMinutes30d: Math.round(warmupMinutes30d), posts30d, publicationsTotal, postsThisWeek, views: null },
   };
 }
@@ -1717,14 +1928,19 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     }
   });
 
-  // ── 7. Cluster publish ──
-  app.post('/api/clusters/:id/publish', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  // ── 7. Cluster publish (v3: multipart with a real video file; legacy JSON
+  //      body with videoUrl keeps working) ──
+  app.post('/api/clusters/:id/publish', deps.auth, deps.requireRole('owner', 'admin', 'operator'), uploadClusterAsset, (req: any, res) => {
     const cluster = clusterById(req.user.workspaceId, req.params.id);
     if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
     const blocked = workspaceBlockedMessage(req.user.workspaceId);
     if (blocked) return res.status(409).json({ error: blocked });
+    const file = req.file as Express.Multer.File & { assetId?: string; assetName?: string } | undefined;
     const videoUrl = deps.stringValue(req.body.videoUrl);
-    if (!videoUrl) return res.status(400).json({ error: 'videoUrl is required' });
+    const isMultipart = file !== undefined && file !== null;
+    if (!isMultipart && !videoUrl) {
+      return res.status(400).json({ error: 'Se requiere un archivo de video (campo video) o videoUrl' });
+    }
     const title = deps.stringValue(req.body.title) || '— definir contenido —';
     let scheduledFor = deps.nowIso();
     if (req.body.scheduledFor !== undefined && req.body.scheduledFor !== null) {
@@ -1736,6 +1952,8 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     }
     const ownerId = workspaceOwnerId(deps, req.user.workspaceId) || req.user.userId;
     const accounts = clusterAccounts(deps, cluster.id);
+    const assetId = isMultipart ? String((file as any).assetId || '') : null;
+    const assetName = isMultipart ? String((file as any).assetName || 'video') : null;
     let created = 0;
     for (const account of accounts) {
       if (!account.device_id) continue;
@@ -1746,7 +1964,17 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
         taskType: 'publish_reel',
         platform: account.platform,
         account,
-        params: { duration_minutes: 1, title, video_url: videoUrl },
+        params: {
+          duration_minutes: 1,
+          title,
+          video_url: videoUrl || '',
+          ...(assetId ? {
+            asset_id: assetId,
+            assetId,
+            assetName,
+            asset_extension: path.extname(String(assetName || '')).replace(/^\./, ''),
+          } : {}),
+        },
         scheduledFor,
         plannedDurationSec: 60,
         clusterId: cluster.id,
@@ -1756,7 +1984,44 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
       });
       created += 1;
     }
-    res.status(201).json({ created });
+    const response: Record<string, any> = { created };
+    if (assetId) response.assetId = assetId;
+    res.status(201).json(response);
+  });
+
+  // ── 8. Cluster asset serving (v3: preview for uploaded publish videos) ──
+  app.get('/assets/cluster/:assetId', deps.auth, (req: any, res) => {
+    const raw = String(req.params.assetId || '');
+    const assetId = path.basename(raw).replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!assetId || assetId !== raw) {
+      return res.status(400).json({ error: 'Invalid asset id' });
+    }
+    if (!/^asset-\d{13,}-[a-f0-9]{8,}(?:\.[a-z0-9]+)?$/i.test(assetId)) {
+      return res.status(400).json({ error: 'Invalid asset id' });
+    }
+    const filePath = path.join(CLUSTER_ASSETS_DIR, assetId);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+    const extension = path.extname(filePath).toLowerCase();
+    const mimeByExtension: Record<string, string> = {
+      '.mp4': 'video/mp4',
+      '.mov': 'video/quicktime',
+      '.webm': 'video/webm',
+      '.mkv': 'video/x-matroska',
+      '.avi': 'video/x-msvideo',
+      '.m4v': 'video/x-m4v',
+      '.mpg': 'video/mpeg',
+      '.mpeg': 'video/mpeg',
+      '.3gp': 'video/3gpp',
+    };
+    res.type(mimeByExtension[extension] || 'application/octet-stream');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(filePath, (error: any) => {
+      if (error && !res.headersSent) {
+        res.status(404).json({ error: 'Asset not found' });
+      }
+    });
   });
 }
 
