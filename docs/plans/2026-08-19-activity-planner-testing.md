@@ -1,7 +1,25 @@
 # Activity Planner — Guía de prueba local
 
-- **Fecha:** 2026-08-19 (noche) · **Ronda 2 de correcciones aplicada** (efectos premium + UX, ver abajo)
-- **Estado:** todo funcionando en local para test. NADA lanzado a producción.
+- **Fecha:** 2026-08-19/20 · **RONDA v3 ENTREGADA** (ver abajo) · v2 disponible en :3004 para comparar
+- **Estado:** v3 en http://localhost:3002 · v2 en http://localhost:3004 · backend demo :3101 · NADA en producción (:3001 intacto).
+- Commits: v2 = webapp `64fd2da` / main `d43f285` · v3 = webapp `f50b4e0` / main `20978b8`.
+
+## Ronda v3 — recuperación de las riquezas de los mockups (2026-08-20)
+
+**Rutinas (cards ricas, port del mockup):**
+- **Warmup diario**: minutos mínimos + **sesiones por día (1–4, chips: "bloque largo / natural / repartido / muy activo")** + **separación máxima entre sesiones (1–10 h)**. El motor reparte respetando gap mínimo 30 min y máximo el elegido (verificado: 45 min en 3 sesiones → gaps exactos de 3 h).
+- **Publicaciones**: posts/semana + **day-chips de días** (los posts caen en los días elegidos — bug de off-by-one corregido y verificado).
+- **Publicación de cluster**: **carga de ARCHIVO desde el dispositivo** (dropzone drag&drop o click, accept video/*, nombre + peso) — ya no pide URL. Guarda el asset y crea la tarea por cuenta.
+- Toggle Aprobado/Editando/Pausado intacto + cartel "Cambios aplicados".
+
+**Cluster detail:** sección **"Warmup por cuenta"** — un mini-chart ECG por cuenta con estado individual: verde activo / ámbar sin actividad 2 días / rojo sin actividad 5 días (verificado en vivo).
+
+**Vista día:** título único (antes duplicado), scroll arreglado, **línea AHORA** con hora en vivo (refresh 30 s, auto-scroll al entrar), drag & drop **individual por tarea** con confirmación.
+
+**Backend:** `accountsWarmup` por cuenta, motor con sesiones/gaps/días, upload multipart con assets servidos en `GET /assets/cluster/:id`, compatibilidad con configs/v2 viejas.
+
+**Fix extra:** semana y día ya no muestran tareas canceladas al renderizar.
+
 
 ## Ronda 2 — correcciones del dueño (2026-08-19, 2ª revisión)
 
