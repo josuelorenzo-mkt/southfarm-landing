@@ -13,6 +13,7 @@
 //   TEST_NODE     node binary for sql fixtures (default process.execPath)
 
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -364,37 +365,51 @@ async function main() {
     todayIndex >= 0 && Number(warmupSeries[todayIndex]) >= 25, `series=${JSON.stringify(warmupSeries)} todayIdx=${todayIndex}`);
 
   // ============ TEST 6 (FIX 8) — REAL PUBLISH + ASSET + PUBLICATIONS ============
-  const videoBytes = Buffer.alloc(100 * 1024, 7);
+  // Single queue (2026-08-21): the planner publish creates publication_jobs
+  // (executed by the PC publisher workers), not publish_reel task_runs. The
+  // uploaded video must be a real MP4 because the bridge inspects it with
+  // ffprobe before creating jobs.
+  const videoBytes = fs.readFileSync(path.join(BACKEND_ROOT, 'scripts', 'fixtures', 'test-reel.mp4'));
   const form = new FormData();
   form.append('video', new Blob([videoBytes], { type: 'video/mp4' }), 'test-reel.mp4');
   form.append('title', 'Reel de integración');
   const pub = await api(`/api/clusters/${clusterId}/publish`, { method: 'POST', token, form });
-  check('6a. publish multipart -> created 1 + assetId',
-    pub.status === 201 && pub.json.created === 1 && typeof pub.json.assetId === 'string',
+  check('6a. publish multipart -> created 1 job + assetId',
+    pub.status === 201 && pub.json.created === 1 && typeof pub.json.assetId === 'string'
+      && Array.isArray(pub.json.publicationIds) && pub.json.publicationIds.length === 1,
     `status=${pub.status} ${JSON.stringify(pub.json)}`);
   const assetId = pub.json.assetId;
   const assetRes = await fetch(BASE + `/assets/cluster/${assetId}`, { headers: { authorization: `Bearer ${token}` } });
   const assetBytes = Buffer.from(await assetRes.arrayBuffer());
   check('6b. GET /assets/cluster/:assetId returns video bytes',
     assetRes.status === 200 && assetBytes.length === videoBytes.length, `status=${assetRes.status} bytes=${assetBytes.length}`);
+  const jobRow = get(`SELECT * FROM publication_jobs WHERE id = ${pub.json.publicationIds[0]}`);
+  check('6a2. publication job queued in the single queue',
+    Boolean(jobRow) && jobRow.status === 'queued' && jobRow.cluster_id === clusterId
+      && jobRow.caption === 'Reel de integración' && Number(jobRow.device_id) === 24,
+    JSON.stringify(jobRow ? { id: jobRow.id, status: jobRow.status, cluster_id: jobRow.cluster_id } : null));
+  const noTaskRuns = get(`SELECT COUNT(*) AS c FROM task_runs WHERE task_type = 'publish_reel' AND cluster_id = ${clusterId}`).c;
+  check('6a3. no publish_reel task_runs created (single queue)',
+    Number(noTaskRuns) === 0, `task_runs=${noTaskRuns}`);
 
   const pubs = await api('/api/planner/publications', { token });
   const pubJob = (pubs.json.publications || []).find((p) => p.assetUrl === `/assets/cluster/${assetId}`);
-  check('6c. (FIX 8) GET /api/planner/publications lists the real publication with assetUrl',
+  check('6c. (FIX 8) GET /api/planner/publications lists the job with assetUrl',
     pubs.status === 200 && Boolean(pubJob)
-    && pubJob.clusterId === clusterId && pubJob.title === 'Reel de integración'
-    && pubJob.platform === 'instagram' && pubJob.account === account474.username,
+      && pubJob.clusterId === clusterId && pubJob.title === 'Reel de integración'
+      && pubJob.platform === 'instagram' && pubJob.account === account474.username
+      && pubJob.source === 'publication_jobs' && pubJob.job_status === 'queued',
     JSON.stringify(pubJob || pubs.json));
 
   const weekWithPublish = await api(`/api/planner/week?start=${currentMonday}`, { token });
   const clusterPub = weekWithPublish.json.clusters.find((c) => c.id === clusterId);
-  const realPublishTask = (clusterPub.tasks || []).find((t) => t.taskType === 'publish_reel' && t.params && t.params.assetId === assetId);
-  check('6d. week tasks[] includes the real publish_reel with assetId',
-    Boolean(realPublishTask) && realPublishTask.status === 'pending', JSON.stringify(realPublishTask));
+  const stalePublishTask = (clusterPub.tasks || []).find((t) => t.taskType === 'publish_reel' && t.params && t.params.assetId === assetId);
+  check('6d. week tasks[] carries no real publish task (jobs live in the publication queue)',
+    !stalePublishTask, JSON.stringify(stalePublishTask || null));
   const history = await api(`/api/clusters/${clusterId}`, { token });
   const historyPub = (history.json.history.publications || []).find((p) => p.assetUrl === `/assets/cluster/${assetId}`);
-  check('6e. cluster history lists the real publication with assetUrl',
-    Boolean(historyPub) && historyPub.status === 'pending', JSON.stringify(historyPub));
+  check('6e. cluster history lists the queued job with assetUrl',
+    Boolean(historyPub) && historyPub.status === 'queued' && historyPub.job_status === 'queued', JSON.stringify(historyPub));
 
   // ============ TEST 7 (FIX 4) — PUBLISH WITHOUT VIDEO ============
   const invalid = await api(`/api/clusters/${clusterId}/publish`, {
@@ -405,8 +420,9 @@ async function main() {
     invalid.status === 400, `status=${invalid.status} ${invalid.text}`);
   const invalid2 = await api(`/api/clusters/${clusterId}/publish`, { method: 'POST', token, body: {} });
   check('7b. (FIX 4) publish with no body -> 400', invalid2.status === 400, `status=${invalid2.status}`);
-  const invalidCount = get(`SELECT COUNT(*) AS c FROM task_runs WHERE task_type = 'publish_reel' AND status = 'pending' AND cluster_id = ${clusterId}`).c;
-  check('7c. (FIX 4) no extra task created by invalid publishes', Number(invalidCount) === 1, `pending=${invalidCount}`);
+  const invalidCount = get(`SELECT COUNT(*) AS c FROM task_runs WHERE task_type = 'publish_reel' AND cluster_id = ${clusterId}`).c;
+  check('7c. (FIX 4) no publish task created by invalid publishes (queue stays empty)',
+    Number(invalidCount) === 0, `task_runs=${invalidCount}`);
 
   // ============ TEST 5 — ROUTINES ============
   const warmupRoutineId = warmupRoutine.id;

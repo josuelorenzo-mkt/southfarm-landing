@@ -4423,6 +4423,7 @@ if (AUTO_PLANNER_ENABLED) {
 // ─── Activity Planner (clusters + routines + weekly generation) ───
 registerActivityPlanner(app, {
   db,
+  mediaRoot: PUBLICATION_MEDIA_ROOT,
   auth,
   requireRole,
   nowIso,
