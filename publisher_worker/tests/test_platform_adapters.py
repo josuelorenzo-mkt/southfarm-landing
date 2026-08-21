@@ -140,7 +140,11 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 1, "Only the required Profile navigation may occur before account rejection")
         self.assertEqual(device.typed, [])
 
-    def test_instagram_duplicate_selected_switcher_item_is_account_mismatch_without_switching(self):
+    def test_instagram_duplicate_switcher_rows_fail_closed_after_switch_attempts(self):
+        # Owner decision 2026-08-21: prepare() now ATTEMPTS the account switch
+        # (header tap + first matching switcher row). With duplicate rows and
+        # no post-switch profile revision available, the run still ends in a
+        # fail-closed ACCOUNT_MISMATCH — but only after the attempts.
         device = Device("com.instagram.android", [
             [node(**{"content-desc": "Profile"})],
             [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
@@ -151,7 +155,7 @@ class PlatformAdapterTests(unittest.TestCase):
             InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
 
         self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
-        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(len(device.taps), 3, "Profile tab + username header + switcher row")
         self.assertEqual(device.typed, [])
 
     def test_tiktok_missing_selected_switcher_item_is_account_unavailable_without_typing(self):
@@ -181,7 +185,9 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
 
-        self.assertEqual(raised.exception.code, "ACCOUNT_UNAVAILABLE")
+        # Without the username header there is no entry point for the account
+        # switcher, so the run still fails closed (and never types).
+        self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
         self.assertEqual(len(device.taps), 1)
         self.assertEqual(device.typed, [])
 
@@ -195,7 +201,9 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(len(device.taps), 1)
         self.assertEqual(device.typed, [])
 
-    def test_instagram_duplicate_switch_controls_are_untouched_on_account_mismatch(self):
+    def test_instagram_duplicate_switch_headers_fail_closed_after_switch_attempts(self):
+        # Duplicate username headers: the switch attempt taps the first one;
+        # with no account row available the run ends fail-closed.
         device = Device("com.instagram.android", [
             [node(**{"content-desc": "Profile"})],
             [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container", "bounds": "[10,90][110,150]"})],
@@ -205,7 +213,7 @@ class PlatformAdapterTests(unittest.TestCase):
             InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
 
         self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
-        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(len(device.taps), 2)
 
     def test_instagram_prepare_captures_post_count_baseline_without_gallery_visit(self):
         profile = [node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"content-desc": "Create New"}), node(**{"resource-id": "com.instagram.android:id/profile_header_post_count_front_familiar", "content-desc": "8posts"}), node(**{"content-desc": "Reel by Expected at row 1, column 1"})]
@@ -409,8 +417,34 @@ class PlatformAdapterTests(unittest.TestCase):
         with self.assertRaises(PublisherError) as raised:
             InstagramPublisher(expected_account="expected.account").prepare(job("instagram"), device)
 
+        # The switcher only offers expected.account.backup: the exact-username
+        # row match never fires and the run fails closed before media work.
         self.assertEqual(raised.exception.code, "ACCOUNT_MISMATCH")
-        self.assertEqual(len(device.taps), 1)
+        self.assertEqual(len(device.taps), 2)
+        self.assertEqual(device.typed, [])
+
+    def test_instagram_switches_to_expected_account_before_baseline(self):
+        profile_after_switch = [
+            node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}),
+            node(**{"content-desc": "Create New"}),
+            node(**{"resource-id": "com.instagram.android:id/profile_header_post_count_front_familiar", "content-desc": "8posts"}),
+            node(**{"content-desc": "Reel by Expected at row 1, column 1"}),
+        ]
+        device = Device("com.instagram.android", [
+            [node(**{"content-desc": "Profile"})],
+            [node(text="wrong.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}), node(**{"resource-id": "com.instagram.android:id/action_bar_username_container"})],
+            [node(text="expected.account")],
+            profile_after_switch,
+        ])
+
+        publisher = InstagramPublisher(expected_account="expected.account")
+        publisher.prepare(job("instagram"), device)
+
+        # The switch happened (header + row taps after the Profile tab) and
+        # preparation continued on the switched account's baseline.
+        self.assertEqual(len(device.taps), 3)
+        self.assertEqual(device.typed, [])
+        self.assertEqual(publisher._baseline_posts, 8)
 
     def test_forbidden_santilorennzo_is_blocked_before_account_switch(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="Profile")]])

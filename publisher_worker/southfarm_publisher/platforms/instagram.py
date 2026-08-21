@@ -28,6 +28,7 @@ class InstagramPublisher(GuardedPublisher):
     package = _PACKAGE
 
     _TITLE = "com.instagram.android:id/action_bar_title"
+    _USERNAME_HEADER = "com.instagram.android:id/action_bar_username_container"
     _GALLERY_TITLE = "com.instagram.android:id/gallery_title_text"
     _THUMBNAIL = "com.instagram.android:id/gallery_grid_item_thumbnail"
     _LABEL = "com.instagram.android:id/gallery_grid_item_label"
@@ -176,6 +177,53 @@ class InstagramPublisher(GuardedPublisher):
                 return self._last_nodes
         raise PublisherError("PROFILE_ACCOUNT", "Instagram own profile could not be reached", retryable=True)
 
+    def _account_row(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        """The switcher row for the expected account (exact username; "Add
+        Instagram account" and other rows must never match)."""
+        return next((node for node in nodes if (node.get("text", "").strip() == self.expected_account or node.get("content-desc", "").strip() == self.expected_account)), None)
+
+    def _switch_to_expected_account(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Switch the active Instagram account to the publication account via
+        the profile account switcher — the same flow the app's warmup uses
+        (ensureCorrectAccount): tap the profile username header, pick the
+        expected account in the switcher, then verify by re-reading the header.
+        One full retry covers a slow switcher render. Fail-closed is kept: if
+        the header or the target account never appear, the run aborts with
+        ACCOUNT_MISMATCH instead of posting into the wrong account."""
+        for _ in range(2):
+            header = next((node for node in nodes if node.get("resource-id") == self._USERNAME_HEADER), None)
+            if header is None:
+                break
+            self._tap(device, header)
+            try:
+                row = self.wait_for(device, error="ACCOUNT_SWITCHER", predicate=self._account_row)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+                break
+            self._tap(device, row)
+            try:
+                if self.wait_for(device, error="ACCOUNT_SWITCH", predicate=self._on_our_profile) is not None:
+                    return self._last_nodes if self._on_our_profile(self._last_nodes) else self._nodes(device)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+            # Back to our own profile surface before retrying the switcher.
+            try:
+                nodes = self._return_to_profile(device)
+            except PublisherError as profile_error:
+                if profile_error.code not in ("PROFILE_ACCOUNT", "UI_TIMEOUT"):
+                    raise
+                break
+        raise PublisherError("ACCOUNT_MISMATCH", "Instagram active account could not be switched to the publication account")
+
+    def _prepare_active_account(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Guarantee the active profile matches the publication account,
+        switching accounts when needed (owner decision 2026-08-21)."""
+        if self._on_our_profile(nodes):
+            return nodes
+        return self._switch_to_expected_account(device, nodes)
+
     def _post_counts(self, nodes: list[dict[str, str]]) -> set[int]:
         values: set[int] = set()
         for node in nodes:
@@ -192,9 +240,12 @@ class InstagramPublisher(GuardedPublisher):
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
+        # Owner decision 2026-08-21: switch accounts like the app's warmup
+        # (ensureCorrectAccount) instead of failing closed when another
+        # account is active on the phone.
+        nodes = self._prepare_active_account(device, nodes)
         title = self.account_control(nodes, resource_id=self._TITLE, error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
-            # Account switching is deliberately not automated: fail closed instead.
             raise PublisherError("ACCOUNT_MISMATCH", "Instagram active profile account does not match the publication account")
         counts = self._post_counts(nodes)
         if len(counts) != 1:
@@ -528,6 +579,7 @@ class InstagramPublisher(GuardedPublisher):
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup identity must be a new verified item")
         posts = self._cleanup_count(baseline)
         nodes = self._return_to_profile(device)
+        nodes = self._prepare_active_account(device, nodes)
         title = self.account_control(nodes, resource_id=self._TITLE, error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
             raise PublisherError("ACCOUNT_MISMATCH", "Instagram active profile account does not match the cleanup account")
