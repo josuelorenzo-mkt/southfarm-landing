@@ -34,6 +34,14 @@ SEED_DB="$DATA/southfarm-planner-seedtest.db"
 LOGS="$ROOT/run"
 mkdir -p "$LOGS"
 
+# The merged server also boots the publications subsystem (registerPublicationRoutes),
+# whose recovery sweep scans SOUTHFARM_PUBLICATION_MEDIA_ROOT at startup. Keep the
+# suite isolated from the production media root (C:\ProgramData\SouthFarm\publish-media)
+# by pointing it at a local throwaway directory under run/ (gitignored).
+TEST_MEDIA_ROOT="$LOGS/test-publish-media"
+mkdir -p "$TEST_MEDIA_ROOT"
+export SOUTHFARM_PUBLICATION_MEDIA_ROOT="$TEST_MEDIA_ROOT"
+
 SERVER_PID=""
 server_start() { # $1=db path — extra env vars must be EXPORTED by the caller
   local db="$1"
