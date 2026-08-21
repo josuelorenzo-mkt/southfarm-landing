@@ -121,6 +121,11 @@
   heartbeat. `adb reverse tcp:3102 tcp:3102` ya configurado en ese teléfono.
 - Celulares: .22 y .31 libres (sin emparejar); .21/.27/.32/.36 YA polean producción (no tocar).
 
-**Para Fase 2**: relevar el creator de IG en el piloto con `DUMP_UI` ANTES de escribir
-selectores; el APK debug del piloto ya descarga y guarda el video — el flujo IG se inserta
-entre la descarga y el PATCH final. Presupuestar iteración (ids de IG rotan).
+**Para Fase 2**: el sistema semiorganic (publisher_worker Python + publication_jobs) ya
+ejecuta publicaciones reales en IG/TT/YT — la etapa se resolvió CONECTANDO el planner a esa
+cola única (commit d38da51), no automatizando IG dentro de la app Android. El primer intento
+E2E falló solo porque la cuenta piloto no tenía reels para el baseline de verificación; el
+dueño subió el primer reel manualmente y se reintenta. NOTA de método: un intento manual por
+adb abrió la promo de Edits por taps sobre bounds no refrescados del dump (error del
+operador, NO un cambio de flujo de IG) — verificado por el dueño: el flujo de IG sigue igual
+y el adaptador del worker no requiere cambios.
