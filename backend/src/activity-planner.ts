@@ -246,7 +246,8 @@ function insertDefaultRoutines(deps: PlannerDeps, clusterId: number): void {
 
 function clusterAccounts(deps: PlannerDeps, clusterId: number): any[] {
   const rows = deps.db.prepare(`
-    SELECT sa.*, d.device_id AS device_key, d.device_name, d.device_alias
+    SELECT sa.*, d.device_id AS device_key, d.device_name, d.device_alias,
+           d.lifecycle_status AS device_lifecycle_status, d.revoked_at AS device_revoked_at
     FROM account_cluster_members m
     JOIN social_accounts sa ON sa.id = m.social_account_id
     LEFT JOIN devices d ON d.id = sa.device_id
@@ -266,6 +267,16 @@ function clusterAccounts(deps: PlannerDeps, clusterId: number): any[] {
     }
     return { ...row, account_key: accountKey };
   });
+}
+
+// FIX 7 [CRÍTICO] — A revoked device cannot authenticate (device_token auth
+// requires lifecycle_status='active'), so tasks assigned to it could never
+// execute. Account → device resolution only plans for ACTIVE devices; the
+// account stays visible in the cluster (accounts[]), it just stops receiving
+// generated tasks. A missing/unknown device also blocks planning.
+function accountHasActiveDevice(account: any): boolean {
+  if (!account?.device_id) return false;
+  return String(account.device_lifecycle_status || 'active').toLowerCase() === 'active';
 }
 
 function policyStatusFor(deps: PlannerDeps, accountKey: string | null): string {
@@ -365,6 +376,13 @@ function insertRoutineTask(
   return task;
 }
 
+// FIX 3 [ALTO] — "Viable" tasks that should block regeneration of a day:
+// anything still actionable ('pending', 'overdue', 'running', 'paused') or
+// already finished with a real outcome ('completed', 'cancelled'). 'expired'
+// and 'error' do NOT block: an expired/errored day would otherwise be frozen
+// forever. The goal was only pending/overdue + the natural completion states.
+// Idempotency keeps working because a second generate sees the live tasks
+// (pending/overdue/running/paused) and returns created:0.
 function existingNonCancelledForDay(
   deps: PlannerDeps,
   clusterId: number,
@@ -373,11 +391,20 @@ function existingNonCancelledForDay(
 ): any[] {
   const rows = deps.db.prepare(`
     SELECT * FROM task_runs
-    WHERE cluster_id = ? AND routine_id = ? AND status != 'cancelled'
+    WHERE cluster_id = ? AND routine_id = ?
+      AND status NOT IN ('cancelled', 'expired', 'error')
   `).all(clusterId, routineId) as any[];
   return rows.filter((row) => deps.dateKeyInTimezone(row.scheduled_for || row.created_at) === dateKey);
 }
 
+// FIX 6 [MEDIO] — Overdue tasks belong to a past slot; keep them claimable
+// (claim still works for overdue) but they must not block regeneration of the
+// same day, so generate cancels and re-creates them (see generateWarmupDay /
+// generateScanDay: `existingNonCancelledForDay` no longer treats overdue as
+// blocking — it was already regenerating for 'overdue' since v3? No: it only
+// ever excluded 'cancelled'. FIX 3 widened it to exclude 'expired'/'error',
+// and the per-day check below treats 'overdue' as non-blocking by cancelling
+// the stale rows first).
 function cancelRoutineFutureTasks(
   deps: PlannerDeps,
   clusterId: number,
@@ -436,6 +463,41 @@ function cancelClusterFutureTasks(
     if (update.changes !== 1) continue;
     const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
     deps.recordTaskEvent(updated, 'auto_cancelled_cluster', { cluster_id: clusterId, reason });
+    cancelled += 1;
+  }
+  return cancelled;
+}
+
+// FIX 7 [CRÍTICO] — Self-healing cleanup: every generate run cancels
+// pending/overdue automatic tasks whose device has been revoked. Those tasks
+// could never authenticate/run (device token auth requires an active device),
+// so keeping them only poisons the queue. Historical rows cancel once, and
+// the day is regenerated for accounts on active devices only.
+function cancelRevokedDeviceTasks(deps: PlannerDeps): number {
+  const rows = deps.db.prepare(`
+    SELECT tr.* FROM task_runs tr
+    JOIN devices d ON d.id = tr.device_id
+    WHERE tr.source = 'automatic'
+      AND tr.status IN ('pending', 'overdue')
+      AND tr.started_at IS NULL
+      AND (d.lifecycle_status != 'active' OR d.revoked_at IS NOT NULL)
+  `).all() as any[];
+  let cancelled = 0;
+  for (const row of rows) {
+    const now = deps.nowIso();
+    const update = deps.db.prepare(`
+      UPDATE task_runs
+      SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+          lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'overdue') AND started_at IS NULL
+    `).run(now, 'device_revoked', now, row.id);
+    if (update.changes !== 1) continue;
+    const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+    deps.recordTaskEvent(updated, 'auto_cancelled_device_revoked', {
+      cluster_id: row.cluster_id,
+      routine_id: row.routine_id,
+      device_id: row.device_id,
+    });
     cancelled += 1;
   }
   return cancelled;
@@ -552,7 +614,8 @@ function generateWarmupDay(
   if (existingNonCancelledForDay(deps, cluster.id, routine.id, dateKey).length > 0) return 0;
   let created = 0;
   for (const account of accounts) {
-    if (!account.device_id) continue;
+    // FIX 7 — never plan for revoked/missing devices.
+    if (!accountHasActiveDevice(account)) continue;
     for (const slot of slots) {
       const scheduledFor = localDateTimeToIso(dateKey, slot.time, BUENOS_AIRES_TIMEZONE);
       insertRoutineTask(deps, {
@@ -592,7 +655,8 @@ function generateScanDay(
   const hours = scanHoursForTimes(config.timesPerDay);
   let created = 0;
   for (const account of accounts) {
-    if (!account.device_id) continue;
+    // FIX 7 — never plan for revoked/missing devices.
+    if (!accountHasActiveDevice(account)) continue;
     for (const time of hours) {
       const scheduledFor = localDateTimeToIso(dateKey, time, BUENOS_AIRES_TIMEZONE);
       insertRoutineTask(deps, {
@@ -636,6 +700,36 @@ function publishingDayIndexes(deps: PlannerDeps, clusterId: number, config: Reco
   return publishingDaysFor(clusterId, Number(config.postsPerWeek) || 1);
 }
 
+// FIX 2 [CRÍTICO] — Publishing is now a PLAN, not materialized placeholder
+// tasks. generatePublishingWeek no longer inserts task_runs: the weekly plan
+// is derived from the publishing routine (postsPerWeek × days, distributed
+// across the cluster's accounts) and rendered by the week view, while REAL
+// tasks are only created when the owner uploads a video via
+// POST /api/clusters/:id/publish. This removes the "— definir contenido —"
+// placeholder rows that the Android app would claim → discard → re-claim
+// forever (publish_reel is not in the 6 task types the app executes).
+function publishingPlanForWeek(
+  deps: PlannerDeps,
+  clusterId: number,
+  routine: any,
+  accounts: any[],
+  weekStart: string,
+  todayKey: string,
+): Array<{ dateKey: string; account: any }> {
+  const config = parseRoutineConfig('publishing', deps.parseParams(routine.config));
+  const days = publishingDayIndexes(deps, clusterId, config);
+  const plan: Array<{ dateKey: string; account: any }> = [];
+  for (const dayIndex of days) {
+    const dateKey = addDaysToKey(deps, weekStart, dayIndex);
+    if (dateKey < todayKey) continue;
+    for (const account of accounts) {
+      if (!accountHasActiveDevice(account)) continue;
+      plan.push({ dateKey, account });
+    }
+  }
+  return plan;
+}
+
 function generatePublishingWeek(
   deps: PlannerDeps,
   workspaceId: number,
@@ -646,35 +740,10 @@ function generatePublishingWeek(
   weekStart: string,
   todayKey: string,
 ): number {
-  const config = parseRoutineConfig('publishing', deps.parseParams(routine.config));
-  const days = publishingDayIndexes(deps, cluster.id, config);
-  let created = 0;
-  for (const dayIndex of days) {
-    const dateKey = addDaysToKey(deps, weekStart, dayIndex);
-    if (dateKey < todayKey) continue;
-    if (existingNonCancelledForDay(deps, cluster.id, routine.id, dateKey).length > 0) continue;
-    for (const account of accounts) {
-      if (!account.device_id) continue;
-      const scheduledFor = localDateTimeToIso(dateKey, '16:00', BUENOS_AIRES_TIMEZONE);
-      insertRoutineTask(deps, {
-        workspaceId,
-        userId: ownerId,
-        deviceId: account.device_id,
-        taskType: 'publish_reel',
-        platform: account.platform,
-        account,
-        params: { duration_minutes: 1, title: '— definir contenido —', video_url: '' },
-        scheduledFor,
-        plannedDurationSec: 60,
-        clusterId: cluster.id,
-        routineId: routine.id,
-        clusterName: cluster.name,
-        priority: 200,
-      });
-      created += 1;
-    }
-  }
-  return created;
+  // FIX 2: nothing is inserted anymore — the plan is computed on read.
+  // Keep the signature so callers (and the created count) stay compatible.
+  publishingPlanForWeek(deps, cluster.id, routine, accounts, weekStart, todayKey);
+  return 0;
 }
 
 function generateClusterWeek(
@@ -691,6 +760,41 @@ function generateClusterWeek(
     'SELECT * FROM cluster_routines WHERE cluster_id = ?',
   ).all(cluster.id) as any[];
   let created = 0;
+
+  // FIX 6 [MEDIO] — Overdue tasks of approved routines are re-planed: cancel
+  // them (they belong to a past slot; the claim protocol can still pick them,
+  // but a generate run replaces them with a fresh slot for the current day)
+  // so the day is not frozen by a stale overdue row. Only 'overdue' rows are
+  // touched — pending/running/paused stay untouched (idempotency preserved).
+  const weekEnd = addDaysToKey(deps, weekStart, 6);
+  for (const routine of routines) {
+    if (routine.status !== 'approved') continue;
+    const overdueRows = deps.db.prepare(`
+      SELECT * FROM task_runs
+      WHERE cluster_id = ? AND routine_id = ?
+        AND source = 'automatic' AND status = 'overdue' AND started_at IS NULL
+        AND scheduled_for IS NOT NULL
+    `).all(cluster.id, routine.id) as any[];
+    for (const row of overdueRows) {
+      const rowKey = deps.dateKeyInTimezone(row.scheduled_for);
+      if (!rowKey || rowKey < weekStart || rowKey > weekEnd) continue;
+      const now = deps.nowIso();
+      const update = deps.db.prepare(`
+        UPDATE task_runs
+        SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+            lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+        WHERE id = ? AND status = 'overdue' AND started_at IS NULL
+      `).run(now, 'routine_overdue_replanned', now, row.id);
+      if (update.changes !== 1) continue;
+      const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+      deps.recordTaskEvent(updated, 'auto_cancelled_routine', {
+        cluster_id: cluster.id,
+        routine_id: routine.id,
+        reason: 'routine_overdue_replanned',
+      });
+    }
+  }
+
   for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
     const dateKey = addDaysToKey(deps, weekStart, dayIndex);
     if (dateKey < todayKey) continue;
@@ -728,6 +832,9 @@ function generatePlannerWeek(
   `).all(workspaceId) as any[];
   let created = 0;
   let cancelled = 0;
+  // FIX 7: cancel orphaned automatic tasks pointing at revoked devices
+  // (they can never authenticate). This self-heals staging/production data.
+  cancelled += cancelRevokedDeviceTasks(deps);
   for (const cluster of clusters) {
     const routines = deps.db.prepare(
       'SELECT * FROM cluster_routines WHERE cluster_id = ?',
@@ -753,6 +860,14 @@ function generateForCurrentAndNext(deps: PlannerDeps, workspaceId: number): { cr
 
 // ─── Views (week item, list item, history) ───
 
+// FIX 2 — A publish_reel task is "real" when it carries a video asset or a
+// video_url; historical placeholders (empty video_url, '— definir contenido —')
+// are filtered out of the week view so the webapp never renders phantom
+// posts. They remain in task_runs for history purposes.
+function publishTaskHasAsset(params: Record<string, any>): boolean {
+  return Boolean(params.asset_id || params.assetId || params.video_url);
+}
+
 function weekTasks(
   deps: PlannerDeps,
   workspaceId: number,
@@ -770,7 +885,11 @@ function weekTasks(
   `).all(workspaceId, clusterId) as any[];
   return rows.filter((row) => {
     const dk = deps.dateKeyInTimezone(row.scheduled_for);
-    return dk !== null && dk >= weekStart && dk <= weekEnd;
+    if (dk === null || dk < weekStart || dk > weekEnd) return false;
+    if (row.task_type === 'publish_reel' && !publishTaskHasAsset(deps.parseParams(row.params))) {
+      return false;
+    }
+    return true;
   });
 }
 
@@ -793,6 +912,9 @@ function plannerTaskView(deps: PlannerDeps, task: any, clusterNameOverride?: str
     platform: task.platform || params.platform || '',
     deviceAlias: task.device_alias || null,
     source: task.source || 'manual',
+    // FIX 2 — additive: expose the raw params so the webapp can render the
+    // video asset (video_url / assetId) for real publications.
+    params,
   };
 }
 
@@ -830,14 +952,19 @@ function computeClusterSeries(
   }
 
   const completed = deps.db.prepare(`
-    SELECT task_type, completed_at, scheduled_for FROM task_runs
+    SELECT task_type, completed_at, scheduled_for, params FROM task_runs
     WHERE workspace_id = ? AND cluster_id = ? AND status = 'completed'
   `).all(workspaceId, cluster.id) as any[];
   for (const row of completed) {
     const idx = dayIndexOf(deps, weekStart, deps.dateKeyInTimezone(row.completed_at || row.scheduled_for));
     if (idx < 0) continue;
-    if (row.task_type === 'publish_reel') postsExecuted[idx] += 1;
-    else if (String(row.task_type).startsWith('scan_')) scansExecuted[idx] += 1;
+    if (row.task_type === 'publish_reel') {
+      // FIX 2 — only REAL publications (with video content) count as executed
+      if (!publishTaskHasAsset(deps.parseParams(row.params))) continue;
+      postsExecuted[idx] += 1;
+    } else if (String(row.task_type).startsWith('scan_')) {
+      scansExecuted[idx] += 1;
+    }
   }
 
   for (const task of tasks) {
@@ -846,8 +973,24 @@ function computeClusterSeries(
     if (['completed', 'cancelled', 'expired', 'error'].includes(task.status)) continue;
     if (String(task.task_type).startsWith('warmup_')) {
       warmupPlanned[idx] += deps.numberValue(task.planned_duration_sec) / 60;
-    } else if (task.task_type === 'publish_reel') {
+    } else if (task.task_type === 'publish_reel' && publishTaskHasAsset(deps.parseParams(task.params))) {
       postsPlanned[idx] += 1;
+    }
+  }
+
+  // FIX 2 — posts series = executed real posts (with asset) + the publishing
+  // plan derived from the routine. The plan is only counted for accounts that
+  // can actually execute (active device); the routine counts one post per
+  // account per configured day, so postsPerWeek × accounts is the weekly total.
+  const publishingRoutine = routines.find((routine) => routine.routineType === 'publishing');
+  const publishAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+  if (publishingRoutine && publishingRoutine.status === 'approved') {
+    const config = parseRoutineConfig('publishing', publishingRoutine.config);
+    const dayIndexes = publishingDayIndexes(deps, cluster.id, config);
+    for (const dayIndex of dayIndexes) {
+      const dateKey = addDaysToKey(deps, weekStart, dayIndex);
+      if (dateKey < todayKey) continue;
+      postsPlanned[dayIndex] += publishAccounts.length;
     }
   }
 
@@ -871,23 +1014,27 @@ function computeClusterSeries(
     for (let i = 0; i < todayIdx; i += 1) {
       if (approvedWarmup) {
         const config = parseRoutineConfig('warmup_daily', approvedWarmup.config);
-        if (warmupExecuted[i] < config.minMinutes * accounts.length) {
+        const warmupAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+        if (warmupAccounts.length && warmupExecuted[i] < config.minMinutes * warmupAccounts.length) {
           health = 'deficit';
           break;
         }
       }
       if (approvedScan) {
         const config = parseRoutineConfig('scan_auto', approvedScan.config);
-        if (scansExecuted[i] < config.timesPerDay * accounts.length) {
+        const scanAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+        if (scanAccounts.length && scansExecuted[i] < config.timesPerDay * scanAccounts.length) {
           health = 'deficit';
           break;
         }
       }
       if (approvedPublish) {
         const config = parseRoutineConfig('publishing', approvedPublish.config);
+        const publishAccounts = accounts.filter((account) => accountHasActiveDevice(account));
         if (
-          publishingDaysFor(cluster.id, config.postsPerWeek).includes(i)
-          && postsExecuted[i] < accounts.length
+          publishAccounts.length
+          && publishingDaysFor(cluster.id, config.postsPerWeek).includes(i)
+          && postsExecuted[i] < publishAccounts.length
         ) {
           health = 'deficit';
           break;
@@ -932,6 +1079,10 @@ function buildWeekClusterItem(
       username: account.username,
       deviceAlias: account.device_alias || null,
       policyStatus: account.policy_status,
+      // FIX 7 — additive: tells the webapp whether this account can actually
+      // receive tasks (its device is active). Used by computeSummary to count
+      // only planifiable accounts in the weekly publication total.
+      deviceActive: accountHasActiveDevice(account),
     })),
     routines,
     metricSeries: {
@@ -943,7 +1094,7 @@ function buildWeekClusterItem(
   };
 }
 
-function computeSummary(deps: PlannerDeps, items: any[]): any {
+function computeSummary(deps: PlannerDeps, items: any[], weekStart?: string): any {
   let tasksTotal = 0;
   let tasksRunning = 0;
   let tasksQueued = 0;
@@ -954,13 +1105,33 @@ function computeSummary(deps: PlannerDeps, items: any[]): any {
       tasksTotal += 1;
       if (task.status === 'running') tasksRunning += 1;
       if (task.status === 'pending' || task.status === 'overdue') tasksQueued += 1;
-      if (task.taskType === 'publish_reel') publishTotal += 1;
+      if (task.taskType === 'publish_reel' && publishTaskHasAsset(deps.parseParams(task.params ?? {}))) {
+        publishTotal += 1;
+      }
       if (
         String(task.taskType).startsWith('warmup_')
         && ['pending', 'overdue', 'running', 'paused'].includes(task.status)
       ) {
         warmupMinutesPlanned += deps.numberValue(task.durationMin);
       }
+    }
+    // FIX 2 — the publishing PLAN (routine) also counts toward the weekly
+    // summary, so "Publicaciones esta semana" stays coherent when tasks are
+    // not materialized. Real tasks were already counted above.
+    const publishingRoutine = (item.routines || []).find(
+      (routine: any) => routine.routineType === 'publishing' && routine.status === 'approved',
+    );
+    if (publishingRoutine) {
+      const planConfig = parseRoutineConfig('publishing', publishingRoutine.config);
+      // FIX 7 — count only accounts with an active device (account view carries
+      // `deviceActive` since the slim view has no device info).
+      const publishAccounts = (item.accounts || []).filter((account: any) => account.deviceActive === true);
+      const weekStartKey = weekStart || mondayOfWeek(deps, todayKeyBA(deps));
+      const today = todayKeyBA(deps);
+      const planDays = publishingDayIndexes(deps, Number(item.id), planConfig)
+        .map((dayIndex: number) => addDaysToKey(deps, weekStartKey, dayIndex))
+        .filter((dateKey: string) => dateKey >= today);
+      publishTotal += planDays.length * publishAccounts.length;
     }
   }
   return { tasksTotal, tasksRunning, tasksQueued, publishTotal, warmupMinutesPlanned };
@@ -988,10 +1159,15 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
         WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
       `).all(...accountKeys) as any[]
     : [];
+  // FIX 2 — history stats count REAL publications only (with video content);
+  // legacy placeholder rows (empty video_url) are excluded.
   const completedPosts = deps.db.prepare(`
-    SELECT completed_at, scheduled_for FROM task_runs
+    SELECT completed_at, scheduled_for, params FROM task_runs
     WHERE workspace_id = ? AND cluster_id = ? AND task_type = 'publish_reel' AND status = 'completed'
   `).all(workspaceId, cluster.id) as any[];
+  const realCompletedPosts = completedPosts.filter((post) =>
+    publishTaskHasAsset(deps.parseParams(post.params)),
+  );
 
   const warmupByDay: number[] = [];
   const postsByDay: number[] = [];
@@ -1004,7 +1180,7 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
       }
     }
     let posts = 0;
-    for (const post of completedPosts) {
+    for (const post of realCompletedPosts) {
       if (deps.dateKeyInTimezone(post.completed_at || post.scheduled_for) === dayKey) posts += 1;
     }
     warmupByDay.push(Math.round(warmupMin));
@@ -1017,14 +1193,14 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
     const dk = deps.dateKeyInTimezone(session.timestamp);
     if (dk && dk >= cutoff) warmupMinutes30d += deps.numberValue(session.elapsed_sec) / 60;
   }
-  const posts30d = completedPosts.filter((post) => {
+  const posts30d = realCompletedPosts.filter((post) => {
     const dk = deps.dateKeyInTimezone(post.completed_at || post.scheduled_for);
     return dk !== null && dk >= cutoff;
   }).length;
   // Stats del hero del detalle: publicaciones totales (histórico completo) y posts de esta semana.
-  const publicationsTotal = completedPosts.length;
+  const publicationsTotal = realCompletedPosts.length;
   const weekStartKey = mondayOfWeek(deps, todayKey);
-  const postsThisWeek = completedPosts.filter((post) => {
+  const postsThisWeek = realCompletedPosts.filter((post) => {
     const dk = deps.dateKeyInTimezone(post.completed_at || post.scheduled_for);
     return dk !== null && dk >= weekStartKey;
   }).length;
@@ -1062,18 +1238,27 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
   });
 
   return {
-    publications: publications.map((publication) => {
-      const params = deps.parseParams(publication.params);
-      return {
-        id: publication.id,
-        taskType: publication.task_type,
-        status: publication.status,
-        scheduledFor: publication.scheduled_for,
-        username: publication.account_username || params.account || '',
-        platform: publication.platform || params.platform || '',
-        title: params.title || '',
-      };
-    }),
+    publications: publications
+      // FIX 2 — history only shows real publications (with video content);
+      // legacy placeholders stay in the DB but are not presented as posts.
+      .filter((publication) => {
+        const params = deps.parseParams(publication.params);
+        return publishTaskHasAsset(params);
+      })
+      .map((publication) => {
+        const params = deps.parseParams(publication.params);
+        const assetId = String(params.asset_id || params.assetId || '');
+        return {
+          id: publication.id,
+          taskType: publication.task_type,
+          status: publication.status,
+          scheduledFor: publication.scheduled_for,
+          username: publication.account_username || params.account || '',
+          platform: publication.platform || params.platform || '',
+          title: params.title || '',
+          assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
+        };
+      }),
     warmupByDay,
     postsByDay,
     accountsWarmup,
@@ -1143,10 +1328,15 @@ function createClusterFromGroup(
 
 // ─── Seed / demo (idempotent) ───
 
+// FIX 5 [MEDIO] — Demo seeding is opt-in. The previous default (auto-seed on
+// first GET of an empty workspace, unless NODE_ENV=production) surprised real
+// deployments by fabricating clusters/history. Now it requires
+// SOUTHFARM_PLANNER_SEED=1 explicitly; without it the workspace stays empty
+// and the planner generates nothing until clusters are created manually.
 function seedEnabled(): boolean {
-  const env = String(process.env.SOUTHFARM_SEED_DEMO || '').trim().toLowerCase();
-  if (process.env.NODE_ENV === 'production') return env === 'true';
-  return env === '' || ['1', 'true', 'yes', 'on'].includes(env);
+  const env = String(process.env.SOUTHFARM_PLANNER_SEED || process.env.SOUTHFARM_SEED_DEMO || '')
+    .trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(env);
 }
 
 function seedCompletedWarmup(
@@ -1557,7 +1747,7 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
         weekStart,
         weekEnd,
         now: deps.nowIso(),
-        summary: computeSummary(deps, items),
+        summary: computeSummary(deps, items, weekStart),
         clusters: items,
       });
     } catch (error: any) {
@@ -1584,7 +1774,14 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
         clusterNames.set(Number(cluster.id), String(cluster.name));
       }
       const tasks = rows
-        .filter((row) => deps.dateKeyInTimezone(row.scheduled_for) === date)
+        .filter((row) => {
+          if (deps.dateKeyInTimezone(row.scheduled_for) !== date) return false;
+          // FIX 2 — hide placeholder publish_reel rows (no video asset).
+          if (row.task_type === 'publish_reel' && !publishTaskHasAsset(deps.parseParams(row.params))) {
+            return false;
+          }
+          return true;
+        })
         .map((row) => plannerTaskView(
           deps,
           row,
@@ -1936,7 +2133,11 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     const blocked = workspaceBlockedMessage(req.user.workspaceId);
     if (blocked) return res.status(409).json({ error: blocked });
     const file = req.file as Express.Multer.File & { assetId?: string; assetName?: string } | undefined;
-    const videoUrl = deps.stringValue(req.body.videoUrl);
+    // FIX 4 [MEDIO] — a publication must carry a real video: either a
+    // multipart file or a non-empty videoUrl/video_url. An empty string is
+    // rejected (previously `videoUrl:''` was accepted and created a
+    // placeholder publish_reel with no content).
+    const videoUrl = deps.stringValue(req.body.videoUrl) || deps.stringValue(req.body.video_url);
     const isMultipart = file !== undefined && file !== null;
     if (!isMultipart && !videoUrl) {
       return res.status(400).json({ error: 'Se requiere un archivo de video (campo video) o videoUrl' });
@@ -1956,7 +2157,8 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     const assetName = isMultipart ? String((file as any).assetName || 'video') : null;
     let created = 0;
     for (const account of accounts) {
-      if (!account.device_id) continue;
+      // FIX 7 — never create publish tasks for revoked/missing devices.
+      if (!accountHasActiveDevice(account)) continue;
       insertRoutineTask(deps, {
         workspaceId: req.user.workspaceId,
         userId: ownerId,
@@ -2022,6 +2224,53 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
         res.status(404).json({ error: 'Asset not found' });
       }
     });
+  });
+
+  // ── 9. Publications queue (FIX 8) — GET /api/publications ──
+  // Lists the workspace's publish_reel task_runs (real ones: with a video
+  // asset or video_url), newest first, limit 50. Shape is additive to the
+  // WeekTask view; assetUrl resolves to /assets/cluster/:assetId when the
+  // task carries an uploaded file.
+  app.get('/api/publications', deps.auth, (req: any, res) => {
+    try {
+      const rows = db.prepare(`
+        SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
+        FROM task_runs tr
+        LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
+        LEFT JOIN devices d ON d.id = tr.device_id
+        WHERE tr.workspace_id = ? AND tr.task_type = 'publish_reel'
+        ORDER BY COALESCE(tr.scheduled_for, tr.created_at) DESC, tr.id DESC
+        LIMIT 50
+      `).all(req.user.workspaceId) as any[];
+      const publications = rows
+        .filter((row) => {
+          const params = deps.parseParams(row.params);
+          return params.asset_id || params.assetId || params.video_url;
+        })
+        .map((row) => {
+          const params = deps.parseParams(row.params);
+          const assetId = String(params.asset_id || params.assetId || '');
+          return {
+            id: Number(row.id),
+            clusterId: row.cluster_id === null || row.cluster_id === undefined
+              ? null
+              : Number(row.cluster_id),
+            clusterName: params.cluster_name || null,
+            title: params.title || '',
+            status: row.status,
+            scheduledFor: row.scheduled_for,
+            platform: row.platform || params.platform || '',
+            account: row.account_username || params.account || '',
+            assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
+            createdAt: row.created_at,
+            completedAt: row.completed_at,
+            params,
+          };
+        });
+      res.json({ publications });
+    } catch (error: any) {
+      res.status(400).json({ error: error.message || 'Unable to load publications' });
+    }
   });
 }
 

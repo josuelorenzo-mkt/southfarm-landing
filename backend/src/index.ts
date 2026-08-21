@@ -72,6 +72,22 @@ const SUPPORTED_TASK_TYPES = new Set([
   'scan_youtube',
 ]);
 
+// FIX 1 [CRÍTICO] — Task types the Android accessibility service can actually
+// execute (SouthFarmAccessibilityService.kt handles exactly these 6). The
+// claim endpoint only hands out these types: anything else (currently
+// publish_reel, which requires the web panel to upload the video first, and
+// any future type) stays pending/overdue in the queue instead of entering the
+// claim → silent discard → lease-expire → re-claim loop that inflated
+// attempt_count and left phantom "running" tasks.
+export const EXECUTABLE_TASK_TYPES = [
+  'warmup_ig',
+  'warmup_tiktok',
+  'warmup_youtube',
+  'scan_instagram',
+  'scan_tiktok',
+  'scan_youtube',
+] as const;
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -3312,12 +3328,13 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const existing: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND status IN ('running', 'paused')
           AND claim_token IS NOT NULL
           AND lease_expires_at > ?
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
-      `).get(userId, device.id, now);
+      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now);
 
       if (existing) {
         const leaseExpiresAt = taskLeaseExpiresAt();
@@ -3336,6 +3353,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const candidate: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3356,7 +3374,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
           COALESCE(scheduled_for, created_at) ASC,
           id ASC
         LIMIT 1
-      `).get(userId, device.id, now, now, now);
+      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now, now, now);
 
       if (!candidate) return { device, task: null, reused: false };
 
@@ -3373,6 +3391,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             attempt_count = COALESCE(attempt_count, 0) + 1,
             updated_at = ?
         WHERE id = ? AND user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3392,6 +3411,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
         candidate.id,
         userId,
         device.id,
+        ...EXECUTABLE_TASK_TYPES,
         now,
         now,
         now,
