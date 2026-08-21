@@ -1,5 +1,18 @@
 # Activity Planner — Contrato de API v1
 
+> ## Extensiones v3 (2026-08-20) — BINDING para la iteración 3
+>
+> **1. Configs de rutina extendidas** (retrocompatibles: campos nuevos opcionales con defaults):
+> - `warmup_daily`: `{ "minMinutes": 40, "sessionsPerDay": 2, "maxGapHours": 4 }` — `sessionsPerDay` = en cuántas sesiones se reparten los minutos (1–4); `maxGapHours` = máximo tiempo entre sesiones consecutivas. El motor distribuye `minMinutes` en `sessionsPerDay` sesiones dentro de 12:00–22:00 BA respetando el gap máximo (y mínimo 30 min entre sesiones).
+> - `publishing`: `{ "postsPerWeek": 2, "days": [2, 4] }` — `days` = días de semana elegidos (1=lun … 7=dom, estilo ISO). El motor distribuye los posts en esos días; si hay menos días que posts, rota. Default `[2,4]` (mar/jue).
+> - `scan_auto` sin cambios: `{ "timesPerDay": 2, "minGapHours": 9 }`.
+>
+> **2. Detalle de cluster — warmup POR CUENTA:**
+> `GET /api/clusters/:id` → `history` gana `accountsWarmup: [{ "accountId": 11, "username": "marczell.clips", "platform": "instagram", "warmupByDay": [40, 40, ...14] }]` (una serie de 14 días por cuenta; el agregado `warmupByDay` se mantiene por compatibilidad).
+>
+> **3. Publicación de cluster con ARCHIVO (no URL):**
+> `POST /api/clusters/:id/publish` acepta `multipart/form-data` con: `video` (archivo, requerido), `title` (string), `scheduledFor` (ISO opcional). El backend guarda el archivo en `backend/data/uploads/cluster-assets/` con nombre generado (`assetId`), crea un `publish_reel` por cuenta con `params: { title, assetId, assetName, cluster_id, cluster_name, duration_minutes }`, y responde `{ "created": k, "assetId": "…" }`. Se sirve el archivo para preview en `GET /assets/cluster/:assetId` (montaje estático local). El body JSON legacy con `videoUrl` sigue aceptándose por compatibilidad.
+
 - **Fecha:** 2026-08-19
 - **Propósito:** contrato binding entre backend y frontend para implementar el Activity Planner en paralelo.
 - **Auth:** igual que el resto de la API: `Authorization: Bearer <JWT>` con los middlewares existentes (`requireAuth` + roles `owner|admin|operator` para mutaciones; `viewer` puede leer).
