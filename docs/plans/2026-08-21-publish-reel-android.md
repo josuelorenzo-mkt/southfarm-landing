@@ -147,6 +147,21 @@ supervisor (api 127.0.0.1:3102, token staging, SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACC
   tap/teclado; el eco del caption funciona — reproducido y descartado como bug permanente).
   Reintentar la publication es seguro: el sistema nunca republica automáticamente.
 
-**Pendientes de esta etapa:** deploy a producción del backend de cola única (Fase 3 del
-plan original: misma firma/build que la flota, primero 1 device) + registrar worker de
-staging como tarea programada si se quiere persistente.
+## 9. Fase 3 — COMPLETADA (2026-08-21, deploy a producción)
+
+- `deploy/planner-prod` merge `e45d572` (= feature branch `ec3eade`), build + 3 suites verdes
+  en el worktree de deploy.
+- Backup pre-deploy: `C:\SouthFarm\backups-pre-queue-deploy\southfarm-20260821-154701.db`.
+- Runtime publicado (`publish-southfarm-backend-runtime.ps1`) tras detener la tarea
+  "SouthFarm API" (~1 min de downtime); tarea reiniciada, health OK local (:3001) y público
+  (api.southfarm.tech).
+- Flota reconectada 4/4 (devices 26 "07", 27 "09", 28 "08", 30 "02 nuevo") en <2 min.
+- SIN `SOUTHFARM_EXTRA_EXECUTABLE_TYPES` en prod → claim de `publish_reel` sigue excluido
+  (la app no lo necesita: publica la cola única vía workers).
+- Workers 26/27/30 ya registrados apuntando a :3001 → desde este deploy, una publication
+  creada en el planner de producción es ejecutable por los workers sin cambios adicionales.
+- Ambos branches pusheados a origin.
+
+**Estado final de la etapa publish_reel**: Fases 1-3 completas. El planner publica reels
+reales vía la cola única (E2E verificado en staging; producción con el mismo código).
+Backlog de robustez IG (drafts/Rate dialog/autodescarte) documentado en §8.
