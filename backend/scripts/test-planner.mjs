@@ -411,6 +411,23 @@ async function main() {
   check('6e. cluster history lists the queued job with assetUrl',
     Boolean(historyPub) && historyPub.status === 'queued' && historyPub.job_status === 'queued', JSON.stringify(historyPub));
 
+  // Week/day views must expose the queued job (single queue) so the owner
+  // sees newly created publications in the planner.
+  const weekPub = (clusterPub.publications || []).find((p) => p.assetUrl === `/assets/cluster/${assetId}`);
+  check('6f. (single queue) week view lists the job in cluster.publications',
+    Boolean(weekPub) && weekPub.clusterId === clusterId && weekPub.title === 'Reel de integración'
+      && weekPub.status === 'queued' && weekPub.job_status === 'queued'
+      && weekPub.account === account474.username && weekPub.platform === 'instagram',
+    JSON.stringify(weekPub || null));
+  const todayBA = baDateKey(nowIso());
+  const dayWithPublish = await api(`/api/planner/day?date=${todayBA}`, { token });
+  const dayPub = (dayWithPublish.json.publications || []).find((p) => p.assetUrl === `/assets/cluster/${assetId}`);
+  check('6g. (single queue) day view lists the job in publications[]',
+    dayWithPublish.status === 200 && Boolean(dayPub)
+      && dayPub.clusterId === clusterId && dayPub.platform === 'instagram'
+      && dayPub.status === 'queued' && dayPub.account === account474.username,
+    JSON.stringify(dayPub || dayWithPublish.json));
+
   // ============ TEST 7 (FIX 4) — PUBLISH WITHOUT VIDEO ============
   const invalid = await api(`/api/clusters/${clusterId}/publish`, {
     method: 'POST', token,
@@ -477,8 +494,8 @@ async function main() {
   check('shape: week top-level {weekStart,weekEnd,now,summary,clusters}',
     JSON.stringify(shape.topLevel) === JSON.stringify(['clusters', 'now', 'summary', 'weekEnd', 'weekStart']),
     JSON.stringify(shape.topLevel));
-  check('shape: cluster {id,name,status,health,accounts,routines,metricSeries,tasks}',
-    JSON.stringify(shape.clusterKeys) === JSON.stringify(['accounts', 'health', 'id', 'metricSeries', 'name', 'routines', 'status', 'tasks']),
+  check('shape: cluster {id,name,status,health,accounts,routines,metricSeries,tasks,publications}',
+    JSON.stringify(shape.clusterKeys) === JSON.stringify(['accounts', 'health', 'id', 'metricSeries', 'name', 'publications', 'routines', 'status', 'tasks']),
     JSON.stringify(shape.clusterKeys));
   check('shape: metricSeries {warmup,posts,views}',
     JSON.stringify(shape.metricKeys) === JSON.stringify(['posts', 'views', 'warmup']), JSON.stringify(shape.metricKeys));
@@ -488,6 +505,11 @@ async function main() {
   check('shape: task view keeps webapp fields (params additive)',
     ['id', 'taskType', 'status', 'scheduledFor', 'durationMin', 'username', 'platform', 'deviceAlias', 'source'].every((k) => shape.taskKeys.includes(k)),
     JSON.stringify(shape.taskKeys));
+  const shapePubCluster = shapeWeek.json.clusters.find((c) => (c.publications || []).length > 0) || null;
+  const shapePubKeys = shapePubCluster ? Object.keys(shapePubCluster.publications[0]).sort() : [];
+  check('shape: publication view keeps queue fields (additive)',
+    ['id', 'clusterId', 'clusterName', 'title', 'status', 'job_status', 'scheduledFor', 'platform', 'account', 'assetUrl', 'source'].every((k) => shapePubKeys.includes(k)),
+    JSON.stringify(shapePubKeys));
 
   // ============ REPORT ============
   const fails = results.filter((r) => !r.pass);
