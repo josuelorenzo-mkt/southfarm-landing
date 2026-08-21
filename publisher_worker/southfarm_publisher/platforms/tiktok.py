@@ -217,14 +217,58 @@ class TikTokPublisher(GuardedPublisher):
         """
         return any(node.get("resource-id") == self._PROFILE_GRID for node in nodes)
 
+    def _account_row(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        """Clickable switcher row for the expected handle (with or without @)."""
+        expected = self.expected_account
+        return next((node for node in nodes if node.get("clickable", "false") == "true" and (node.get("content-desc", "").strip().lstrip("@") == expected or node.get("text", "").strip().lstrip("@") == expected)), None)
+
+    def _switch_to_expected_account(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Switch the active TikTok account like the app's warmup
+        (ensureCorrectTikTokAccount): open the account sheet from the profile
+        display-name row (s5_), tap the clickable row for the target handle,
+        then re-navigate to the profile and verify the visible handle. One
+        full retry; fail-closed ACCOUNT_MISMATCH afterwards."""
+        selector_ids = ("com.zhiliaoapp.musically:id/s5_",)
+        for _ in range(2):
+            selector = next((node for node in nodes if node.get("resource-id") in selector_ids), None)
+            if selector is None:
+                selector = next((node for node in nodes if node.get("clickable", "false") == "true" and re.fullmatch(r"[a-zA-Z0-9._]+", (node.get("text", "") or "").strip())), None)
+            if selector is None:
+                break
+            self._tap(device, selector)
+            try:
+                row = self.wait_for(device, error="ACCOUNT_SWITCHER", predicate=self._account_row)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+                break
+            self._tap(device, row)
+            try:
+                if self.wait_for(device, error="ACCOUNT_SWITCH", predicate=self._on_our_profile) is not None:
+                    return self._last_nodes if self._on_our_profile(self._last_nodes) else self._navigate_profile(device)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+            # A successful switch often lands on Home/For You: go back to the
+            # profile surface before retrying.
+            try:
+                nodes = self._return_to_profile(device)
+            except PublisherError as profile_error:
+                if profile_error.code not in ("PROFILE_ACCOUNT", "UI_TIMEOUT"):
+                    raise
+                break
+        raise PublisherError("ACCOUNT_MISMATCH", "TikTok active account could not be switched to the publication account")
+
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
         identity = self.account_control(nodes, resource_id=self._IDENTITY, error="TikTok active profile account")
         expected = "@" + self.expected_account
         if identity.get("text") != expected and identity.get("content-desc") != expected:
-            # Account switching is deliberately not automated: fail closed instead.
-            raise PublisherError("ACCOUNT_MISMATCH", "TikTok active profile account does not match the publication account")
+            # Owner decision 2026-08-21: switch accounts like the app's warmup
+            # (ensureCorrectTikTokAccount) instead of failing closed when
+            # another account is active on the phone.
+            nodes = self._switch_to_expected_account(device, nodes)
         # Baseline evidence is the ordered visible play-count row: publishing
         # prepends exactly one "0" tile to the newest-first profile grid.  A
         # grid that rendered tiles before its counters is re-dumped briefly
