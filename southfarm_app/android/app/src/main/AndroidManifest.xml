@@ -4,6 +4,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <application
         android:label="@string/app_name"
@@ -70,6 +72,9 @@
                 <action android:name="com.example.southfarm_app.START_WARMUP" />
                 <action android:name="com.example.southfarm_app.STOP_WARMUP" />
                 <action android:name="com.example.southfarm_app.GET_STATUS" />
+                <action android:name="com.example.southfarm_app.DUMP_UI" />
+                <action android:name="com.example.southfarm_app.SET_API_BASE" />
+                <action android:name="com.example.southfarm_app.SET_DEVICE_TOKEN" />
             </intent-filter>
         </receiver>
 
@@ -86,5 +91,9 @@
         </intent>
         <!-- Query Instagram -->
         <package android:name="com.instagram.android" />
+        <!-- Query TikTok -->
+        <package android:name="com.zhiliaoapp.musically" />
+        <!-- Query YouTube -->
+        <package android:name="com.google.android.youtube" />
     </queries>
 </manifest>

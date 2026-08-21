@@ -88,6 +88,40 @@ export const EXECUTABLE_TASK_TYPES = [
   'scan_youtube',
 ] as const;
 
+const EXTRA_EXECUTABLE_TASK_TYPES_ENV = 'SOUTHFARM_EXTRA_EXECUTABLE_TYPES';
+
+/**
+ * Task types the claim endpoint may hand out: the base EXECUTABLE_TASK_TYPES
+ * plus any extra types enabled at runtime via SOUTHFARM_EXTRA_EXECUTABLE_TYPES
+ * (comma-separated, trimmed, empty entries dropped, deduplicated against the
+ * base). The env var is read on every call, so a process restart with a new
+ * value takes effect without code changes. This is how new types (currently
+ * publish_reel, which the Android app cannot execute yet) are staged on STAGING
+ * while production keeps the base list.
+ */
+export function executableTaskTypes(): string[] {
+  const extra = String(process.env[EXTRA_EXECUTABLE_TASK_TYPES_ENV] || '')
+    .split(',')
+    .map((type) => type.trim())
+    .filter((type) => type.length > 0);
+  const seen = new Set<string>(EXECUTABLE_TASK_TYPES);
+  const merged: string[] = [...EXECUTABLE_TASK_TYPES];
+  for (const type of extra) {
+    if (!seen.has(type)) {
+      seen.add(type);
+      merged.push(type);
+    }
+  }
+  return merged;
+}
+
+const configuredExtraExecutableTaskTypes = executableTaskTypes();
+if (configuredExtraExecutableTaskTypes.length > EXECUTABLE_TASK_TYPES.length) {
+  console.log(
+    `[Config] Extra executable task types: ${configuredExtraExecutableTaskTypes.slice(EXECUTABLE_TASK_TYPES.length).join(', ')}`,
+  );
+}
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -3314,6 +3348,7 @@ app.get('/api/tasks/runs/:id', auth, (req: any, res) => {
 app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
   const userId = req.user.userId;
   try {
+    const executableTypes = executableTaskTypes();
     const result = db.transaction(() => {
       const device = touchDevice(userId, req.body);
       refreshTaskLifecycle();
@@ -3328,13 +3363,13 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const existing: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
-          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND status IN ('running', 'paused')
           AND claim_token IS NOT NULL
           AND lease_expires_at > ?
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
-      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now);
+      `).get(userId, device.id, ...executableTypes, now);
 
       if (existing) {
         const leaseExpiresAt = taskLeaseExpiresAt();
@@ -3353,7 +3388,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const candidate: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
-          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3374,7 +3409,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
           COALESCE(scheduled_for, created_at) ASC,
           id ASC
         LIMIT 1
-      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now, now, now);
+      `).get(userId, device.id, ...executableTypes, now, now, now);
 
       if (!candidate) return { device, task: null, reused: false };
 
@@ -3391,7 +3426,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             attempt_count = COALESCE(attempt_count, 0) + 1,
             updated_at = ?
         WHERE id = ? AND user_id = ? AND device_id = ?
-          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3411,7 +3446,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
         candidate.id,
         userId,
         device.id,
-        ...EXECUTABLE_TASK_TYPES,
+        ...executableTypes,
         now,
         now,
         now,
