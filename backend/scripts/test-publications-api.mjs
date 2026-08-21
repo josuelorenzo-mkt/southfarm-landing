@@ -237,22 +237,21 @@ try {
     value.set('scheduled_for', futureIso);
     return value;
   };
-  const unsupported4k = await rulesRequest(makeRulesForm(rulesFixtures[0].file));
-  assert.equal(unsupported4k.response.status, 400, JSON.stringify(unsupported4k.body));
-  assert.equal(unsupported4k.body.error_code, 'MEDIA_UNSUPPORTED');
-  assert.match(unsupported4k.body.error, /Video is hevc 2160x3840 but platform allows max 1080x1920 with h264\/hevc/);
+  // Relaxed platform rules (owner decision 2026-08-21): any video with valid
+  // ffprobe metadata is accepted regardless of codec or dimensions; only a
+  // file whose inspection yields no metadata still fails closed.
+  const accepted4k = await rulesRequest(makeRulesForm(rulesFixtures[0].file));
+  assert.equal(accepted4k.response.status, 201, JSON.stringify(accepted4k.body));
   const supportedHevc = await rulesRequest(makeRulesForm(rulesFixtures[1].file));
   assert.equal(supportedHevc.response.status, 201, JSON.stringify(supportedHevc.body));
-  const unsupportedCodec = await rulesRequest(makeRulesForm(rulesFixtures[2].file));
-  assert.equal(unsupportedCodec.response.status, 400, JSON.stringify(unsupportedCodec.body));
-  assert.equal(unsupportedCodec.body.error_code, 'MEDIA_UNSUPPORTED');
-  assert.match(unsupportedCodec.body.error, /Video codec vp9 is not supported: platform allows max 1080x1920 with h264\/hevc/);
+  const acceptedCodec = await rulesRequest(makeRulesForm(rulesFixtures[2].file));
+  assert.equal(acceptedCodec.response.status, 201, JSON.stringify(acceptedCodec.body));
   const unsupportedNoMetadata = await rulesRequest(makeRulesForm(rulesFixtures[3].file));
   assert.equal(unsupportedNoMetadata.response.status, 400, JSON.stringify(unsupportedNoMetadata.body));
   assert.equal(unsupportedNoMetadata.body.error_code, 'MEDIA_UNSUPPORTED');
-  assert.match(unsupportedNoMetadata.body.error, /Video metadata is missing \(codec or dimensions not inspected\) but platform allows max 1080x1920 with h264\/hevc/);
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE platform = 'instagram' AND status = 'queued'").get().count, 1, 'only the rule-compliant media may enqueue a job');
-  assert.equal(fs.readdirSync(path.join(tempDir, 'rules-media')).filter((name) => name !== '.tmp').length, 1, 'rejected media must not remain in the media root');
+  assert.match(unsupportedNoMetadata.body.error, /Video metadata is missing/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM publication_jobs WHERE platform = 'instagram' AND status = 'queued'").get().count, 3, 'every inspected media enqueues a job under relaxed rules');
+  assert.equal(fs.readdirSync(path.join(tempDir, 'rules-media')).filter((name) => name !== '.tmp').length, 3, 'only the uninspectable upload must be cleaned from the media root');
   await new Promise((resolve) => rulesServer.close(resolve));
 
   const jobsBeforeAbort = db.prepare('SELECT COUNT(*) AS count FROM publication_jobs').get().count;
