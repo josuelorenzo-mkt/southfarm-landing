@@ -119,9 +119,17 @@ export class PublicationStore {
         requireIso(now, 'now');
         return this.transaction(() => {
             this.db.prepare('DELETE FROM device_automation_locks WHERE expires_at <= ?').run(now);
+            // Mirror the task-claim queue filter: when the device's workspace is in
+            // manual_only/queue_paused the phone can never claim routine
+            // pending/overdue tasks, so they must not block publication claims —
+            // otherwise a single overdue scan blocks the device forever.
+            const deviceRow = this.db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(worker.deviceId);
+            const control = deviceRow ? this.db.prepare('SELECT scheduler_mode, queue_paused FROM workspace_controls WHERE workspace_id = ?').get(deviceRow.workspace_id) : null;
+            const autoBlocked = String(control?.scheduler_mode || '') === 'manual_only' || Boolean(Number(control?.queue_paused || 0));
+            const routineGate = autoBlocked ? "AND (run.source = 'manual' OR run.manual_override = 1)" : '';
             const eligibility = `job.device_id = ? AND job.status = 'queued' AND job.scheduled_for <= ?
         AND NOT EXISTS (SELECT 1 FROM publication_jobs review WHERE review.social_account_id = job.social_account_id AND review.status = 'review_required')
-        AND NOT EXISTS (SELECT 1 FROM task_runs run WHERE run.device_id = job.device_id AND ((run.status IN ('running', 'paused') AND (run.lease_expires_at IS NULL OR run.lease_expires_at > ?)) OR (run.status IN ('pending', 'overdue') AND (run.scheduled_for IS NULL OR run.scheduled_for <= ?) AND (run.expires_at IS NULL OR run.expires_at > ?))))
+        AND NOT EXISTS (SELECT 1 FROM task_runs run WHERE run.device_id = job.device_id AND ((run.status IN ('running', 'paused') AND (run.lease_expires_at IS NULL OR run.lease_expires_at > ?)) OR (run.status IN ('pending', 'overdue') AND (run.scheduled_for IS NULL OR run.scheduled_for <= ?) AND (run.expires_at IS NULL OR run.expires_at > ?) ${routineGate})))
         AND NOT EXISTS (SELECT 1 FROM device_automation_locks lock WHERE lock.device_id = job.device_id AND lock.expires_at > ?)`;
             const args = [worker.deviceId, now, now, now, now, now];
             const invalid = this.db.prepare(`SELECT job.* FROM publication_jobs job LEFT JOIN publication_media media ON media.id = job.media_id WHERE ${eligibility} AND (media.id IS NULL OR media.workspace_id != job.workspace_id OR media.upload_status != 'stored') ORDER BY job.scheduled_for, job.id LIMIT 1`).get(...args);
