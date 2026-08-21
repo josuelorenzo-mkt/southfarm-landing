@@ -190,3 +190,19 @@ desarrollo futuro), devices revocados identificados (n8/n7: 11 cuentas inactivas
 | 3101 | Backend demo (southfarm-planner-demo.db) | vivo |
 | 3102 | Backend STAGING (clon real + fixes) | vivo |
 | 3103 | Puerto de test de la suite backend | efímero (lo maneja run-planner-tests.sh) |
+
+---
+
+## 8. Nota integración deploy (merge deploy/planner-prod, 2026-08-21)
+
+Al fusionar `feature/ui-redesign-granja-tecnologica` con `master` (que aporta
+`publications-routes.ts` y su propio `GET /api/publications` sobre `publication_jobs`),
+el `GET /api/publications` del planner (FIX 8, shape `clusterId`/`assetUrl` sobre
+`task_runs`) chocaba funcionalmente con el de master. Resolución MENOS ruptura:
+
+- El webapp actual (panel `publication-panel.tsx`, `publication-review.ts`,
+  `publication-upload.ts`) consume el shape de `publications-routes` (master) en
+  `/api/publications` — se deja intacto.
+- El endpoint del planner se renombra a `GET /api/planner/publications` (mismo namespace
+  que `/api/planner/week`, `/api/planner/day`). Único consumidor del shape planner:
+  la suite de integración (`backend/scripts/test-planner.mjs`, check 6c), actualizada.

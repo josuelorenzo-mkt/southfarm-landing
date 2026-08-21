@@ -1,0 +1,1 @@
+<hierarchy><node text="Caption your Short" class="android.widget.EditText" clickable="true" bounds="[20,200][700,450]"/><node text="Public" bounds="[20,700][700,760]"/><node resource-id="com.google.android.youtube:id/upload_bottom_button" text="Upload Short" clickable="true" enabled="false" bounds="[20,1400][700,1520]"/></hierarchy>

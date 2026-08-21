@@ -2226,12 +2226,18 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     });
   });
 
-  // ── 9. Publications queue (FIX 8) — GET /api/publications ──
+  // ── 9. Publications queue (FIX 8) — GET /api/planner/publications ──
   // Lists the workspace's publish_reel task_runs (real ones: with a video
   // asset or video_url), newest first, limit 50. Shape is additive to the
   // WeekTask view; assetUrl resolves to /assets/cluster/:assetId when the
   // task carries an uploaded file.
-  app.get('/api/publications', deps.auth, (req: any, res) => {
+  // NOTE (merge deploy/planner-prod): renamed from /api/publications to
+  // /api/planner/publications to avoid a functional collision with the
+  // publications-routes API (publication_jobs) registered in index.ts.
+  // The webapp publication-panel consumes the publications-routes shape at
+  // /api/publications; the planner shape here is consumed by the planner
+  // integration suite (backend/scripts/test-planner.mjs, check 6c).
+  app.get('/api/planner/publications', deps.auth, (req: any, res) => {
     try {
       const rows = db.prepare(`
         SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias

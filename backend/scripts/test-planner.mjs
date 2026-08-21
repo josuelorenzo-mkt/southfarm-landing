@@ -378,9 +378,9 @@ async function main() {
   check('6b. GET /assets/cluster/:assetId returns video bytes',
     assetRes.status === 200 && assetBytes.length === videoBytes.length, `status=${assetRes.status} bytes=${assetBytes.length}`);
 
-  const pubs = await api('/api/publications', { token });
+  const pubs = await api('/api/planner/publications', { token });
   const pubJob = (pubs.json.publications || []).find((p) => p.assetUrl === `/assets/cluster/${assetId}`);
-  check('6c. (FIX 8) GET /api/publications lists the real publication with assetUrl',
+  check('6c. (FIX 8) GET /api/planner/publications lists the real publication with assetUrl',
     pubs.status === 200 && Boolean(pubJob)
     && pubJob.clusterId === clusterId && pubJob.title === 'Reel de integración'
     && pubJob.platform === 'instagram' && pubJob.account === account474.username,

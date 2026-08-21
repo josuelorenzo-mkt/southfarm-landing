@@ -81,7 +81,7 @@ Create a compiled-module test script that creates a temporary DB, applies minima
 assert.throws(() => validatePublicationInput({ caption: "", platform: "instagram" }), /1 and 10 words/);
 assert.throws(() => validatePublicationInput({ caption: "one two three four five six seven eight nine ten eleven", platform: "tiktok" }), /1 and 10 words/);
 assert.throws(() => validatePublicationInput({ caption: "abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij", platform: "youtube" }), /100 characters/);
-assert.equal(validatePublicationInput({ caption: "SouthFarm publishes this test video safely today", platform: "youtube" }).wordCount, 8);
+assert.equal(validatePublicationInput({ caption: "SouthFarm publishes this test video safely today", platform: "youtube" }).wordCount, 7);
 assert.equal(store.claimDueJob(worker, now).job.id, job.id);
 assert.equal(store.claimDueJob(worker, now).claimed, false);
 assert.throws(() => store.rescheduleJob(job.id, future, actor), /queued/);
