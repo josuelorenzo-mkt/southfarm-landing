@@ -723,6 +723,72 @@ function weekTasks(deps, workspaceId, clusterId, weekStart, weekEnd) {
         return true;
     });
 }
+// ─── Single queue: publication_jobs views ───
+// The planner publish (POST /api/clusters/:id/publish) creates
+// publication_jobs (executed by the PC publisher workers), not publish_reel
+// task_runs. These helpers expose the jobs with the same coarse status
+// vocabulary used by GET /api/planner/publications so the week/day views can
+// render them alongside task_runs.
+const PUBLICATION_RUNNING_STEPS = new Set([
+    'claimed', 'preparing', 'transferring', 'selecting_media', 'editing',
+    'captioning', 'ready_to_publish', 'publishing', 'verifying',
+]);
+/** Coarse status for the webapp: queued | running | completed | failed |
+ *  cancelled | review_required. 'running' covers every in-flight queue step. */
+function publicationCoarseStatus(jobStatus) {
+    if (jobStatus === 'completed')
+        return 'completed';
+    if (jobStatus === 'failed')
+        return 'failed';
+    if (jobStatus === 'cancelled')
+        return 'cancelled';
+    if (jobStatus === 'review_required')
+        return 'review_required';
+    if (PUBLICATION_RUNNING_STEPS.has(jobStatus))
+        return 'running';
+    return 'queued';
+}
+/** Row of publication_jobs (+ optional joined account_username) → API view.
+ *  Shared by /api/planner/publications and the planner week/day views. */
+function plannerPublicationView(deps, row) {
+    let snapshot = {};
+    try {
+        snapshot = row.account_snapshot ? JSON.parse(row.account_snapshot) : {};
+    }
+    catch { /* keep empty */ }
+    return {
+        id: Number(row.id),
+        clusterId: row.cluster_id === null || row.cluster_id === undefined ? null : Number(row.cluster_id),
+        clusterName: row.cluster_name || null,
+        title: row.caption || '',
+        status: publicationCoarseStatus(String(row.status || 'queued')),
+        job_status: String(row.status || 'queued'),
+        current_step: row.current_step || null,
+        scheduledFor: row.scheduled_for,
+        platform: row.platform || '',
+        account: row.account_username || snapshot.username || '',
+        assetUrl: row.cluster_asset_id ? `/assets/cluster/${row.cluster_asset_id}` : null,
+        createdAt: row.created_at,
+        completedAt: row.completed_at,
+        publishedAt: row.published_at || null,
+        source: 'publication_jobs',
+    };
+}
+/** publication_jobs of a cluster whose date key (COALESCE(scheduled_for,
+ *  created_at) in BA) falls inside [weekStart..weekEnd]. */
+function weekPublications(deps, workspaceId, clusterId, weekStart, weekEnd) {
+    const rows = deps.db.prepare(`
+    SELECT j.*, sa.username AS account_username
+    FROM publication_jobs j
+    LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+    WHERE j.workspace_id = ? AND j.cluster_id = ?
+    ORDER BY COALESCE(j.scheduled_for, j.created_at) ASC, j.id ASC
+  `).all(workspaceId, clusterId);
+    return rows.filter((row) => {
+        const dk = deps.dateKeyInTimezone(row.scheduled_for || row.created_at);
+        return dk !== null && dk >= weekStart && dk <= weekEnd;
+    }).map((row) => plannerPublicationView(deps, row));
+}
 function plannerTaskView(deps, task, clusterNameOverride) {
     const params = deps.parseParams(task.params);
     const durationMin = deps.numberValue(task.planned_duration_sec)
@@ -870,6 +936,9 @@ function buildWeekClusterItem(deps, workspaceId, cluster, weekStart, weekEnd) {
         config: deps.parseParams(routine.config),
     }));
     const tasks = weekTasks(deps, workspaceId, cluster.id, weekStart, weekEnd);
+    // Single queue: the cluster's publication_jobs that fall within the week —
+    // same filtering as tasks, driven by COALESCE(scheduled_for, created_at).
+    const publications = weekPublications(deps, workspaceId, cluster.id, weekStart, weekEnd);
     const series = computeClusterSeries(deps, workspaceId, cluster, accounts, routines, tasks, weekStart);
     return {
         id: cluster.id,
@@ -894,6 +963,7 @@ function buildWeekClusterItem(deps, workspaceId, cluster, weekStart, weekEnd) {
             views: series.views,
         },
         tasks: tasks.map((task) => plannerTaskView(deps, task)),
+        publications,
     };
 }
 function computeSummary(deps, items, weekStart) {
@@ -1479,7 +1549,25 @@ export function registerActivityPlanner(app, deps) {
             for (let hour = 12; hour <= 22; hour += 1) {
                 hourly.push({ hour, count: tasks.filter((task) => baHourOfDay(task.scheduledFor) === hour).length });
             }
-            res.json({ date, tasks, hourly });
+            // Single queue: the workspace's publication_jobs whose date key
+            // (COALESCE(scheduled_for, created_at) in BA) matches the requested day.
+            const publicationRows = db.prepare(`
+        SELECT j.*, sa.username AS account_username
+        FROM publication_jobs j
+        LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+        WHERE j.workspace_id = ?
+        ORDER BY COALESCE(j.scheduled_for, j.created_at) ASC, j.id ASC
+      `).all(req.user.workspaceId);
+            const publications = publicationRows
+                .filter((row) => deps.dateKeyInTimezone(row.scheduled_for || row.created_at) === date)
+                .map((row) => {
+                const view = plannerPublicationView(deps, row);
+                if (!view.clusterName && view.clusterId != null && clusterNames.has(view.clusterId)) {
+                    view.clusterName = clusterNames.get(view.clusterId);
+                }
+                return view;
+            });
+            res.json({ date, tasks, hourly, publications });
         }
         catch (error) {
             res.status(400).json({ error: error.message || 'Unable to load planner day' });
@@ -1917,44 +2005,7 @@ export function registerActivityPlanner(app, deps) {
         ORDER BY COALESCE(j.scheduled_for, j.created_at) DESC, j.id DESC
         LIMIT 50
       `).all(req.user.workspaceId);
-            const runningSteps = new Set(['claimed', 'preparing', 'transferring', 'selecting_media', 'editing', 'captioning', 'ready_to_publish', 'publishing', 'verifying']);
-            const coarseStatus = (jobStatus) => {
-                if (jobStatus === 'completed')
-                    return 'completed';
-                if (jobStatus === 'failed')
-                    return 'failed';
-                if (jobStatus === 'cancelled')
-                    return 'cancelled';
-                if (jobStatus === 'review_required')
-                    return 'review_required';
-                if (runningSteps.has(jobStatus))
-                    return 'running';
-                return 'queued';
-            };
-            const publications = rows.map((row) => {
-                let snapshot = {};
-                try {
-                    snapshot = row.account_snapshot ? JSON.parse(row.account_snapshot) : {};
-                }
-                catch { /* keep empty */ }
-                return {
-                    id: Number(row.id),
-                    clusterId: row.cluster_id === null || row.cluster_id === undefined ? null : Number(row.cluster_id),
-                    clusterName: row.cluster_name || null,
-                    title: row.caption || '',
-                    status: coarseStatus(String(row.status || 'queued')),
-                    job_status: String(row.status || 'queued'),
-                    current_step: row.current_step || null,
-                    scheduledFor: row.scheduled_for,
-                    platform: row.platform || '',
-                    account: row.account_username || snapshot.username || '',
-                    assetUrl: row.cluster_asset_id ? `/assets/cluster/${row.cluster_asset_id}` : null,
-                    createdAt: row.created_at,
-                    completedAt: row.completed_at,
-                    publishedAt: row.published_at || null,
-                    source: 'publication_jobs',
-                };
-            });
+            const publications = rows.map((row) => plannerPublicationView(deps, row));
             res.json({ publications });
         }
         catch (error) {
