@@ -162,11 +162,19 @@ export function registerPublicationWorkerRoutes({ app, db, store, mediaRoot, wor
         if (!deviceId)
             return res.status(400).json({ error_code: 'DEVICE_INVALID', error: 'device id is invalid' });
         const now = new Date().toISOString();
-        const device = db.prepare('SELECT id, device_id, device_name, lifecycle_status, last_seen_at FROM devices WHERE id = ?').get(deviceId);
+        const device = db.prepare('SELECT id, device_id, device_name, lifecycle_status, last_seen_at, workspace_id FROM devices WHERE id = ?').get(deviceId);
         if (!device)
             return res.status(404).json({ error_code: 'DEVICE_NOT_FOUND', error: 'Device not found' });
         const lock = db.prepare('SELECT publication_job_id, worker_id, expires_at FROM device_automation_locks WHERE device_id = ? AND expires_at > ?').get(deviceId, now);
-        const task = db.prepare("SELECT id FROM task_runs WHERE device_id = ? AND ((status IN ('running', 'paused') AND (lease_expires_at IS NULL OR lease_expires_at > ?)) OR (status IN ('pending', 'overdue') AND (scheduled_for IS NULL OR scheduled_for <= ?) AND (expires_at IS NULL OR expires_at > ?))) LIMIT 1").get(deviceId, now, now, now);
+        // Mirror the claim endpoint's queue filter: when the device's workspace is
+        // in manual_only/queue_paused the phone can never claim routine
+        // pending/overdue tasks, so they must not count as busy for publications
+        // (they would block it forever). Running/paused tasks always count — the
+        // work is already on the phone.
+        const control = db.prepare('SELECT scheduler_mode, queue_paused FROM workspace_controls WHERE workspace_id = ?').get(device.workspace_id);
+        const autoBlocked = String(control?.scheduler_mode || '') === 'manual_only' || Boolean(Number(control?.queue_paused || 0));
+        const routineGate = autoBlocked ? "AND (source = 'manual' OR manual_override = 1)" : '';
+        const task = db.prepare(`SELECT id FROM task_runs WHERE device_id = ? AND ((status IN ('running', 'paused') AND (lease_expires_at IS NULL OR lease_expires_at > ?)) OR (status IN ('pending', 'overdue') AND (scheduled_for IS NULL OR scheduled_for <= ?) AND (expires_at IS NULL OR expires_at > ?) ${routineGate})) LIMIT 1`).get(deviceId, now, now, now);
         const online = device.lifecycle_status === 'active' && typeof device.last_seen_at === 'string' && Date.parse(device.last_seen_at) >= Date.now() - onlineWindowSeconds * 1000;
         const reasons = [!online ? 'device_offline' : null, lock ? 'device_busy_publication' : null, task ? 'device_busy_task' : null].filter(Boolean);
         res.json({ device, online, available: reasons.length === 0, reasons, publication_lock: lock || null, active_task: Boolean(task), server_time: now });
