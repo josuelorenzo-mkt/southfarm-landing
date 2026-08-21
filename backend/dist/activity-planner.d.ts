@@ -22,6 +22,7 @@ export type PlannerDeps = {
     accountKeyFor: (userId: number, deviceId: number | null, platformValue: unknown, accountValue: unknown) => string | null;
     deviceIsOnline: (lastSeenAt: unknown) => boolean;
     plannerDateKey: (value: unknown) => string;
+    mediaRoot: string;
 };
 export declare function registerActivityPlanner(app: Express, deps: PlannerDeps): void;
 export declare function runActivityPlannerStartup(deps: PlannerDeps): void;

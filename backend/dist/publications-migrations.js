@@ -110,6 +110,9 @@ export function applyPublicationMigrations(db) {
         ['attempt_count', 'INTEGER NOT NULL DEFAULT 0'], ['published_at', 'TEXT'], ['verified_at', 'TEXT'],
         ['remote_post_identity', 'TEXT'], ['result', 'TEXT'], ['error_code', 'TEXT'], ['error_message', 'TEXT'],
         ['cancel_requested_at', 'TEXT'], ['completed_at', 'TEXT'], ['account_snapshot', 'TEXT'], ['device_snapshot', 'TEXT'],
+        // Planner bridge: cluster provenance for jobs created by the activity
+        // planner's cluster publish (single publication queue, owner 2026-08-21).
+        ['cluster_id', 'INTEGER'], ['cluster_name', 'TEXT'], ['cluster_asset_id', 'TEXT'],
     ])
         addColumnIfMissing(db, 'publication_jobs', name, definition);
     for (const [name, definition] of [

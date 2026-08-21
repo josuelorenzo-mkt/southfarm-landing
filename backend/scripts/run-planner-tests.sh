@@ -41,6 +41,12 @@ mkdir -p "$LOGS"
 TEST_MEDIA_ROOT="$LOGS/test-publish-media"
 mkdir -p "$TEST_MEDIA_ROOT"
 export SOUTHFARM_PUBLICATION_MEDIA_ROOT="$TEST_MEDIA_ROOT"
+# The planner publish bridge inspects uploads with ffprobe (publication media
+# rules). Point it at the toolchain copy so the suite does not depend on PATH.
+FFPROBE_BIN="/c/Users/josu_/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.1-essentials_build/bin/ffprobe.exe"
+if [ -x "$FFPROBE_BIN" ]; then
+  export SOUTHFARM_FFPROBE="$FFPROBE_BIN"
+fi
 
 SERVER_PID=""
 server_start() { # $1=db path — extra env vars must be EXPORTED by the caller

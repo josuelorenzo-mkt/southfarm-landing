@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import fs from 'fs';
 import multer from 'multer';
+import { createPlannerPublicationJobs, type PlannerPublicationAccountInput } from './planner-publication-bridge.js';
 import {
   BUENOS_AIRES_TIMEZONE,
   localDateTimeToIso,
@@ -97,6 +98,7 @@ export type PlannerDeps = {
   ) => string | null;
   deviceIsOnline: (lastSeenAt: unknown) => boolean;
   plannerDateKey: (value: unknown) => string;
+  mediaRoot: string;
 };
 
 const ROUTINE_TYPES = ['warmup_daily', 'scan_auto', 'publishing'] as const;
@@ -1144,12 +1146,14 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
   const accountKeys = accounts.map((a) => a.account_key).filter(Boolean) as string[];
   const todayKey = todayKeyBA(deps);
 
+  // Single queue: cluster history reads publication_jobs (the publish_reel
+  // task_runs source is gone since the planner publish creates jobs).
   const publications = deps.db.prepare(`
-    SELECT tr.*, sa.username AS account_username
-    FROM task_runs tr
-    LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
-    WHERE tr.workspace_id = ? AND tr.cluster_id = ? AND tr.task_type = 'publish_reel'
-    ORDER BY COALESCE(tr.scheduled_for, tr.created_at) DESC, tr.id DESC
+    SELECT j.*, sa.username AS account_username
+    FROM publication_jobs j
+    LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+    WHERE j.workspace_id = ? AND j.cluster_id = ?
+    ORDER BY COALESCE(j.scheduled_for, j.created_at) DESC, j.id DESC
     LIMIT 10
   `).all(workspaceId, cluster.id) as any[];
 
@@ -1159,15 +1163,13 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
         WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
       `).all(...accountKeys) as any[]
     : [];
-  // FIX 2 — history stats count REAL publications only (with video content);
-  // legacy placeholder rows (empty video_url) are excluded.
+  // Every publication job carries inspected media, so all completed jobs are
+  // real posts (the old placeholder filter applied to legacy task_runs).
   const completedPosts = deps.db.prepare(`
-    SELECT completed_at, scheduled_for, params FROM task_runs
-    WHERE workspace_id = ? AND cluster_id = ? AND task_type = 'publish_reel' AND status = 'completed'
+    SELECT completed_at, scheduled_for FROM publication_jobs
+    WHERE workspace_id = ? AND cluster_id = ? AND status = 'completed'
   `).all(workspaceId, cluster.id) as any[];
-  const realCompletedPosts = completedPosts.filter((post) =>
-    publishTaskHasAsset(deps.parseParams(post.params)),
-  );
+  const realCompletedPosts = completedPosts;
 
   const warmupByDay: number[] = [];
   const postsByDay: number[] = [];
@@ -1237,28 +1239,28 @@ function buildClusterHistory(deps: PlannerDeps, workspaceId: number, cluster: an
     };
   });
 
+  const runningSteps = new Set(['claimed', 'preparing', 'transferring', 'selecting_media', 'editing', 'captioning', 'ready_to_publish', 'publishing', 'verifying']);
+  const coarseStatus = (jobStatus: string): string => {
+    if (jobStatus === 'completed') return 'completed';
+    if (jobStatus === 'failed') return 'failed';
+    if (jobStatus === 'cancelled') return 'cancelled';
+    if (jobStatus === 'review_required') return 'review_required';
+    if (runningSteps.has(jobStatus)) return 'running';
+    return 'queued';
+  };
   return {
     publications: publications
-      // FIX 2 — history only shows real publications (with video content);
-      // legacy placeholders stay in the DB but are not presented as posts.
-      .filter((publication) => {
-        const params = deps.parseParams(publication.params);
-        return publishTaskHasAsset(params);
-      })
-      .map((publication) => {
-        const params = deps.parseParams(publication.params);
-        const assetId = String(params.asset_id || params.assetId || '');
-        return {
-          id: publication.id,
-          taskType: publication.task_type,
-          status: publication.status,
-          scheduledFor: publication.scheduled_for,
-          username: publication.account_username || params.account || '',
-          platform: publication.platform || params.platform || '',
-          title: params.title || '',
-          assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
-        };
-      }),
+      .map((publication) => ({
+        id: publication.id,
+        taskType: 'publish_reel',
+        status: coarseStatus(String(publication.status || 'queued')),
+        job_status: String(publication.status || 'queued'),
+        scheduledFor: publication.scheduled_for,
+        username: publication.account_username || '',
+        platform: publication.platform || '',
+        title: publication.caption || '',
+        assetUrl: publication.cluster_asset_id ? `/assets/cluster/${publication.cluster_asset_id}` : null,
+      })),
     warmupByDay,
     postsByDay,
     accountsWarmup,
@@ -2125,70 +2127,75 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     }
   });
 
-  // ── 7. Cluster publish (v3: multipart with a real video file; legacy JSON
-  //      body with videoUrl keeps working) ──
-  app.post('/api/clusters/:id/publish', deps.auth, deps.requireRole('owner', 'admin', 'operator'), uploadClusterAsset, (req: any, res) => {
-    const cluster = clusterById(req.user.workspaceId, req.params.id);
-    if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
-    const blocked = workspaceBlockedMessage(req.user.workspaceId);
-    if (blocked) return res.status(409).json({ error: blocked });
-    const file = req.file as Express.Multer.File & { assetId?: string; assetName?: string } | undefined;
-    // FIX 4 [MEDIO] — a publication must carry a real video: either a
-    // multipart file or a non-empty videoUrl/video_url. An empty string is
-    // rejected (previously `videoUrl:''` was accepted and created a
-    // placeholder publish_reel with no content).
-    const videoUrl = deps.stringValue(req.body.videoUrl) || deps.stringValue(req.body.video_url);
-    const isMultipart = file !== undefined && file !== null;
-    if (!isMultipart && !videoUrl) {
-      return res.status(400).json({ error: 'Se requiere un archivo de video (campo video) o videoUrl' });
-    }
-    const title = deps.stringValue(req.body.title) || '— definir contenido —';
-    let scheduledFor = deps.nowIso();
-    if (req.body.scheduledFor !== undefined && req.body.scheduledFor !== null) {
-      const timestamp = Date.parse(String(req.body.scheduledFor));
-      if (!Number.isFinite(timestamp)) {
-        return res.status(400).json({ error: 'scheduledFor must be a valid ISO date' });
+  // ── 7. Cluster publish — single publication queue (owner decision
+  //      2026-08-21): creates publication_jobs (the queue the PC publisher
+  //      workers execute, same as the one-shot "crear publicación" panel)
+  //      instead of publish_reel task_runs. The uploaded video is kept in
+  //      cluster-assets for webapp preview and ingested into the
+  //      publications media store per job.
+  app.post('/api/clusters/:id/publish', deps.auth, deps.requireRole('owner', 'admin', 'operator'), uploadClusterAsset, async (req: any, res) => {
+    try {
+      const cluster = clusterById(req.user.workspaceId, req.params.id);
+      if (!cluster) return res.status(404).json({ error: 'Cluster not found' });
+      const blocked = workspaceBlockedMessage(req.user.workspaceId);
+      if (blocked) return res.status(409).json({ error: blocked });
+      const file = req.file as (Express.Multer.File & { assetId?: string; assetName?: string }) | undefined;
+      // A publication job executes a real video on a real phone, so the file
+      // upload is now mandatory; the legacy videoUrl-only body could never be
+      // posted by a worker (FIX 4 made it a placeholder, the single queue
+      // removes it).
+      if (!file) {
+        return res.status(400).json({ error: 'Se requiere un archivo de video (campo video)' });
       }
-      scheduledFor = new Date(timestamp).toISOString();
-    }
-    const ownerId = workspaceOwnerId(deps, req.user.workspaceId) || req.user.userId;
-    const accounts = clusterAccounts(deps, cluster.id);
-    const assetId = isMultipart ? String((file as any).assetId || '') : null;
-    const assetName = isMultipart ? String((file as any).assetName || 'video') : null;
-    let created = 0;
-    for (const account of accounts) {
-      // FIX 7 — never create publish tasks for revoked/missing devices.
-      if (!accountHasActiveDevice(account)) continue;
-      insertRoutineTask(deps, {
+      const title = deps.stringValue(req.body.title) || '— definir contenido —';
+      let scheduledFor = deps.nowIso();
+      if (req.body.scheduledFor !== undefined && req.body.scheduledFor !== null) {
+        const timestamp = Date.parse(String(req.body.scheduledFor));
+        if (!Number.isFinite(timestamp)) {
+          return res.status(400).json({ error: 'scheduledFor must be a valid ISO date' });
+        }
+        scheduledFor = new Date(timestamp).toISOString();
+      }
+      const assetId = String(file.assetId || '');
+      const assetPath = assetId ? path.join(CLUSTER_ASSETS_DIR, assetId) : null;
+      if (!assetPath || !fs.existsSync(assetPath)) {
+        return res.status(500).json({ error: 'El archivo subido no se pudo ubicar' });
+      }
+      const ownerId = workspaceOwnerId(deps, req.user.workspaceId) || req.user.userId;
+      const candidates: PlannerPublicationAccountInput[] = [];
+      for (const account of clusterAccounts(deps, cluster.id)) {
+        // FIX 7 — never create publications for revoked/missing devices.
+        if (!accountHasActiveDevice(account)) continue;
+        const device = db.prepare('SELECT id, device_id FROM devices WHERE id = ?').get(account.device_id) || null;
+        candidates.push({ account, device });
+      }
+      if (candidates.length === 0) {
+        return res.status(400).json({ error: 'El cluster no tiene cuentas con dispositivo activo' });
+      }
+      const bridge = await createPlannerPublicationJobs({
+        db,
+        mediaRoot: deps.mediaRoot,
         workspaceId: req.user.workspaceId,
         userId: ownerId,
-        deviceId: account.device_id,
-        taskType: 'publish_reel',
-        platform: account.platform,
-        account,
-        params: {
-          duration_minutes: 1,
-          title,
-          video_url: videoUrl || '',
-          ...(assetId ? {
-            asset_id: assetId,
-            assetId,
-            assetName,
-            asset_extension: path.extname(String(assetName || '')).replace(/^\./, ''),
-          } : {}),
-        },
+        videoPath: assetPath,
+        originalFilename: String(file.assetName || 'cluster-video'),
+        mimeType: file.mimetype || 'video/mp4',
+        title,
         scheduledFor,
-        plannedDurationSec: 60,
         clusterId: cluster.id,
-        routineId: null,
         clusterName: cluster.name,
-        priority: 1000,
+        clusterAssetId: assetId,
+        accounts: candidates,
       });
-      created += 1;
+      if (bridge.publicationIds.length === 0) {
+        return res.status(400).json({ error: 'Ninguna publicación pudo crearse', skipped: bridge.skipped });
+      }
+      const response: Record<string, any> = { created: bridge.publicationIds.length, assetId, publicationIds: bridge.publicationIds };
+      if (bridge.skipped.length) response.skipped = bridge.skipped;
+      res.status(201).json(response);
+    } catch (error: any) {
+      res.status(500).json({ error: error?.message || 'No se pudo crear la publicación' });
     }
-    const response: Record<string, any> = { created };
-    if (assetId) response.assetId = assetId;
-    res.status(201).json(response);
   });
 
   // ── 8. Cluster asset serving (v3: preview for uploaded publish videos) ──
@@ -2226,53 +2233,53 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
     });
   });
 
-  // ── 9. Publications queue (FIX 8) — GET /api/planner/publications ──
-  // Lists the workspace's publish_reel task_runs (real ones: with a video
-  // asset or video_url), newest first, limit 50. Shape is additive to the
-  // WeekTask view; assetUrl resolves to /assets/cluster/:assetId when the
-  // task carries an uploaded file.
-  // NOTE (merge deploy/planner-prod): renamed from /api/publications to
-  // /api/planner/publications to avoid a functional collision with the
-  // publications-routes API (publication_jobs) registered in index.ts.
-  // The webapp publication-panel consumes the publications-routes shape at
-  // /api/publications; the planner shape here is consumed by the planner
-  // integration suite (backend/scripts/test-planner.mjs, check 6c).
+  // ── 9. Publications queue — GET /api/planner/publications ──
+  // Single queue (owner decision 2026-08-21): lists the workspace's
+  // publication_jobs (the queue the PC publisher workers execute). Coarse
+  // `status` keeps the previous webapp vocabulary; `job_status` carries the
+  // raw queue state; assetUrl points at the original cluster asset for
+  // preview.
   app.get('/api/planner/publications', deps.auth, (req: any, res) => {
     try {
       const rows = db.prepare(`
-        SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
-        FROM task_runs tr
-        LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
-        LEFT JOIN devices d ON d.id = tr.device_id
-        WHERE tr.workspace_id = ? AND tr.task_type = 'publish_reel'
-        ORDER BY COALESCE(tr.scheduled_for, tr.created_at) DESC, tr.id DESC
+        SELECT j.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
+        FROM publication_jobs j
+        LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+        LEFT JOIN devices d ON d.id = j.device_id
+        WHERE j.workspace_id = ?
+        ORDER BY COALESCE(j.scheduled_for, j.created_at) DESC, j.id DESC
         LIMIT 50
       `).all(req.user.workspaceId) as any[];
-      const publications = rows
-        .filter((row) => {
-          const params = deps.parseParams(row.params);
-          return params.asset_id || params.assetId || params.video_url;
-        })
-        .map((row) => {
-          const params = deps.parseParams(row.params);
-          const assetId = String(params.asset_id || params.assetId || '');
-          return {
-            id: Number(row.id),
-            clusterId: row.cluster_id === null || row.cluster_id === undefined
-              ? null
-              : Number(row.cluster_id),
-            clusterName: params.cluster_name || null,
-            title: params.title || '',
-            status: row.status,
-            scheduledFor: row.scheduled_for,
-            platform: row.platform || params.platform || '',
-            account: row.account_username || params.account || '',
-            assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
-            createdAt: row.created_at,
-            completedAt: row.completed_at,
-            params,
-          };
-        });
+      const runningSteps = new Set(['claimed', 'preparing', 'transferring', 'selecting_media', 'editing', 'captioning', 'ready_to_publish', 'publishing', 'verifying']);
+      const coarseStatus = (jobStatus: string): string => {
+        if (jobStatus === 'completed') return 'completed';
+        if (jobStatus === 'failed') return 'failed';
+        if (jobStatus === 'cancelled') return 'cancelled';
+        if (jobStatus === 'review_required') return 'review_required';
+        if (runningSteps.has(jobStatus)) return 'running';
+        return 'queued';
+      };
+      const publications = rows.map((row) => {
+        let snapshot: any = {};
+        try { snapshot = row.account_snapshot ? JSON.parse(row.account_snapshot) : {}; } catch { /* keep empty */ }
+        return {
+          id: Number(row.id),
+          clusterId: row.cluster_id === null || row.cluster_id === undefined ? null : Number(row.cluster_id),
+          clusterName: row.cluster_name || null,
+          title: row.caption || '',
+          status: coarseStatus(String(row.status || 'queued')),
+          job_status: String(row.status || 'queued'),
+          current_step: row.current_step || null,
+          scheduledFor: row.scheduled_for,
+          platform: row.platform || '',
+          account: row.account_username || snapshot.username || '',
+          assetUrl: row.cluster_asset_id ? `/assets/cluster/${row.cluster_asset_id}` : null,
+          createdAt: row.created_at,
+          completedAt: row.completed_at,
+          publishedAt: row.published_at || null,
+          source: 'publication_jobs',
+        };
+      });
       res.json({ publications });
     } catch (error: any) {
       res.status(400).json({ error: error.message || 'Unable to load publications' });

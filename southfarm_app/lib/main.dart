@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -7,8 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 
-const String apiUrl = 'https://api.southfarm.tech/api';
-const String API_BASE = 'https://api.southfarm.tech/api';
+const String defaultApiBase = 'https://api.southfarm.tech/api';
+String apiUrl = defaultApiBase;
+String API_BASE = defaultApiBase;
 const Color sfGreen = Color(0xFF34d399);
 const Color sfBg = Color(0xFF0b0f0b);
 const Color sfCard = Color(0xFF141a14);
@@ -17,7 +19,20 @@ const Color sfTextPrimary = Color(0xFFe8ede8);
 const Color sfTextSecondary = Color(0xFF6b7f6b);
 const Color sfAmber = Color(0xFFf59e0b);
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Debug builds may override the API base at runtime (set via the
+  // SET_API_BASE broadcast → SharedPreferences key 'api_base').
+  if (kDebugMode) {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final override = prefs.getString('api_base')?.trim() ?? '';
+      if (override.isNotEmpty) {
+        apiUrl = override;
+        API_BASE = override;
+      }
+    } catch (_) {}
+  }
   runApp(const SouthFarmApp());
 }
 
