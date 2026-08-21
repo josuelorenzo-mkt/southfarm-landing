@@ -123,9 +123,30 @@
 
 **Para Fase 2**: el sistema semiorganic (publisher_worker Python + publication_jobs) ya
 ejecuta publicaciones reales en IG/TT/YT — la etapa se resolvió CONECTANDO el planner a esa
-cola única (commit d38da51), no automatizando IG dentro de la app Android. El primer intento
-E2E falló solo porque la cuenta piloto no tenía reels para el baseline de verificación; el
-dueño subió el primer reel manualmente y se reintenta. NOTA de método: un intento manual por
-adb abrió la promo de Edits por taps sobre bounds no refrescados del dump (error del
-operador, NO un cambio de flujo de IG) — verificado por el dueño: el flujo de IG sigue igual
-y el adaptador del worker no requiere cambios.
+cola única (commit d38da51), no automatizando IG dentro de la app Android. NOTA de método:
+un intento manual por adb abrió la promo de Edits por taps sobre bounds no refrescados del
+dump (error del operador, NO un cambio de flujo de IG) — verificado por el dueño: el flujo
+de IG sigue igual y el adaptador del worker no requiere cambios.
+
+## 8. Fase 2 — COMPLETADA (2026-08-21, E2E real)
+
+**E2E verificado en staging (:3102) con el teléfono 07 (192.168.0.27, device 24):**
+publication creada desde `POST /api/clusters/3/publish` (planner) → job IG en la cola única
+→ worker Python (windows-staging-24) claim → push del video → galería → editor → caption
+→ **Share → reel publicado en marczellclips** ("Trust the process always", verificado
+on-device) → review confirmada por API → `completed`. Worker lanzado con los env del
+supervisor (api 127.0.0.1:3102, token staging, SOUTHFARM_ALLOW_ALL_INSTAGRAM_ACCOUNTS=true).
+
+**Hallazgos de robustez del adaptador IG (backlog, no bloqueantes):**
+- No maneja el diálogo "Keep editing your draft?" (PROFILE_TAB si hay drafts huérfanos) —
+  limpiar drafts del device antes de runs productivos.
+- No descarta el prompt "Rate Instagram" durante el verify → job cae a `review_required`
+  (TAB_BAR) aunque el reel SÍ se publicó; se resuelve con POST /api/publications/:id/review
+  {action:confirm}. Considerar autodescarte de diálogos parasitarios en el resync.
+- Fallas transitorias observadas: UI_TIMEOUT (transferring), CAPTION_DIVERGED (carrera
+  tap/teclado; el eco del caption funciona — reproducido y descartado como bug permanente).
+  Reintentar la publication es seguro: el sistema nunca republica automáticamente.
+
+**Pendientes de esta etapa:** deploy a producción del backend de cola única (Fase 3 del
+plan original: misma firma/build que la flota, primero 1 device) + registrar worker de
+staging como tarea programada si se quiere persistente.
