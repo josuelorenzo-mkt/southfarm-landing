@@ -1,0 +1,1948 @@
+// Activity Planner — backend module for the SouthFarm API.
+//
+// Implements the binding API contract from
+// docs/plans/2026-08-19-activity-planner-api.md on top of the existing
+// Express + better-sqlite3 stack. It is intentionally self-contained: all
+// shared helpers (auth middleware, date/time conversions, task event
+// recording, workspace scoping) are injected via `deps` at registration time
+// so index.ts only grows by an import + one call.
+//
+// The generated tasks are regular `task_runs` rows (source='automatic') so
+// the existing claim/lease/checkpoint protocol keeps working untouched.
+import bcrypt from 'bcryptjs';
+import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
+import { BUENOS_AIRES_TIMEZONE, localDateTimeToIso, overdueAtIso, expiresAtIso, } from './scheduler.js';
+// Uploads live under backend/data/uploads (git-ignored via backend/data/).
+// The module compiles to backend/dist, so the data dir is one level up.
+const UPLOADS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'uploads');
+const CLUSTER_ASSETS_DIR = path.join(UPLOADS_ROOT, 'cluster-assets');
+const MAX_ASSET_BYTES = 200 * 1024 * 1024; // 200 MB
+function ensureUploadsDir() {
+    fs.mkdirSync(CLUSTER_ASSETS_DIR, { recursive: true });
+}
+ensureUploadsDir();
+// ─── Multipart upload (v3: publish with a real video file) ───
+function sanitizeAssetName(raw) {
+    const base = String(raw || 'video').trim().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const extension = path.extname(base).toLowerCase().replace(/[^a-z0-9.]/g, '');
+    const stem = path.basename(base, path.extname(base)).replace(/\.+$/g, '');
+    return (stem || 'video') + extension;
+}
+function assetIdFor(originalName) {
+    const extension = path.extname(originalName).toLowerCase().replace(/[^a-z0-9.]/g, '');
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
+    return `asset-${Date.now()}-${randomPart}${extension}`;
+}
+const uploadClusterAsset = multer({
+    storage: multer.diskStorage({
+        destination: (_req, _file, callback) => {
+            ensureUploadsDir();
+            callback(null, CLUSTER_ASSETS_DIR);
+        },
+        filename: (_req, file, callback) => {
+            const original = sanitizeAssetName(file.originalname);
+            const assetId = assetIdFor(original);
+            file.assetId = assetId;
+            file.assetName = original;
+            callback(null, assetId);
+        },
+    }),
+    limits: { fileSize: MAX_ASSET_BYTES },
+    fileFilter: (_req, file, callback) => {
+        const mime = String(file.mimetype || '').toLowerCase();
+        if (mime.startsWith('video/'))
+            return callback(null, true);
+        return callback(new Error('Solo se aceptan archivos de video (video/*)'));
+    },
+}).single('video');
+const ROUTINE_TYPES = ['warmup_daily', 'scan_auto', 'publishing'];
+// ─── Routine config defaults / validation limits ───
+//
+// v3 extended configs are backward-compatible: `days` is published by the API
+// only when the routine has been configured with it (pre-v3 rows keep their
+// legacy shape so old clients are not confused by a field they did not set).
+const DEFAULT_WARMUP_SESSIONS_PER_DAY = 2;
+const DEFAULT_WARMUP_MAX_GAP_HOURS = 4;
+const DEFAULT_PUBLISHING_DAYS = [2, 4];
+const DEFAULT_ROUTINE_CONFIGS = {
+    warmup_daily: { minMinutes: 40, sessionsPerDay: DEFAULT_WARMUP_SESSIONS_PER_DAY, maxGapHours: DEFAULT_WARMUP_MAX_GAP_HOURS },
+    scan_auto: { timesPerDay: 2, minGapHours: 9 },
+    publishing: { postsPerWeek: 2, days: [...DEFAULT_PUBLISHING_DAYS] },
+};
+const ROUTINE_CONFIG_LIMITS = {
+    warmup_daily: { minMinutes: [10, 480], sessionsPerDay: [1, 4], maxGapHours: [1, 10] },
+    scan_auto: { timesPerDay: [1, 6], minGapHours: [1, 23] },
+    publishing: { postsPerWeek: [1, 14], days: [1, 7] },
+};
+// The engine always reads the full v3 view of a config (defaults applied),
+// regardless of how the row was stored.
+function fullConfigFor(routineType, raw) {
+    const config = {};
+    for (const [key, value] of Object.entries(DEFAULT_ROUTINE_CONFIGS[routineType])) {
+        config[key] = Array.isArray(value) ? [...value] : value;
+    }
+    if (raw && typeof raw === 'object') {
+        const source = raw;
+        for (const key of Object.keys(config)) {
+            if (source[key] !== undefined && source[key] !== null)
+                config[key] = source[key];
+        }
+    }
+    return config;
+}
+function parseRoutineConfig(routineType, raw) {
+    const limits = ROUTINE_CONFIG_LIMITS[routineType];
+    const config = fullConfigFor(routineType, raw);
+    if (raw && typeof raw === 'object') {
+        const source = raw;
+        for (const key of Object.keys(limits)) {
+            if (key === 'days') {
+                if (source.days !== undefined && source.days !== null) {
+                    if (!Array.isArray(source.days) || source.days.length === 0) {
+                        throw new Error('Config inválida para days: se espera un array [1..7]');
+                    }
+                    const days = source.days.map((value) => Number(value));
+                    if (days.some((value) => !Number.isInteger(value) || value < 1 || value > 7)) {
+                        throw new Error('Config inválida para days: valores deben ser enteros 1..7');
+                    }
+                    config.days = [...new Set(days)];
+                }
+                continue;
+            }
+            const value = raw[key];
+            if (value === undefined || value === null)
+                continue;
+            const num = Number(value);
+            if (!Number.isFinite(num))
+                throw new Error('Config inválida para ' + key);
+            const [min, max] = limits[key];
+            config[key] = Math.min(max, Math.max(min, Math.round(num)));
+        }
+    }
+    return config;
+}
+// ─── Small date helpers (all wall-clock dates are America/Argentina/Buenos_Aires) ───
+function todayKeyBA(deps) {
+    return deps.dateKeyInTimezone(deps.nowIso()) || '1970-01-01';
+}
+function weekdayIndex(isoInstant) {
+    const wd = new Intl.DateTimeFormat('en-US', {
+        timeZone: BUENOS_AIRES_TIMEZONE,
+        weekday: 'short',
+    }).formatToParts(new Date(isoInstant)).find((part) => part.type === 'weekday')?.value;
+    return Math.max(0, ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].indexOf(wd || ''));
+}
+function mondayOfWeek(deps, dateKey) {
+    const instant = localDateTimeToIso(dateKey, '12:00', BUENOS_AIRES_TIMEZONE);
+    const offsetDays = weekdayIndex(instant);
+    const monday = new Date(Date.parse(instant) - offsetDays * 86400000).toISOString();
+    return deps.dateKeyInTimezone(monday) || dateKey;
+}
+function addDaysToKey(deps, dateKey, days) {
+    const instant = localDateTimeToIso(dateKey, '12:00', BUENOS_AIRES_TIMEZONE);
+    return deps.dateKeyInTimezone(new Date(Date.parse(instant) + days * 86400000).toISOString()) || dateKey;
+}
+function dayIndexOf(deps, weekStart, dateKey) {
+    if (!dateKey)
+        return -1;
+    for (let i = 0; i < 7; i += 1) {
+        if (addDaysToKey(deps, weekStart, i) === dateKey)
+            return i;
+    }
+    return -1;
+}
+function baHourOfDay(iso) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: BUENOS_AIRES_TIMEZONE,
+        hour: '2-digit',
+        hourCycle: 'h23',
+    }).formatToParts(new Date(iso));
+    return Number(parts.find((part) => part.type === 'hour')?.value || -1);
+}
+// ─── Cluster naming / username normalization ───
+function normalizeUsername(raw) {
+    return String(raw || '').replace(/^@+/, '').toLowerCase().replace(/[._-]/g, '').trim();
+}
+function prettifyClusterName(username) {
+    return username
+        .split(/[._-]/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+}
+// ─── Routine config helpers (v3: see parseRoutineConfig + fullConfigFor above) ───
+function insertDefaultRoutines(deps, clusterId) {
+    const now = deps.nowIso();
+    const insert = deps.db.prepare(`
+    INSERT OR IGNORE INTO cluster_routines (cluster_id, routine_type, config, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'approved', ?, ?)
+  `);
+    for (const type of ROUTINE_TYPES) {
+        insert.run(clusterId, type, deps.jsonValue(DEFAULT_ROUTINE_CONFIGS[type]), now, now);
+    }
+}
+// ─── Accounts / tasks queries ───
+function clusterAccounts(deps, clusterId) {
+    const rows = deps.db.prepare(`
+    SELECT sa.*, d.device_id AS device_key, d.device_name, d.device_alias,
+           d.lifecycle_status AS device_lifecycle_status, d.revoked_at AS device_revoked_at
+    FROM account_cluster_members m
+    JOIN social_accounts sa ON sa.id = m.social_account_id
+    LEFT JOIN devices d ON d.id = sa.device_id
+    WHERE m.cluster_id = ?
+    ORDER BY sa.platform, sa.username, sa.id
+  `).all(clusterId);
+    return rows.map((row) => {
+        const accountKey = row.account_key
+            || deps.accountKeyFor(Number(row.user_id), row.device_id === null || row.device_id === undefined ? null : Number(row.device_id), row.platform, row.username);
+        if (!row.account_key && accountKey && row.id) {
+            deps.db.prepare('UPDATE social_accounts SET account_key = ? WHERE id = ?').run(accountKey, row.id);
+        }
+        return { ...row, account_key: accountKey };
+    });
+}
+// FIX 7 [CRÍTICO] — A revoked device cannot authenticate (device_token auth
+// requires lifecycle_status='active'), so tasks assigned to it could never
+// execute. Account → device resolution only plans for ACTIVE devices; the
+// account stays visible in the cluster (accounts[]), it just stops receiving
+// generated tasks. A missing/unknown device also blocks planning.
+function accountHasActiveDevice(account) {
+    if (!account?.device_id)
+        return false;
+    return String(account.device_lifecycle_status || 'active').toLowerCase() === 'active';
+}
+function policyStatusFor(deps, accountKey) {
+    if (!accountKey)
+        return 'automatic';
+    const policy = deps.db.prepare('SELECT status FROM warmup_policies WHERE account_key = ?').get(accountKey);
+    return policy?.status || 'automatic';
+}
+function workspaceOwnerId(deps, workspaceId) {
+    const workspace = deps.db.prepare('SELECT owner_user_id FROM workspaces WHERE id = ?').get(workspaceId);
+    return workspace ? Number(workspace.owner_user_id) : null;
+}
+function taskTypeForPlatform(platform) {
+    return platform === 'tiktok'
+        ? 'warmup_tiktok'
+        : platform === 'youtube'
+            ? 'warmup_youtube'
+            : 'warmup_ig';
+}
+function insertRoutineTask(deps, opts) {
+    const createdAt = deps.nowIso();
+    const params = {
+        ...opts.params,
+        cluster_id: opts.clusterId,
+        routine_id: opts.routineId === null || opts.routineId === undefined ? null : opts.routineId,
+        cluster_name: opts.clusterName,
+        ...(opts.account
+            ? {
+                account: String(opts.account.username || '').replace(/^@+/, ''),
+                platform: opts.account.platform,
+                social_account_id: opts.account.id,
+                account_key: opts.account.account_key,
+            }
+            : {}),
+    };
+    const result = deps.db.prepare(`
+    INSERT INTO task_runs
+      (user_id, device_id, workspace_id, task_type, platform, source, params,
+       status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
+       actual_duration_sec, social_account_id, account_key, cluster_id, routine_id,
+       manual_override, priority, attempt_count, account_snapshot,
+       created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'automatic', ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, 0, ?, 0, ?, ?, ?)
+  `).run(opts.userId, opts.deviceId, opts.workspaceId, opts.taskType, opts.platform, deps.jsonValue(params), opts.scheduledFor, overdueAtIso(opts.scheduledFor), expiresAtIso(opts.scheduledFor), opts.plannedDurationSec, opts.account?.id ?? null, opts.account?.account_key ?? null, opts.clusterId, opts.routineId, opts.priority, deps.jsonValue(opts.account
+        ? {
+            account: opts.account.username,
+            platform: opts.account.platform,
+            device_id: opts.account.device_key,
+            social_account_id: opts.account.id,
+        }
+        : {}), createdAt, createdAt);
+    const task = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(result.lastInsertRowid);
+    deps.recordTaskEvent(task, 'created_automatic', {
+        cluster_id: opts.clusterId,
+        routine_id: opts.routineId,
+        scheduled_for: opts.scheduledFor,
+        planned_duration_sec: opts.plannedDurationSec,
+    });
+    return task;
+}
+// FIX 3 [ALTO] — "Viable" tasks that should block regeneration of a day:
+// anything still actionable ('pending', 'overdue', 'running', 'paused') or
+// already finished with a real outcome ('completed', 'cancelled'). 'expired'
+// and 'error' do NOT block: an expired/errored day would otherwise be frozen
+// forever. The goal was only pending/overdue + the natural completion states.
+// Idempotency keeps working because a second generate sees the live tasks
+// (pending/overdue/running/paused) and returns created:0.
+function existingNonCancelledForDay(deps, clusterId, routineId, dateKey) {
+    const rows = deps.db.prepare(`
+    SELECT * FROM task_runs
+    WHERE cluster_id = ? AND routine_id = ?
+      AND status NOT IN ('cancelled', 'expired', 'error')
+  `).all(clusterId, routineId);
+    return rows.filter((row) => deps.dateKeyInTimezone(row.scheduled_for || row.created_at) === dateKey);
+}
+// FIX 6 [MEDIO] — Overdue tasks belong to a past slot; keep them claimable
+// (claim still works for overdue) but they must not block regeneration of the
+// same day, so generate cancels and re-creates them (see generateWarmupDay /
+// generateScanDay: `existingNonCancelledForDay` no longer treats overdue as
+// blocking — it was already regenerating for 'overdue' since v3? No: it only
+// ever excluded 'cancelled'. FIX 3 widened it to exclude 'expired'/'error',
+// and the per-day check below treats 'overdue' as non-blocking by cancelling
+// the stale rows first).
+function cancelRoutineFutureTasks(deps, clusterId, routineId, reason) {
+    const rows = deps.db.prepare(`
+    SELECT * FROM task_runs
+    WHERE cluster_id = ? AND routine_id = ?
+      AND source = 'automatic'
+      AND status IN ('pending', 'overdue')
+      AND started_at IS NULL
+  `).all(clusterId, routineId);
+    let cancelled = 0;
+    for (const row of rows) {
+        const now = deps.nowIso();
+        const update = deps.db.prepare(`
+      UPDATE task_runs
+      SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+          lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'overdue') AND started_at IS NULL
+    `).run(now, reason, now, row.id);
+        if (update.changes !== 1)
+            continue;
+        const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+        deps.recordTaskEvent(updated, 'auto_cancelled_routine', {
+            cluster_id: clusterId,
+            routine_id: routineId,
+            reason,
+        });
+        cancelled += 1;
+    }
+    return cancelled;
+}
+function cancelClusterFutureTasks(deps, clusterId, reason) {
+    const rows = deps.db.prepare(`
+    SELECT * FROM task_runs
+    WHERE cluster_id = ?
+      AND source = 'automatic'
+      AND status IN ('pending', 'overdue')
+      AND started_at IS NULL
+  `).all(clusterId);
+    let cancelled = 0;
+    for (const row of rows) {
+        const now = deps.nowIso();
+        const update = deps.db.prepare(`
+      UPDATE task_runs
+      SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+          lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'overdue') AND started_at IS NULL
+    `).run(now, reason, now, row.id);
+        if (update.changes !== 1)
+            continue;
+        const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+        deps.recordTaskEvent(updated, 'auto_cancelled_cluster', { cluster_id: clusterId, reason });
+        cancelled += 1;
+    }
+    return cancelled;
+}
+// FIX 7 [CRÍTICO] — Self-healing cleanup: every generate run cancels
+// pending/overdue automatic tasks whose device has been revoked. Those tasks
+// could never authenticate/run (device token auth requires an active device),
+// so keeping them only poisons the queue. Historical rows cancel once, and
+// the day is regenerated for accounts on active devices only.
+function cancelRevokedDeviceTasks(deps) {
+    const rows = deps.db.prepare(`
+    SELECT tr.* FROM task_runs tr
+    JOIN devices d ON d.id = tr.device_id
+    WHERE tr.source = 'automatic'
+      AND tr.status IN ('pending', 'overdue')
+      AND tr.started_at IS NULL
+      AND (d.lifecycle_status != 'active' OR d.revoked_at IS NOT NULL)
+  `).all();
+    let cancelled = 0;
+    for (const row of rows) {
+        const now = deps.nowIso();
+        const update = deps.db.prepare(`
+      UPDATE task_runs
+      SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+          lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+      WHERE id = ? AND status IN ('pending', 'overdue') AND started_at IS NULL
+    `).run(now, 'device_revoked', now, row.id);
+        if (update.changes !== 1)
+            continue;
+        const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+        deps.recordTaskEvent(updated, 'auto_cancelled_device_revoked', {
+            cluster_id: row.cluster_id,
+            routine_id: row.routine_id,
+            device_id: row.device_id,
+        });
+        cancelled += 1;
+    }
+    return cancelled;
+}
+// ─── Generation engine ───
+function scanHoursForTimes(timesPerDay) {
+    const preferred = [11, 21, 16, 9, 14, 19, 8, 13, 18, 22];
+    return preferred
+        .slice(0, Math.max(1, Math.min(6, timesPerDay)))
+        .sort((a, b) => a - b)
+        .map((hour) => String(hour).padStart(2, '0') + ':00');
+}
+function publishingDaysFor(clusterId, postsPerWeek) {
+    // Weekday indexes (Mon=0): Tue=1, Thu=3, Wed=2, Fri=4, Mon=0, Sat=5.
+    // Default = mar y jue; the cluster id parity shifts the fixed days.
+    const base = [1, 3, 2, 4, 0, 5];
+    const offset = Number(clusterId) % 2;
+    return base
+        .slice(0, Math.max(1, Math.min(6, postsPerWeek)))
+        .map((day) => (day + offset) % 7);
+}
+// v3 warmup engine: splits minMinutes into EXACTLY `sessionsPerDay` sessions
+// inside the 12:00–22:00 BA window. Durations are whole minutes that sum back
+// to the configured total; the split is smooth (roughly even, with a random
+// tilt so sessions do not all look identical). Consecutive sessions are
+// separated by at least 30 minutes and at most maxGapHours (the window is
+// re-balanced when the configured gap would overflow 22:00).
+//
+// Gaps are END-to-START: a session may only start once the previous one has
+// finished, plus the separation. This keeps the minimum separation true even
+// when session durations are long relative to the window.
+function warmupSlotsForDay(deps, dateKey, config) {
+    const minMinutes = Math.max(1, Math.round(Number(config.minMinutes) || 0));
+    const sessionCount = Math.min(4, Math.max(1, Math.round(Number(config.sessionsPerDay) || DEFAULT_WARMUP_SESSIONS_PER_DAY)));
+    const maxGapHours = Math.min(10, Math.max(1, Number(config.maxGapHours) || DEFAULT_WARMUP_MAX_GAP_HOURS));
+    const windowStartMin = 12 * 60;
+    const windowEndMin = 22 * 60;
+    const windowMinutes = windowEndMin - windowStartMin;
+    const maxGapMinutes = Math.min(maxGapHours * 60, windowMinutes - (sessionCount - 1) * 30);
+    const durationSecs = [];
+    const totalMinutes = Math.max(1, minMinutes);
+    if (sessionCount === 1) {
+        durationSecs.push(minMinutes * 60);
+    }
+    else if (sessionCount === 2) {
+        const first = Math.floor(totalMinutes / 2);
+        durationSecs.push(first * 60, (totalMinutes - first) * 60);
+    }
+    else if (sessionCount === 3) {
+        const first = Math.floor(totalMinutes / 3);
+        const second = Math.floor((totalMinutes - first) / 2);
+        durationSecs.push(first * 60, second * 60, (totalMinutes - first - second) * 60);
+    }
+    else {
+        const base = Math.floor(totalMinutes / 4);
+        const remainder = totalMinutes - base * 4;
+        for (let i = 0; i < 4; i += 1) {
+            durationSecs.push((base + (i < remainder ? 1 : 0)) * 60);
+        }
+    }
+    const durationMins = durationSecs.map((seconds) => seconds / 60);
+    // Feasibility guard (configs are clamped by parseRoutineConfig, so this
+    // only triggers on impossible stored values): if the minimum span does not
+    // fit inside the window, delay the start so the last session ends at 22:00.
+    const minSpan = durationMins.reduce((sum, value) => sum + value, 0) + (sessionCount - 1) * 30;
+    let start = Math.min(windowStartMin, windowEndMin - minSpan);
+    // Distribute the end-to-start gaps: total slack = window minus the fixed
+    // span; every gap gets the same capped share (min 30 min, max maxGapHours).
+    const totalSlack = Math.max(0, windowEndMin - (start + minSpan));
+    const rawGap = sessionCount > 1 ? Math.floor(totalSlack / (sessionCount - 1)) : 0;
+    const gap = Math.min(maxGapMinutes, Math.max(30, rawGap));
+    const gaps = [];
+    for (let i = 0; i < sessionCount - 1; i += 1)
+        gaps.push(gap);
+    // Slight daily variation: shift the whole schedule forward by a random
+    // slack while keeping the last session inside the window.
+    const unused = Math.max(0, totalSlack - gap * (sessionCount - 1));
+    start += Math.floor(Math.random() * (unused + 1));
+    const slots = [];
+    let cursor = start;
+    for (let i = 0; i < sessionCount; i += 1) {
+        // cursor holds the END of the previous slot after the first iteration,
+        // so moving to the next session only adds the end-to-start gap.
+        if (i > 0)
+            cursor += gaps[i - 1];
+        const hour = Math.floor(cursor / 60);
+        const minute = Math.round(cursor % 60);
+        slots.push({
+            time: String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0'),
+            durationSec: durationSecs[i],
+        });
+        cursor += durationMins[i];
+    }
+    return slots;
+}
+function generateWarmupDay(deps, workspaceId, ownerId, cluster, routine, accounts, dateKey, todayKey) {
+    if (dateKey < todayKey)
+        return 0;
+    const config = parseRoutineConfig('warmup_daily', deps.parseParams(routine.config));
+    const slots = warmupSlotsForDay(deps, dateKey, config);
+    if (existingNonCancelledForDay(deps, cluster.id, routine.id, dateKey).length > 0)
+        return 0;
+    let created = 0;
+    for (const account of accounts) {
+        // FIX 7 — never plan for revoked/missing devices.
+        if (!accountHasActiveDevice(account))
+            continue;
+        for (const slot of slots) {
+            const scheduledFor = localDateTimeToIso(dateKey, slot.time, BUENOS_AIRES_TIMEZONE);
+            insertRoutineTask(deps, {
+                workspaceId,
+                userId: ownerId,
+                deviceId: account.device_id,
+                taskType: taskTypeForPlatform(account.platform),
+                platform: account.platform,
+                account,
+                params: { duration_minutes: Math.max(1, Math.round(slot.durationSec / 60)) },
+                scheduledFor,
+                plannedDurationSec: slot.durationSec,
+                clusterId: cluster.id,
+                routineId: routine.id,
+                clusterName: cluster.name,
+                priority: 0,
+            });
+            created += 1;
+        }
+    }
+    return created;
+}
+function generateScanDay(deps, workspaceId, ownerId, cluster, routine, accounts, dateKey, todayKey) {
+    if (dateKey < todayKey)
+        return 0;
+    const config = parseRoutineConfig('scan_auto', deps.parseParams(routine.config));
+    if (existingNonCancelledForDay(deps, cluster.id, routine.id, dateKey).length > 0)
+        return 0;
+    const hours = scanHoursForTimes(config.timesPerDay);
+    let created = 0;
+    for (const account of accounts) {
+        // FIX 7 — never plan for revoked/missing devices.
+        if (!accountHasActiveDevice(account))
+            continue;
+        for (const time of hours) {
+            const scheduledFor = localDateTimeToIso(dateKey, time, BUENOS_AIRES_TIMEZONE);
+            insertRoutineTask(deps, {
+                workspaceId,
+                userId: ownerId,
+                deviceId: account.device_id,
+                taskType: 'scan_' + account.platform,
+                platform: account.platform,
+                account,
+                params: { duration_minutes: 10, times_per_day: config.timesPerDay },
+                scheduledFor,
+                plannedDurationSec: 600,
+                clusterId: cluster.id,
+                routineId: routine.id,
+                clusterName: cluster.name,
+                priority: 100,
+            });
+            created += 1;
+        }
+    }
+    return created;
+}
+function publishingDayIndexes(deps, clusterId, config) {
+    const days = config.days;
+    if (Array.isArray(days) && days.length > 0) {
+        // ISO-style days (1=Mon .. 7=Sun) mapped to Mon=0 indexes, rotating when
+        // there are more posts than configured days.
+        const iso = days.map((value) => Number(value)).filter((value) => value >= 1 && value <= 7);
+        if (iso.length) {
+            // ISO weekdays are 1=Mon..7=Sun; planner indexes are Mon=0..Sun=6,
+            // so 1 -> 0 and 7 -> 6 (value % 7 would shift everything by one day).
+            const indexes = iso.map((value) => (value + 6) % 7);
+            const postsPerWeek = Math.min(14, Math.max(1, Math.round(Number(config.postsPerWeek) || 1)));
+            const result = [];
+            for (let i = 0; i < postsPerWeek; i += 1)
+                result.push(indexes[i % indexes.length]);
+            return result;
+        }
+    }
+    // Legacy fallback: fixed mar/jue with the v2 parity offset.
+    return publishingDaysFor(clusterId, Number(config.postsPerWeek) || 1);
+}
+// FIX 2 [CRÍTICO] — Publishing is now a PLAN, not materialized placeholder
+// tasks. generatePublishingWeek no longer inserts task_runs: the weekly plan
+// is derived from the publishing routine (postsPerWeek × days, distributed
+// across the cluster's accounts) and rendered by the week view, while REAL
+// tasks are only created when the owner uploads a video via
+// POST /api/clusters/:id/publish. This removes the "— definir contenido —"
+// placeholder rows that the Android app would claim → discard → re-claim
+// forever (publish_reel is not in the 6 task types the app executes).
+function publishingPlanForWeek(deps, clusterId, routine, accounts, weekStart, todayKey) {
+    const config = parseRoutineConfig('publishing', deps.parseParams(routine.config));
+    const days = publishingDayIndexes(deps, clusterId, config);
+    const plan = [];
+    for (const dayIndex of days) {
+        const dateKey = addDaysToKey(deps, weekStart, dayIndex);
+        if (dateKey < todayKey)
+            continue;
+        for (const account of accounts) {
+            if (!accountHasActiveDevice(account))
+                continue;
+            plan.push({ dateKey, account });
+        }
+    }
+    return plan;
+}
+function generatePublishingWeek(deps, workspaceId, ownerId, cluster, routine, accounts, weekStart, todayKey) {
+    // FIX 2: nothing is inserted anymore — the plan is computed on read.
+    // Keep the signature so callers (and the created count) stay compatible.
+    publishingPlanForWeek(deps, cluster.id, routine, accounts, weekStart, todayKey);
+    return 0;
+}
+function generateClusterWeek(deps, workspaceId, cluster, weekStart, todayKey) {
+    const ownerId = workspaceOwnerId(deps, workspaceId);
+    if (!ownerId)
+        return 0;
+    const accounts = clusterAccounts(deps, cluster.id);
+    const routines = deps.db.prepare('SELECT * FROM cluster_routines WHERE cluster_id = ?').all(cluster.id);
+    let created = 0;
+    // FIX 6 [MEDIO] — Overdue tasks of approved routines are re-planed: cancel
+    // them (they belong to a past slot; the claim protocol can still pick them,
+    // but a generate run replaces them with a fresh slot for the current day)
+    // so the day is not frozen by a stale overdue row. Only 'overdue' rows are
+    // touched — pending/running/paused stay untouched (idempotency preserved).
+    const weekEnd = addDaysToKey(deps, weekStart, 6);
+    for (const routine of routines) {
+        if (routine.status !== 'approved')
+            continue;
+        const overdueRows = deps.db.prepare(`
+      SELECT * FROM task_runs
+      WHERE cluster_id = ? AND routine_id = ?
+        AND source = 'automatic' AND status = 'overdue' AND started_at IS NULL
+        AND scheduled_for IS NOT NULL
+    `).all(cluster.id, routine.id);
+        for (const row of overdueRows) {
+            const rowKey = deps.dateKeyInTimezone(row.scheduled_for);
+            if (!rowKey || rowKey < weekStart || rowKey > weekEnd)
+                continue;
+            const now = deps.nowIso();
+            const update = deps.db.prepare(`
+        UPDATE task_runs
+        SET status = 'cancelled', completed_at = COALESCE(completed_at, ?),
+            lease_expires_at = NULL, cancel_reason = ?, updated_at = ?
+        WHERE id = ? AND status = 'overdue' AND started_at IS NULL
+      `).run(now, 'routine_overdue_replanned', now, row.id);
+            if (update.changes !== 1)
+                continue;
+            const updated = deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(row.id);
+            deps.recordTaskEvent(updated, 'auto_cancelled_routine', {
+                cluster_id: cluster.id,
+                routine_id: routine.id,
+                reason: 'routine_overdue_replanned',
+            });
+        }
+    }
+    for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+        const dateKey = addDaysToKey(deps, weekStart, dayIndex);
+        if (dateKey < todayKey)
+            continue;
+        for (const routine of routines) {
+            if (routine.status !== 'approved')
+                continue;
+            if (routine.routine_type === 'warmup_daily') {
+                created += generateWarmupDay(deps, workspaceId, ownerId, cluster, routine, accounts, dateKey, todayKey);
+            }
+            else if (routine.routine_type === 'scan_auto') {
+                created += generateScanDay(deps, workspaceId, ownerId, cluster, routine, accounts, dateKey, todayKey);
+            }
+        }
+    }
+    for (const routine of routines) {
+        if (routine.status !== 'approved' || routine.routine_type !== 'publishing')
+            continue;
+        created += generatePublishingWeek(deps, workspaceId, ownerId, cluster, routine, accounts, weekStart, todayKey);
+    }
+    return created;
+}
+/**
+ * Materializes one week (Monday..Sunday in BA) for every confirmed cluster
+ * of the workspace. Idempotent per (cluster, routine, day). Also cleans up
+ * unstarted automatic tasks of routines that are no longer approved.
+ */
+function generatePlannerWeek(deps, workspaceId, weekStart) {
+    const todayKey = todayKeyBA(deps);
+    const clusters = deps.db.prepare(`
+    SELECT * FROM account_clusters
+    WHERE workspace_id = ? AND status = 'confirmed'
+    ORDER BY id
+  `).all(workspaceId);
+    let created = 0;
+    let cancelled = 0;
+    // FIX 7: cancel orphaned automatic tasks pointing at revoked devices
+    // (they can never authenticate). This self-heals staging/production data.
+    cancelled += cancelRevokedDeviceTasks(deps);
+    for (const cluster of clusters) {
+        const routines = deps.db.prepare('SELECT * FROM cluster_routines WHERE cluster_id = ?').all(cluster.id);
+        for (const routine of routines) {
+            if (routine.status !== 'approved') {
+                cancelled += cancelRoutineFutureTasks(deps, cluster.id, routine.id, 'routine_not_approved');
+            }
+        }
+        created += generateClusterWeek(deps, workspaceId, cluster, weekStart, todayKey);
+    }
+    return { created, cancelled };
+}
+function generateForCurrentAndNext(deps, workspaceId) {
+    const todayKey = todayKeyBA(deps);
+    const current = mondayOfWeek(deps, todayKey);
+    const next = mondayOfWeek(deps, addDaysToKey(deps, todayKey, 7));
+    const a = generatePlannerWeek(deps, workspaceId, current);
+    const b = generatePlannerWeek(deps, workspaceId, next);
+    return { created: a.created + b.created, cancelled: a.cancelled + b.cancelled };
+}
+// ─── Views (week item, list item, history) ───
+// FIX 2 — A publish_reel task is "real" when it carries a video asset or a
+// video_url; historical placeholders (empty video_url, '— definir contenido —')
+// are filtered out of the week view so the webapp never renders phantom
+// posts. They remain in task_runs for history purposes.
+function publishTaskHasAsset(params) {
+    return Boolean(params.asset_id || params.assetId || params.video_url);
+}
+function weekTasks(deps, workspaceId, clusterId, weekStart, weekEnd) {
+    const rows = deps.db.prepare(`
+    SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
+    FROM task_runs tr
+    LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
+    LEFT JOIN devices d ON d.id = tr.device_id
+    WHERE tr.workspace_id = ? AND tr.cluster_id = ? AND tr.scheduled_for IS NOT NULL
+    ORDER BY COALESCE(tr.scheduled_for, tr.created_at) ASC, tr.id ASC
+  `).all(workspaceId, clusterId);
+    return rows.filter((row) => {
+        const dk = deps.dateKeyInTimezone(row.scheduled_for);
+        if (dk === null || dk < weekStart || dk > weekEnd)
+            return false;
+        if (row.task_type === 'publish_reel' && !publishTaskHasAsset(deps.parseParams(row.params))) {
+            return false;
+        }
+        return true;
+    });
+}
+function plannerTaskView(deps, task, clusterNameOverride) {
+    const params = deps.parseParams(task.params);
+    const durationMin = deps.numberValue(task.planned_duration_sec)
+        ? Math.max(1, Math.round(Number(task.planned_duration_sec || 0) / 60))
+        : deps.numberValue(params.duration_minutes);
+    return {
+        id: task.id,
+        taskType: task.task_type,
+        status: task.status,
+        scheduledFor: task.scheduled_for,
+        durationMin,
+        clusterId: task.cluster_id === null || task.cluster_id === undefined ? null : Number(task.cluster_id),
+        clusterName: clusterNameOverride !== undefined
+            ? clusterNameOverride
+            : (params.cluster_name || null),
+        username: task.account_username || params.account || '',
+        platform: task.platform || params.platform || '',
+        deviceAlias: task.device_alias || null,
+        source: task.source || 'manual',
+        // FIX 2 — additive: expose the raw params so the webapp can render the
+        // video asset (video_url / assetId) for real publications.
+        params,
+    };
+}
+function computeClusterSeries(deps, workspaceId, cluster, accounts, routines, tasks, weekStart) {
+    const todayKey = todayKeyBA(deps);
+    const accountKeys = accounts.map((a) => a.account_key).filter(Boolean);
+    const warmupExecuted = new Array(7).fill(0);
+    const warmupPlanned = new Array(7).fill(0);
+    const postsExecuted = new Array(7).fill(0);
+    const postsPlanned = new Array(7).fill(0);
+    const scansExecuted = new Array(7).fill(0);
+    const sessions = accountKeys.length
+        ? deps.db.prepare(`
+        SELECT timestamp, elapsed_sec, account_key FROM warmup_sessions
+        WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
+      `).all(...accountKeys)
+        : [];
+    for (const session of sessions) {
+        const idx = dayIndexOf(deps, weekStart, deps.dateKeyInTimezone(session.timestamp));
+        if (idx >= 0)
+            warmupExecuted[idx] += deps.numberValue(session.elapsed_sec) / 60;
+    }
+    const completed = deps.db.prepare(`
+    SELECT task_type, completed_at, scheduled_for, params FROM task_runs
+    WHERE workspace_id = ? AND cluster_id = ? AND status = 'completed'
+  `).all(workspaceId, cluster.id);
+    for (const row of completed) {
+        const idx = dayIndexOf(deps, weekStart, deps.dateKeyInTimezone(row.completed_at || row.scheduled_for));
+        if (idx < 0)
+            continue;
+        if (row.task_type === 'publish_reel') {
+            // FIX 2 — only REAL publications (with video content) count as executed
+            if (!publishTaskHasAsset(deps.parseParams(row.params)))
+                continue;
+            postsExecuted[idx] += 1;
+        }
+        else if (String(row.task_type).startsWith('scan_')) {
+            scansExecuted[idx] += 1;
+        }
+    }
+    for (const task of tasks) {
+        const idx = dayIndexOf(deps, weekStart, deps.dateKeyInTimezone(task.scheduled_for));
+        if (idx < 0)
+            continue;
+        if (['completed', 'cancelled', 'expired', 'error'].includes(task.status))
+            continue;
+        if (String(task.task_type).startsWith('warmup_')) {
+            warmupPlanned[idx] += deps.numberValue(task.planned_duration_sec) / 60;
+        }
+        else if (task.task_type === 'publish_reel' && publishTaskHasAsset(deps.parseParams(task.params))) {
+            postsPlanned[idx] += 1;
+        }
+    }
+    // FIX 2 — posts series = executed real posts (with asset) + the publishing
+    // plan derived from the routine. The plan is only counted for accounts that
+    // can actually execute (active device); the routine counts one post per
+    // account per configured day, so postsPerWeek × accounts is the weekly total.
+    const publishingRoutine = routines.find((routine) => routine.routineType === 'publishing');
+    const publishAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+    if (publishingRoutine && publishingRoutine.status === 'approved') {
+        const config = parseRoutineConfig('publishing', publishingRoutine.config);
+        const dayIndexes = publishingDayIndexes(deps, cluster.id, config);
+        for (const dayIndex of dayIndexes) {
+            const dateKey = addDaysToKey(deps, weekStart, dayIndex);
+            if (dateKey < todayKey)
+                continue;
+            postsPlanned[dayIndex] += publishAccounts.length;
+        }
+    }
+    const todayIdx = dayIndexOf(deps, weekStart, todayKey);
+    const warmup = warmupExecuted.map((executed, idx) => Math.round(executed + (idx === todayIdx ? 0 : warmupPlanned[idx])));
+    const posts = postsExecuted.map((executed, idx) => executed + (idx === todayIdx ? 0 : postsPlanned[idx]));
+    // health: paused si todas las rutinas paused; deficit si algún día pasado
+    // quedó debajo de lo exigido por una rutina aprobada; ok el resto.
+    let health = 'ok';
+    if (routines.length > 0 && routines.every((routine) => routine.status === 'paused')) {
+        health = 'paused';
+    }
+    else if (todayIdx >= 0) {
+        const approvedWarmup = routines.find((r) => r.routineType === 'warmup_daily' && r.status === 'approved');
+        const approvedScan = routines.find((r) => r.routineType === 'scan_auto' && r.status === 'approved');
+        const approvedPublish = routines.find((r) => r.routineType === 'publishing' && r.status === 'approved');
+        for (let i = 0; i < todayIdx; i += 1) {
+            if (approvedWarmup) {
+                const config = parseRoutineConfig('warmup_daily', approvedWarmup.config);
+                const warmupAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+                if (warmupAccounts.length && warmupExecuted[i] < config.minMinutes * warmupAccounts.length) {
+                    health = 'deficit';
+                    break;
+                }
+            }
+            if (approvedScan) {
+                const config = parseRoutineConfig('scan_auto', approvedScan.config);
+                const scanAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+                if (scanAccounts.length && scansExecuted[i] < config.timesPerDay * scanAccounts.length) {
+                    health = 'deficit';
+                    break;
+                }
+            }
+            if (approvedPublish) {
+                const config = parseRoutineConfig('publishing', approvedPublish.config);
+                const publishAccounts = accounts.filter((account) => accountHasActiveDevice(account));
+                if (publishAccounts.length
+                    && publishingDaysFor(cluster.id, config.postsPerWeek).includes(i)
+                    && postsExecuted[i] < publishAccounts.length) {
+                    health = 'deficit';
+                    break;
+                }
+            }
+        }
+    }
+    return { warmup, posts, views: [0, 0, 0, 0, 0, 0, 0], health };
+}
+function buildWeekClusterItem(deps, workspaceId, cluster, weekStart, weekEnd) {
+    const rawAccounts = clusterAccounts(deps, cluster.id);
+    const accounts = rawAccounts.map((account) => ({
+        ...account,
+        policy_status: policyStatusFor(deps, account.account_key),
+    }));
+    const routines = deps.db.prepare('SELECT * FROM cluster_routines WHERE cluster_id = ?').all(cluster.id).map((routine) => ({
+        id: routine.id,
+        routineType: routine.routine_type,
+        status: routine.status,
+        config: deps.parseParams(routine.config),
+    }));
+    const tasks = weekTasks(deps, workspaceId, cluster.id, weekStart, weekEnd);
+    const series = computeClusterSeries(deps, workspaceId, cluster, accounts, routines, tasks, weekStart);
+    return {
+        id: cluster.id,
+        name: cluster.name,
+        status: cluster.status,
+        health: series.health,
+        accounts: accounts.map((account) => ({
+            id: account.id,
+            platform: account.platform,
+            username: account.username,
+            deviceAlias: account.device_alias || null,
+            policyStatus: account.policy_status,
+            // FIX 7 — additive: tells the webapp whether this account can actually
+            // receive tasks (its device is active). Used by computeSummary to count
+            // only planifiable accounts in the weekly publication total.
+            deviceActive: accountHasActiveDevice(account),
+        })),
+        routines,
+        metricSeries: {
+            warmup: series.warmup,
+            posts: series.posts,
+            views: series.views,
+        },
+        tasks: tasks.map((task) => plannerTaskView(deps, task)),
+    };
+}
+function computeSummary(deps, items, weekStart) {
+    let tasksTotal = 0;
+    let tasksRunning = 0;
+    let tasksQueued = 0;
+    let publishTotal = 0;
+    let warmupMinutesPlanned = 0;
+    for (const item of items) {
+        for (const task of item.tasks) {
+            tasksTotal += 1;
+            if (task.status === 'running')
+                tasksRunning += 1;
+            if (task.status === 'pending' || task.status === 'overdue')
+                tasksQueued += 1;
+            if (task.taskType === 'publish_reel' && publishTaskHasAsset(deps.parseParams(task.params ?? {}))) {
+                publishTotal += 1;
+            }
+            if (String(task.taskType).startsWith('warmup_')
+                && ['pending', 'overdue', 'running', 'paused'].includes(task.status)) {
+                warmupMinutesPlanned += deps.numberValue(task.durationMin);
+            }
+        }
+        // FIX 2 — the publishing PLAN (routine) also counts toward the weekly
+        // summary, so "Publicaciones esta semana" stays coherent when tasks are
+        // not materialized. Real tasks were already counted above.
+        const publishingRoutine = (item.routines || []).find((routine) => routine.routineType === 'publishing' && routine.status === 'approved');
+        if (publishingRoutine) {
+            const planConfig = parseRoutineConfig('publishing', publishingRoutine.config);
+            // FIX 7 — count only accounts with an active device (account view carries
+            // `deviceActive` since the slim view has no device info).
+            const publishAccounts = (item.accounts || []).filter((account) => account.deviceActive === true);
+            const weekStartKey = weekStart || mondayOfWeek(deps, todayKeyBA(deps));
+            const today = todayKeyBA(deps);
+            const planDays = publishingDayIndexes(deps, Number(item.id), planConfig)
+                .map((dayIndex) => addDaysToKey(deps, weekStartKey, dayIndex))
+                .filter((dateKey) => dateKey >= today);
+            publishTotal += planDays.length * publishAccounts.length;
+        }
+    }
+    return { tasksTotal, tasksRunning, tasksQueued, publishTotal, warmupMinutesPlanned };
+}
+// ─── History / detail ───
+function buildClusterHistory(deps, workspaceId, cluster) {
+    const accounts = clusterAccounts(deps, cluster.id);
+    const accountKeys = accounts.map((a) => a.account_key).filter(Boolean);
+    const todayKey = todayKeyBA(deps);
+    const publications = deps.db.prepare(`
+    SELECT tr.*, sa.username AS account_username
+    FROM task_runs tr
+    LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
+    WHERE tr.workspace_id = ? AND tr.cluster_id = ? AND tr.task_type = 'publish_reel'
+    ORDER BY COALESCE(tr.scheduled_for, tr.created_at) DESC, tr.id DESC
+    LIMIT 10
+  `).all(workspaceId, cluster.id);
+    const sessions = accountKeys.length
+        ? deps.db.prepare(`
+        SELECT timestamp, elapsed_sec, account_key FROM warmup_sessions
+        WHERE status = 'completed' AND account_key IN (${accountKeys.map(() => '?').join(',')})
+      `).all(...accountKeys)
+        : [];
+    // FIX 2 — history stats count REAL publications only (with video content);
+    // legacy placeholder rows (empty video_url) are excluded.
+    const completedPosts = deps.db.prepare(`
+    SELECT completed_at, scheduled_for, params FROM task_runs
+    WHERE workspace_id = ? AND cluster_id = ? AND task_type = 'publish_reel' AND status = 'completed'
+  `).all(workspaceId, cluster.id);
+    const realCompletedPosts = completedPosts.filter((post) => publishTaskHasAsset(deps.parseParams(post.params)));
+    const warmupByDay = [];
+    const postsByDay = [];
+    for (let i = 13; i >= 0; i -= 1) {
+        const dayKey = addDaysToKey(deps, todayKey, -i);
+        let warmupMin = 0;
+        for (const session of sessions) {
+            if (deps.dateKeyInTimezone(session.timestamp) === dayKey) {
+                warmupMin += deps.numberValue(session.elapsed_sec) / 60;
+            }
+        }
+        let posts = 0;
+        for (const post of realCompletedPosts) {
+            if (deps.dateKeyInTimezone(post.completed_at || post.scheduled_for) === dayKey)
+                posts += 1;
+        }
+        warmupByDay.push(Math.round(warmupMin));
+        postsByDay.push(posts);
+    }
+    const cutoff = addDaysToKey(deps, todayKey, -30);
+    let warmupMinutes30d = 0;
+    for (const session of sessions) {
+        const dk = deps.dateKeyInTimezone(session.timestamp);
+        if (dk && dk >= cutoff)
+            warmupMinutes30d += deps.numberValue(session.elapsed_sec) / 60;
+    }
+    const posts30d = realCompletedPosts.filter((post) => {
+        const dk = deps.dateKeyInTimezone(post.completed_at || post.scheduled_for);
+        return dk !== null && dk >= cutoff;
+    }).length;
+    // Stats del hero del detalle: publicaciones totales (histórico completo) y posts de esta semana.
+    const publicationsTotal = realCompletedPosts.length;
+    const weekStartKey = mondayOfWeek(deps, todayKey);
+    const postsThisWeek = realCompletedPosts.filter((post) => {
+        const dk = deps.dateKeyInTimezone(post.completed_at || post.scheduled_for);
+        return dk !== null && dk >= weekStartKey;
+    }).length;
+    // v3: warmup por cuenta — una serie de 14 días por cada cuenta del cluster
+    // (minutos ejecutados). Las sesiones se agrupan por account_key; las cuentas
+    // sin account_key devuelven una serie de ceros.
+    const sessionsByAccount = new Map();
+    for (const session of sessions) {
+        const key = String(session.account_key || '');
+        if (!key)
+            continue;
+        const list = sessionsByAccount.get(key) || [];
+        list.push(session);
+        sessionsByAccount.set(key, list);
+    }
+    const accountsWarmup = accounts.map((account) => {
+        const list = sessionsByAccount.get(String(account.account_key || '')) || [];
+        const series = [];
+        for (let i = 13; i >= 0; i -= 1) {
+            const dayKey = addDaysToKey(deps, todayKey, -i);
+            let minutes = 0;
+            for (const session of list) {
+                if (deps.dateKeyInTimezone(session.timestamp) === dayKey) {
+                    minutes += deps.numberValue(session.elapsed_sec) / 60;
+                }
+            }
+            series.push(Math.round(minutes));
+        }
+        return {
+            accountId: Number(account.id),
+            username: account.username || '',
+            platform: account.platform || '',
+            warmupByDay: series,
+        };
+    });
+    return {
+        publications: publications
+            // FIX 2 — history only shows real publications (with video content);
+            // legacy placeholders stay in the DB but are not presented as posts.
+            .filter((publication) => {
+            const params = deps.parseParams(publication.params);
+            return publishTaskHasAsset(params);
+        })
+            .map((publication) => {
+            const params = deps.parseParams(publication.params);
+            const assetId = String(params.asset_id || params.assetId || '');
+            return {
+                id: publication.id,
+                taskType: publication.task_type,
+                status: publication.status,
+                scheduledFor: publication.scheduled_for,
+                username: publication.account_username || params.account || '',
+                platform: publication.platform || params.platform || '',
+                title: params.title || '',
+                assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
+            };
+        }),
+        warmupByDay,
+        postsByDay,
+        accountsWarmup,
+        stats: { warmupMinutes30d: Math.round(warmupMinutes30d), posts30d, publicationsTotal, postsThisWeek, views: null },
+    };
+}
+// ─── Auto-detection ───
+function detectGroups(deps, workspaceId, accountsOverride) {
+    const rows = accountsOverride || deps.db.prepare(`
+    SELECT sa.* FROM social_accounts sa
+    JOIN workspace_members wm ON wm.user_id = sa.user_id
+    WHERE wm.workspace_id = ? AND wm.status = 'active'
+    ORDER BY sa.platform, sa.username, sa.id
+  `).all(workspaceId);
+    const byNormalized = new Map();
+    for (const row of rows) {
+        const normalized = normalizeUsername(row.username);
+        if (!normalized)
+            continue;
+        const list = byNormalized.get(normalized) || [];
+        list.push(row);
+        byNormalized.set(normalized, list);
+    }
+    const clustered = new Set();
+    for (const member of deps.db.prepare('SELECT social_account_id FROM account_cluster_members').all()) {
+        clustered.add(Number(member.social_account_id));
+    }
+    const groups = [];
+    for (const [normalized, groupAccounts] of byNormalized) {
+        const platforms = new Set(groupAccounts.map((account) => account.platform));
+        if (groupAccounts.length < 2 || platforms.size < 2)
+            continue;
+        if (groupAccounts.some((account) => clustered.has(Number(account.id))))
+            continue;
+        groups.push({
+            username: normalized,
+            name: prettifyClusterName(String(groupAccounts[0].username || normalized)),
+            accounts: groupAccounts,
+        });
+    }
+    groups.sort((a, b) => a.name.localeCompare(b.name));
+    return groups;
+}
+function createClusterFromGroup(deps, workspaceId, group, status) {
+    const now = deps.nowIso();
+    const result = deps.db.prepare(`
+    INSERT INTO account_clusters (workspace_id, name, status, detection_method, created_at, updated_at)
+    VALUES (?, ?, ?, 'auto', ?, ?)
+  `).run(workspaceId, group.name, status, now, now);
+    const clusterId = Number(result.lastInsertRowid);
+    const insertMember = deps.db.prepare('INSERT OR IGNORE INTO account_cluster_members (cluster_id, social_account_id) VALUES (?, ?)');
+    for (const account of group.accounts)
+        insertMember.run(clusterId, Number(account.id));
+    if (status === 'confirmed')
+        insertDefaultRoutines(deps, clusterId);
+    return deps.db.prepare('SELECT * FROM account_clusters WHERE id = ?').get(clusterId);
+}
+// ─── Seed / demo (idempotent) ───
+// FIX 5 [MEDIO] — Demo seeding is opt-in. The previous default (auto-seed on
+// first GET of an empty workspace, unless NODE_ENV=production) surprised real
+// deployments by fabricating clusters/history. Now it requires
+// SOUTHFARM_PLANNER_SEED=1 explicitly; without it the workspace stays empty
+// and the planner generates nothing until clusters are created manually.
+function seedEnabled() {
+    const env = String(process.env.SOUTHFARM_PLANNER_SEED || process.env.SOUTHFARM_SEED_DEMO || '')
+        .trim().toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(env);
+}
+function seedCompletedWarmup(deps, opts) {
+    const scheduledFor = localDateTimeToIso(opts.dayKey, '15:00', BUENOS_AIRES_TIMEZONE);
+    const completedAt = new Date(Date.parse(scheduledFor) + 25 * 60000).toISOString();
+    const createdAt = new Date(Date.parse(scheduledFor) - 3600000).toISOString();
+    const minutes = Math.max(1, Math.round(opts.elapsedSec / 60));
+    const params = {
+        account: opts.account.username,
+        platform: opts.account.platform,
+        duration_minutes: minutes,
+        social_account_id: opts.account.id,
+        account_key: opts.account.account_key,
+        cluster_id: opts.cluster.id,
+        routine_id: opts.routineId,
+        cluster_name: opts.cluster.name,
+    };
+    const result = {
+        elapsed_sec: opts.elapsedSec,
+        platform: opts.account.platform,
+        account: opts.account.username,
+        timestamp: completedAt,
+    };
+    const r = deps.db.prepare(`
+    INSERT INTO task_runs
+      (user_id, device_id, workspace_id, task_type, platform, source, params, result,
+       status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
+       actual_duration_sec, social_account_id, account_key, cluster_id, routine_id,
+       manual_override, priority, attempt_count, created_at, started_at, completed_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'automatic', ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, ?)
+  `).run(opts.ownerId, opts.account.device_id, opts.workspaceId, taskTypeForPlatform(opts.account.platform), opts.account.platform, deps.jsonValue(params), deps.jsonValue(result), scheduledFor, overdueAtIso(scheduledFor), expiresAtIso(scheduledFor), opts.elapsedSec, opts.elapsedSec, opts.account.id, opts.account.account_key, opts.cluster.id, opts.routineId, createdAt, new Date(Date.parse(scheduledFor) + 600000).toISOString(), completedAt, deps.nowIso());
+    const taskId = Number(r.lastInsertRowid);
+    deps.db.prepare(`
+    INSERT INTO warmup_sessions
+      (user_id, device_id, task_run_id, account_key, account, platform,
+       duration_minutes, elapsed_sec, status, timestamp, updated_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)
+  `).run(opts.ownerId, opts.account.device_id, taskId, opts.account.account_key, opts.account.username, opts.account.platform, minutes, opts.elapsedSec, completedAt, deps.nowIso(), deps.nowIso());
+}
+function seedCompletedPublish(deps, opts) {
+    const scheduledFor = localDateTimeToIso(opts.dayKey, '16:00', BUENOS_AIRES_TIMEZONE);
+    const completedAt = new Date(Date.parse(scheduledFor) + 30 * 60000).toISOString();
+    const createdAt = new Date(Date.parse(scheduledFor) - 3600000).toISOString();
+    const params = {
+        account: opts.account.username,
+        platform: opts.account.platform,
+        duration_minutes: 1,
+        social_account_id: opts.account.id,
+        account_key: opts.account.account_key,
+        cluster_id: opts.cluster.id,
+        routine_id: opts.routineId,
+        cluster_name: opts.cluster.name,
+        title: opts.title,
+        video_url: 'https://example.com/demo/' + opts.cluster.id + '-' + opts.dayKey + '.mp4',
+    };
+    const result = {
+        status: 'published',
+        platform: opts.account.platform,
+        account: opts.account.username,
+        timestamp: completedAt,
+        url: params.video_url,
+    };
+    deps.db.prepare(`
+    INSERT INTO task_runs
+      (user_id, device_id, workspace_id, task_type, platform, source, params, result,
+       status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
+       actual_duration_sec, social_account_id, account_key, cluster_id, routine_id,
+       manual_override, priority, attempt_count, created_at, started_at, completed_at, updated_at)
+    VALUES (?, ?, ?, 'publish_reel', ?, 'automatic', ?, ?, 'completed', ?, ?, ?, 60, 60, ?, ?, ?, ?, 0, 0, 1, ?, ?, ?, ?)
+  `).run(opts.ownerId, opts.account.device_id, opts.workspaceId, opts.account.platform, deps.jsonValue(params), deps.jsonValue(result), scheduledFor, overdueAtIso(scheduledFor), expiresAtIso(scheduledFor), opts.account.id, opts.account.account_key, opts.cluster.id, opts.routineId, createdAt, new Date(Date.parse(scheduledFor) + 120000).toISOString(), completedAt, deps.nowIso());
+}
+function seedDemoData(deps) {
+    if (!seedEnabled())
+        return;
+    // Elegir el workspace con más cuentas sociales (el operativo real), no el primero por id.
+    const workspace = deps.db.prepare(`
+    SELECT w.id, w.owner_user_id
+    FROM workspaces w
+    JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.status = 'active'
+    LEFT JOIN social_accounts sa ON sa.user_id = wm.user_id
+    GROUP BY w.id
+    ORDER BY COUNT(sa.id) DESC, w.id ASC
+    LIMIT 1
+  `).get();
+    if (!workspace)
+        return;
+    const workspaceId = Number(workspace.id);
+    const ownerId = Number(workspace.owner_user_id);
+    const clusterCount = deps.db.prepare('SELECT COUNT(*) AS count FROM account_clusters WHERE workspace_id = ?').get(workspaceId);
+    if (Number(clusterCount.count) > 0)
+        return; // solo si no hay clusters
+    // 1. Sample accounts linked to existing devices (create a demo device if none).
+    let accounts = deps.db.prepare(`
+    SELECT sa.* FROM social_accounts sa
+    JOIN workspace_members wm ON wm.user_id = sa.user_id
+    WHERE wm.workspace_id = ? AND wm.status = 'active'
+  `).all(workspaceId);
+    let devices = deps.db.prepare(`
+    SELECT * FROM devices WHERE workspace_id = ? AND lifecycle_status != 'revoked' ORDER BY id
+  `).all(workspaceId);
+    if (!devices.length) {
+        const now = deps.nowIso();
+        const r = deps.db.prepare(`
+      INSERT INTO devices
+        (user_id, workspace_id, device_id, installation_id, device_name,
+         lifecycle_status, paired_at, last_seen_at, created_at)
+      VALUES (?, ?, 'demo-phone-1', 'demo-phone-1', 'Demo phone', 'active', ?, NULL, ?)
+    `).run(ownerId, workspaceId, now, now);
+        devices = deps.db.prepare('SELECT * FROM devices WHERE id = ?').all(Number(r.lastInsertRowid));
+    }
+    // Remapear cuentas cuyo dispositivo fue eliminado a un celular activo del workspace,
+    // para que la generación de tareas y los aliases se resuelvan correctamente.
+    const activeDeviceId = Number(devices[0].id);
+    const accountRefresh = () => deps.db.prepare(`
+    SELECT sa.* FROM social_accounts sa
+    JOIN workspace_members wm ON wm.user_id = sa.user_id
+    WHERE wm.workspace_id = ? AND wm.status = 'active'
+  `).all(workspaceId);
+    deps.db.prepare(`
+    UPDATE social_accounts SET device_id = ?
+    WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id = ? AND status = 'active')
+      AND device_id IS NOT NULL AND device_id NOT IN (SELECT id FROM devices)
+  `).run(activeDeviceId, workspaceId);
+    accounts = accountRefresh();
+    const demoBrands = [
+        { base: 'marczell.clips', platforms: ['instagram', 'tiktok', 'youtube'] },
+        { base: 'nova.gaming', platforms: ['instagram', 'tiktok'] },
+        { base: 'cocina.sur', platforms: ['instagram', 'tiktok', 'youtube'] },
+        { base: 'fitzone.ok', platforms: ['instagram', 'tiktok'] },
+        { base: 'urbanstyle', platforms: ['instagram', 'youtube'] },
+    ];
+    let groups = detectGroups(deps, workspaceId, accounts);
+    if (!accounts.length || !groups.length) {
+        const insert = deps.db.prepare(`
+      INSERT OR IGNORE INTO social_accounts (user_id, device_id, platform, username, display_name, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+        const setKey = deps.db.prepare(`
+      UPDATE social_accounts SET account_key = ?
+      WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?
+    `);
+        for (let b = 0; b < demoBrands.length; b += 1) {
+            const brand = demoBrands[b];
+            const device = devices[b % devices.length];
+            if (!device)
+                continue;
+            for (const platform of brand.platforms) {
+                const accountKey = deps.accountKeyFor(ownerId, Number(device.id), platform, brand.base);
+                insert.run(ownerId, Number(device.id), platform, brand.base, brand.base, deps.nowIso());
+                if (accountKey)
+                    setKey.run(accountKey, ownerId, Number(device.id), platform, brand.base);
+            }
+        }
+        accounts = accountRefresh();
+        groups = detectGroups(deps, workspaceId, accounts);
+    }
+    // 2. Auto-detect: confirm up to 4 groups, leave 1 as suggested.
+    const confirmedClusters = [];
+    let suggestedCreated = false;
+    for (const group of groups) {
+        if (confirmedClusters.length < 4) {
+            confirmedClusters.push(createClusterFromGroup(deps, workspaceId, group, 'confirmed'));
+        }
+        else if (!suggestedCreated) {
+            createClusterFromGroup(deps, workspaceId, group, 'suggested');
+            suggestedCreated = true;
+        }
+    }
+    // 3. Demo user (create-if-missing only; never touch existing passwords).
+    const demoEmail = 'demo@southfarm.local';
+    const existingUser = deps.db.prepare('SELECT id FROM users WHERE email = ?').get(demoEmail);
+    if (!existingUser) {
+        const hash = bcrypt.hashSync('southfarm', 10);
+        const r = deps.db.prepare('INSERT INTO users (email, password, name) VALUES (?, ?, ?)')
+            .run(demoEmail, hash, 'Demo User');
+        const demoUserId = Number(r.lastInsertRowid);
+        const member = deps.db.prepare('SELECT id FROM workspace_members WHERE workspace_id = ? AND user_id = ?').get(workspaceId, demoUserId);
+        if (!member) {
+            const now = deps.nowIso();
+            deps.db.prepare(`
+        INSERT INTO workspace_members (workspace_id, user_id, role, status, created_at, updated_at)
+        VALUES (?, ?, 'owner', 'active', ?, ?)
+      `).run(workspaceId, demoUserId, now, now);
+        }
+        console.log(`[ActivityPlanner] Demo user created: ${demoEmail}`);
+    }
+    // 4. Realistic history so the charts have a past.
+    const todayKey = todayKeyBA(deps);
+    const publishTitles = ['Cómo editar en 30s', 'Detrás de cámaras', 'Top 5 trucos', 'Rutina completa'];
+    for (const cluster of confirmedClusters) {
+        const clusterAccountsList = clusterAccounts(deps, cluster.id);
+        const warmupRoutine = deps.db.prepare("SELECT id FROM cluster_routines WHERE cluster_id = ? AND routine_type = 'warmup_daily'").get(cluster.id);
+        const publishRoutine = deps.db.prepare("SELECT id FROM cluster_routines WHERE cluster_id = ? AND routine_type = 'publishing'").get(cluster.id);
+        for (let daysAgo = 7; daysAgo >= 1; daysAgo -= 1) {
+            const account = clusterAccountsList[(daysAgo * 2) % Math.max(1, clusterAccountsList.length)];
+            if (!account || !account.device_id)
+                continue;
+            const elapsedSec = 1200 + ((daysAgo * 137) % 600);
+            seedCompletedWarmup(deps, {
+                workspaceId,
+                ownerId,
+                cluster,
+                routineId: warmupRoutine ? Number(warmupRoutine.id) : null,
+                account,
+                dayKey: addDaysToKey(deps, todayKey, -daysAgo),
+                elapsedSec,
+            });
+        }
+        for (const daysAgo of [10, 4]) {
+            const account = clusterAccountsList[daysAgo % Math.max(1, clusterAccountsList.length)];
+            if (!account || !account.device_id)
+                continue;
+            seedCompletedPublish(deps, {
+                workspaceId,
+                ownerId,
+                cluster,
+                routineId: publishRoutine ? Number(publishRoutine.id) : null,
+                account,
+                dayKey: addDaysToKey(deps, todayKey, -daysAgo),
+                title: publishTitles[daysAgo % publishTitles.length],
+            });
+        }
+    }
+    // 5. Generate current + next week.
+    generateForCurrentAndNext(deps, workspaceId);
+    // 6. Mark one task running if there is an online device (realistic state).
+    const onlineDevice = devices.find((device) => deps.deviceIsOnline(device.last_seen_at));
+    if (onlineDevice) {
+        const task = deps.db.prepare(`
+      SELECT * FROM task_runs
+      WHERE workspace_id = ? AND device_id = ? AND status = 'pending'
+        AND scheduled_for IS NOT NULL
+      ORDER BY scheduled_for ASC LIMIT 1
+    `).get(workspaceId, Number(onlineDevice.id));
+        if (task) {
+            const now = deps.nowIso();
+            deps.db.prepare(`
+        UPDATE task_runs
+        SET status = 'running', claim_token = ?, claimed_at = ?, started_at = ?,
+            lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(randomUUID(), now, now, new Date(Date.now() + 45000).toISOString(), now, now, task.id);
+            deps.recordTaskEvent(deps.db.prepare('SELECT * FROM task_runs WHERE id = ?').get(task.id), 'claimed', { attempt: 1 });
+        }
+    }
+    console.log(`[ActivityPlanner] Seed complete: ${confirmedClusters.length} confirmed clusters, `
+        + `${suggestedCreated ? '1 suggested' : '0 suggested'}, history + plan generated.`);
+}
+function generateStartupPlans(deps) {
+    const workspaces = deps.db.prepare('SELECT id FROM workspaces ORDER BY id').all();
+    for (const workspace of workspaces) {
+        const workspaceId = Number(workspace.id);
+        const count = deps.db.prepare(`
+      SELECT COUNT(*) AS count FROM account_clusters
+      WHERE workspace_id = ? AND status = 'confirmed'
+    `).get(workspaceId);
+        if (!Number(count.count))
+            continue;
+        try {
+            const result = generateForCurrentAndNext(deps, workspaceId);
+            if (result.created || result.cancelled) {
+                console.log(`[ActivityPlanner] Startup plan for workspace ${workspaceId}: `
+                    + `${result.created} created, ${result.cancelled} cancelled.`);
+            }
+        }
+        catch (error) {
+            console.error(`[ActivityPlanner] Startup generation failed for workspace ${workspaceId}:`, error);
+        }
+    }
+}
+// ─── Routes ───
+export function registerActivityPlanner(app, deps) {
+    const { db } = deps;
+    globalThis.__plannerDeps = deps;
+    const clusterById = (workspaceId, id) => {
+        const cluster = db.prepare('SELECT * FROM account_clusters WHERE id = ? AND workspace_id = ?').get(Number(id), workspaceId);
+        return cluster || null;
+    };
+    const workspaceBlockedMessage = (workspaceId) => {
+        const control = deps.ensureWorkspaceControl(workspaceId);
+        if (String(control?.scheduler_mode) === 'paused') {
+            return 'El workspace está en pausa general; reanudá las actividades antes de generar';
+        }
+        if (deps.workspaceControlBlocksAutomatic(control)) {
+            return 'La cola automática está pausada; reanudá la cola antes de generar';
+        }
+        return null;
+    };
+    // ── 1. Weekly view ──
+    app.get('/api/planner/week', deps.auth, (req, res) => {
+        try {
+            const rawStart = req.query.start;
+            let weekStart;
+            if (rawStart) {
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(rawStart)) {
+                    return res.status(400).json({ error: 'start must use YYYY-MM-DD' });
+                }
+                weekStart = mondayOfWeek(deps, rawStart);
+            }
+            else {
+                weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+            }
+            const weekEnd = addDaysToKey(deps, weekStart, 6);
+            const clusters = db.prepare(`
+        SELECT * FROM account_clusters
+        WHERE workspace_id = ? AND status IN ('confirmed', 'suggested')
+        ORDER BY id
+      `).all(req.user.workspaceId);
+            const items = clusters.map((cluster) => buildWeekClusterItem(deps, req.user.workspaceId, cluster, weekStart, weekEnd));
+            res.json({
+                weekStart,
+                weekEnd,
+                now: deps.nowIso(),
+                summary: computeSummary(deps, items, weekStart),
+                clusters: items,
+            });
+        }
+        catch (error) {
+            res.status(400).json({ error: error.message || 'Unable to load planner week' });
+        }
+    });
+    // ── 2. Day timeline ──
+    app.get('/api/planner/day', deps.auth, (req, res) => {
+        try {
+            const date = deps.plannerDateKey(req.query.date);
+            const rows = db.prepare(`
+        SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
+        FROM task_runs tr
+        LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
+        LEFT JOIN devices d ON d.id = tr.device_id
+        WHERE tr.workspace_id = ? AND tr.scheduled_for IS NOT NULL
+        ORDER BY COALESCE(tr.scheduled_for, tr.created_at) ASC, tr.id ASC
+      `).all(req.user.workspaceId);
+            const clusterNames = new Map();
+            for (const cluster of db.prepare('SELECT id, name FROM account_clusters WHERE workspace_id = ?').all(req.user.workspaceId)) {
+                clusterNames.set(Number(cluster.id), String(cluster.name));
+            }
+            const tasks = rows
+                .filter((row) => {
+                if (deps.dateKeyInTimezone(row.scheduled_for) !== date)
+                    return false;
+                // FIX 2 — hide placeholder publish_reel rows (no video asset).
+                if (row.task_type === 'publish_reel' && !publishTaskHasAsset(deps.parseParams(row.params))) {
+                    return false;
+                }
+                return true;
+            })
+                .map((row) => plannerTaskView(deps, row, row.cluster_id === null || row.cluster_id === undefined
+                ? null
+                : clusterNames.get(Number(row.cluster_id)) || null));
+            const hourly = [];
+            for (let hour = 12; hour <= 22; hour += 1) {
+                hourly.push({ hour, count: tasks.filter((task) => baHourOfDay(task.scheduledFor) === hour).length });
+            }
+            res.json({ date, tasks, hourly });
+        }
+        catch (error) {
+            res.status(400).json({ error: error.message || 'Unable to load planner day' });
+        }
+    });
+    // ── 3. Clusters CRUD ──
+    app.get('/api/clusters', deps.auth, (req, res) => {
+        const rows = db.prepare(`
+      SELECT * FROM account_clusters
+      WHERE workspace_id = ? AND status != 'rejected'
+      ORDER BY id
+    `).all(req.user.workspaceId);
+        const items = rows.map((row) => {
+            const members = db.prepare('SELECT social_account_id FROM account_cluster_members WHERE cluster_id = ?').all(row.id);
+            return {
+                id: row.id,
+                name: row.name,
+                status: row.status,
+                detectionMethod: row.detection_method,
+                accountCount: members.length,
+                memberAccountIds: members.map((member) => Number(member.social_account_id)),
+            };
+        });
+        res.json({ clusters: items });
+    });
+    app.post('/api/clusters', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const name = deps.stringValue(req.body.name);
+        if (!name)
+            return res.status(400).json({ error: 'name is required' });
+        if (Array.from(name).length > 80) {
+            return res.status(400).json({ error: 'name must be 80 characters or fewer' });
+        }
+        const rawIds = Array.isArray(req.body.accountIds) ? req.body.accountIds : [];
+        const accountIds = [...new Set(rawIds
+                .map((value) => Number(value))
+                .filter((value) => Number.isInteger(value) && value > 0))];
+        if (accountIds.length) {
+            const { ids, placeholders } = deps.scopedUsers(req.user.userId);
+            const validAccounts = db.prepare(`
+        SELECT id FROM social_accounts
+        WHERE id IN (${accountIds.map(() => '?').join(',')}) AND user_id IN (${placeholders})
+      `).all(...accountIds, ...ids);
+            if (validAccounts.length !== accountIds.length) {
+                return res.status(400).json({ error: 'All accountIds must belong to this workspace' });
+            }
+        }
+        const cluster = db.transaction(() => {
+            const now = deps.nowIso();
+            const result = db.prepare(`
+        INSERT INTO account_clusters (workspace_id, name, status, detection_method, created_at, updated_at)
+        VALUES (?, ?, 'confirmed', 'manual', ?, ?)
+      `).run(req.user.workspaceId, name, now, now);
+            const clusterId = Number(result.lastInsertRowid);
+            insertDefaultRoutines(deps, clusterId);
+            const insertMember = db.prepare('INSERT OR IGNORE INTO account_cluster_members (cluster_id, social_account_id) VALUES (?, ?)');
+            for (const accountId of accountIds)
+                insertMember.run(clusterId, accountId);
+            return db.prepare('SELECT * FROM account_clusters WHERE id = ?').get(clusterId);
+        })();
+        try {
+            generateForCurrentAndNext(deps, req.user.workspaceId);
+        }
+        catch (error) {
+            console.error('[ActivityPlanner] Generation after cluster creation failed:', error);
+        }
+        const weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+        res.status(201).json(buildWeekClusterItem(deps, req.user.workspaceId, cluster, weekStart, addDaysToKey(deps, weekStart, 6)));
+    });
+    app.patch('/api/clusters/:id', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const name = deps.stringValue(req.body.name);
+        if (!name)
+            return res.status(400).json({ error: 'name is required' });
+        if (Array.from(name).length > 80) {
+            return res.status(400).json({ error: 'name must be 80 characters or fewer' });
+        }
+        db.prepare('UPDATE account_clusters SET name = ?, updated_at = ? WHERE id = ?')
+            .run(name, deps.nowIso(), cluster.id);
+        const updated = db.prepare('SELECT * FROM account_clusters WHERE id = ?').get(cluster.id);
+        const weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+        res.json({ ok: true, cluster: buildWeekClusterItem(deps, req.user.workspaceId, updated, weekStart, addDaysToKey(deps, weekStart, 6)) });
+    });
+    app.post('/api/clusters/:id/confirm', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        if (cluster.status === 'rejected') {
+            return res.status(409).json({ error: 'A rejected cluster cannot be confirmed; create a new one instead' });
+        }
+        db.transaction(() => {
+            db.prepare('UPDATE account_clusters SET status = ?, updated_at = ? WHERE id = ?')
+                .run('confirmed', deps.nowIso(), cluster.id);
+            insertDefaultRoutines(deps, cluster.id);
+        })();
+        try {
+            generateForCurrentAndNext(deps, req.user.workspaceId);
+        }
+        catch (error) {
+            console.error('[ActivityPlanner] Generation after confirm failed:', error);
+        }
+        const updated = db.prepare('SELECT * FROM account_clusters WHERE id = ?').get(cluster.id);
+        const weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+        res.json({ ok: true, cluster: buildWeekClusterItem(deps, req.user.workspaceId, updated, weekStart, addDaysToKey(deps, weekStart, 6)) });
+    });
+    app.delete('/api/clusters/:id', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const mode = String(req.query.mode || 'delete');
+        if (mode === 'reject') {
+            if (cluster.status !== 'suggested') {
+                return res.status(409).json({ error: 'Only suggested clusters can be rejected' });
+            }
+            db.prepare('UPDATE account_clusters SET status = ?, updated_at = ? WHERE id = ?')
+                .run('rejected', deps.nowIso(), cluster.id);
+            return res.json({ ok: true, status: 'rejected' });
+        }
+        if (mode !== 'delete') {
+            return res.status(400).json({ error: 'mode must be reject or delete' });
+        }
+        const cancelled = db.transaction(() => {
+            const cancelledCount = cancelClusterFutureTasks(deps, cluster.id, 'cluster_deleted');
+            db.prepare('DELETE FROM account_cluster_members WHERE cluster_id = ?').run(cluster.id);
+            db.prepare('DELETE FROM cluster_routines WHERE cluster_id = ?').run(cluster.id);
+            db.prepare('DELETE FROM account_clusters WHERE id = ?').run(cluster.id);
+            return cancelledCount;
+        })();
+        res.json({ ok: true, status: 'deleted', cancelled_tasks: cancelled });
+    });
+    app.post('/api/clusters/:id/members', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const rawIds = Array.isArray(req.body.accountIds) ? req.body.accountIds : [];
+        const accountIds = [...new Set(rawIds
+                .map((value) => Number(value))
+                .filter((value) => Number.isInteger(value) && value > 0))];
+        if (!accountIds.length)
+            return res.status(400).json({ error: 'accountIds array required' });
+        const { ids, placeholders } = deps.scopedUsers(req.user.userId);
+        const validAccounts = db.prepare(`
+      SELECT id FROM social_accounts
+      WHERE id IN (${accountIds.map(() => '?').join(',')}) AND user_id IN (${placeholders})
+    `).all(...accountIds, ...ids);
+        if (validAccounts.length !== accountIds.length) {
+            return res.status(400).json({ error: 'All accountIds must belong to this workspace' });
+        }
+        const insert = db.prepare('INSERT OR IGNORE INTO account_cluster_members (cluster_id, social_account_id) VALUES (?, ?)');
+        let added = 0;
+        for (const accountId of accountIds)
+            added += Number(insert.run(cluster.id, accountId).changes || 0);
+        const members = db.prepare('SELECT social_account_id FROM account_cluster_members WHERE cluster_id = ?').all(cluster.id);
+        res.json({
+            ok: true,
+            added,
+            memberAccountIds: members.map((member) => Number(member.social_account_id)),
+        });
+    });
+    app.delete('/api/clusters/:id/members/:accountId', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const result = db.prepare('DELETE FROM account_cluster_members WHERE cluster_id = ? AND social_account_id = ?').run(cluster.id, Number(req.params.accountId));
+        if (!result.changes)
+            return res.status(404).json({ error: 'Account is not a member of this cluster' });
+        res.json({ ok: true });
+    });
+    app.get('/api/clusters/suggestions/scan', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        try {
+            const groups = detectGroups(deps, req.user.workspaceId);
+            const created = [];
+            for (const group of groups) {
+                created.push(createClusterFromGroup(deps, req.user.workspaceId, group, 'suggested'));
+            }
+            const weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+            const weekEnd = addDaysToKey(deps, weekStart, 6);
+            res.json({
+                created: created.map((cluster) => buildWeekClusterItem(deps, req.user.workspaceId, cluster, weekStart, weekEnd)),
+            });
+        }
+        catch (error) {
+            res.status(400).json({ error: error.message || 'Unable to scan suggestions' });
+        }
+    });
+    // ── 4. Cluster detail ──
+    app.get('/api/clusters/:id', deps.auth, (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+        const weekEnd = addDaysToKey(deps, weekStart, 6);
+        const clusters = db.prepare(`
+      SELECT id FROM account_clusters
+      WHERE workspace_id = ? AND status != 'rejected'
+      ORDER BY id
+    `).all(req.user.workspaceId);
+        const index = clusters.findIndex((row) => Number(row.id) === Number(cluster.id));
+        const nav = {
+            prevClusterId: index > 0 ? Number(clusters[index - 1].id) : null,
+            nextClusterId: index >= 0 && index < clusters.length - 1 ? Number(clusters[index + 1].id) : null,
+        };
+        res.json({
+            cluster: buildWeekClusterItem(deps, req.user.workspaceId, cluster, weekStart, weekEnd),
+            history: buildClusterHistory(deps, req.user.workspaceId, cluster),
+            nav,
+        });
+    });
+    // ── 5. Routines ──
+    app.get('/api/clusters/:id/routines', deps.auth, (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const routines = db.prepare('SELECT * FROM cluster_routines WHERE cluster_id = ?').all(cluster.id).map((routine) => ({
+            id: routine.id,
+            routineType: routine.routine_type,
+            config: deps.parseParams(routine.config),
+            status: routine.status,
+        }));
+        res.json({ routines });
+    });
+    app.put('/api/clusters/:id/routines/:routineId', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const routine = db.prepare('SELECT * FROM cluster_routines WHERE id = ? AND cluster_id = ?').get(Number(req.params.routineId), cluster.id);
+        if (!routine)
+            return res.status(404).json({ error: 'Routine not found' });
+        const routineType = routine.routine_type;
+        const hasConfig = req.body.config !== undefined && req.body.config !== null;
+        const hasStatus = req.body.status !== undefined && req.body.status !== null;
+        const requestedStatus = hasStatus ? String(req.body.status).toLowerCase() : null;
+        if (hasStatus && !['approved', 'editing', 'paused'].includes(requestedStatus)) {
+            return res.status(400).json({ error: 'status must be approved, editing or paused' });
+        }
+        let config;
+        try {
+            config = parseRoutineConfig(routineType, hasConfig ? req.body.config : deps.parseParams(routine.config));
+        }
+        catch (error) {
+            return res.status(400).json({ error: error.message || 'Invalid routine config' });
+        }
+        const now = deps.nowIso();
+        let nextStatus = hasStatus ? requestedStatus : routine.status;
+        db.transaction(() => {
+            db.prepare('UPDATE cluster_routines SET config = ?, status = ?, updated_at = ? WHERE id = ?')
+                .run(deps.jsonValue(config), nextStatus, now, routine.id);
+            if (hasStatus && requestedStatus === 'approved') {
+                cancelRoutineFutureTasks(deps, cluster.id, routine.id, 'routine_reconfigured');
+            }
+            else if (hasStatus && requestedStatus === 'paused') {
+                cancelRoutineFutureTasks(deps, cluster.id, routine.id, 'routine_paused');
+            }
+            else if (!hasStatus && hasConfig) {
+                // Config-only edit: the new rule is NOT applied until the owner
+                // approves; the toggle goes to "editing" and the plan stays intact.
+                nextStatus = 'editing';
+                db.prepare('UPDATE cluster_routines SET status = ? WHERE id = ?').run('editing', routine.id);
+            }
+        })();
+        let regenerated = false;
+        if (hasStatus && requestedStatus === 'approved') {
+            const blocked = workspaceBlockedMessage(req.user.workspaceId);
+            if (blocked) {
+                return res.status(409).json({ error: blocked });
+            }
+            generateForCurrentAndNext(deps, req.user.workspaceId);
+            regenerated = true;
+        }
+        const updated = db.prepare('SELECT * FROM cluster_routines WHERE id = ?').get(routine.id);
+        res.json({
+            routine: {
+                id: updated.id,
+                routineType: updated.routine_type,
+                config: deps.parseParams(updated.config),
+                status: updated.status,
+            },
+            regenerated,
+        });
+    });
+    // ── 6. Regenerate week ──
+    app.post('/api/planner/week/generate', deps.auth, deps.requireRole('owner', 'admin', 'operator'), (req, res) => {
+        try {
+            const blocked = workspaceBlockedMessage(req.user.workspaceId);
+            if (blocked)
+                return res.status(409).json({ error: blocked });
+            const rawStart = req.body.start;
+            let weekStart;
+            if (rawStart !== undefined && rawStart !== null && String(rawStart).trim()) {
+                const value = String(rawStart).trim();
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+                    return res.status(400).json({ error: 'start must use YYYY-MM-DD' });
+                }
+                weekStart = mondayOfWeek(deps, value);
+            }
+            else {
+                weekStart = mondayOfWeek(deps, todayKeyBA(deps));
+            }
+            const result = db.transaction(() => generatePlannerWeek(deps, req.user.workspaceId, weekStart))();
+            res.json({ created: result.created, cancelled: result.cancelled, weekStart });
+        }
+        catch (error) {
+            res.status(400).json({ error: error.message || 'Unable to generate planner week' });
+        }
+    });
+    // ── 7. Cluster publish (v3: multipart with a real video file; legacy JSON
+    //      body with videoUrl keeps working) ──
+    app.post('/api/clusters/:id/publish', deps.auth, deps.requireRole('owner', 'admin', 'operator'), uploadClusterAsset, (req, res) => {
+        const cluster = clusterById(req.user.workspaceId, req.params.id);
+        if (!cluster)
+            return res.status(404).json({ error: 'Cluster not found' });
+        const blocked = workspaceBlockedMessage(req.user.workspaceId);
+        if (blocked)
+            return res.status(409).json({ error: blocked });
+        const file = req.file;
+        // FIX 4 [MEDIO] — a publication must carry a real video: either a
+        // multipart file or a non-empty videoUrl/video_url. An empty string is
+        // rejected (previously `videoUrl:''` was accepted and created a
+        // placeholder publish_reel with no content).
+        const videoUrl = deps.stringValue(req.body.videoUrl) || deps.stringValue(req.body.video_url);
+        const isMultipart = file !== undefined && file !== null;
+        if (!isMultipart && !videoUrl) {
+            return res.status(400).json({ error: 'Se requiere un archivo de video (campo video) o videoUrl' });
+        }
+        const title = deps.stringValue(req.body.title) || '— definir contenido —';
+        let scheduledFor = deps.nowIso();
+        if (req.body.scheduledFor !== undefined && req.body.scheduledFor !== null) {
+            const timestamp = Date.parse(String(req.body.scheduledFor));
+            if (!Number.isFinite(timestamp)) {
+                return res.status(400).json({ error: 'scheduledFor must be a valid ISO date' });
+            }
+            scheduledFor = new Date(timestamp).toISOString();
+        }
+        const ownerId = workspaceOwnerId(deps, req.user.workspaceId) || req.user.userId;
+        const accounts = clusterAccounts(deps, cluster.id);
+        const assetId = isMultipart ? String(file.assetId || '') : null;
+        const assetName = isMultipart ? String(file.assetName || 'video') : null;
+        let created = 0;
+        for (const account of accounts) {
+            // FIX 7 — never create publish tasks for revoked/missing devices.
+            if (!accountHasActiveDevice(account))
+                continue;
+            insertRoutineTask(deps, {
+                workspaceId: req.user.workspaceId,
+                userId: ownerId,
+                deviceId: account.device_id,
+                taskType: 'publish_reel',
+                platform: account.platform,
+                account,
+                params: {
+                    duration_minutes: 1,
+                    title,
+                    video_url: videoUrl || '',
+                    ...(assetId ? {
+                        asset_id: assetId,
+                        assetId,
+                        assetName,
+                        asset_extension: path.extname(String(assetName || '')).replace(/^\./, ''),
+                    } : {}),
+                },
+                scheduledFor,
+                plannedDurationSec: 60,
+                clusterId: cluster.id,
+                routineId: null,
+                clusterName: cluster.name,
+                priority: 1000,
+            });
+            created += 1;
+        }
+        const response = { created };
+        if (assetId)
+            response.assetId = assetId;
+        res.status(201).json(response);
+    });
+    // ── 8. Cluster asset serving (v3: preview for uploaded publish videos) ──
+    app.get('/assets/cluster/:assetId', deps.auth, (req, res) => {
+        const raw = String(req.params.assetId || '');
+        const assetId = path.basename(raw).replace(/[^a-zA-Z0-9._-]/g, '');
+        if (!assetId || assetId !== raw) {
+            return res.status(400).json({ error: 'Invalid asset id' });
+        }
+        if (!/^asset-\d{13,}-[a-f0-9]{8,}(?:\.[a-z0-9]+)?$/i.test(assetId)) {
+            return res.status(400).json({ error: 'Invalid asset id' });
+        }
+        const filePath = path.join(CLUSTER_ASSETS_DIR, assetId);
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'Asset not found' });
+        }
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeByExtension = {
+            '.mp4': 'video/mp4',
+            '.mov': 'video/quicktime',
+            '.webm': 'video/webm',
+            '.mkv': 'video/x-matroska',
+            '.avi': 'video/x-msvideo',
+            '.m4v': 'video/x-m4v',
+            '.mpg': 'video/mpeg',
+            '.mpeg': 'video/mpeg',
+            '.3gp': 'video/3gpp',
+        };
+        res.type(mimeByExtension[extension] || 'application/octet-stream');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.sendFile(filePath, (error) => {
+            if (error && !res.headersSent) {
+                res.status(404).json({ error: 'Asset not found' });
+            }
+        });
+    });
+    // ── 9. Publications queue (FIX 8) — GET /api/publications ──
+    // Lists the workspace's publish_reel task_runs (real ones: with a video
+    // asset or video_url), newest first, limit 50. Shape is additive to the
+    // WeekTask view; assetUrl resolves to /assets/cluster/:assetId when the
+    // task carries an uploaded file.
+    app.get('/api/publications', deps.auth, (req, res) => {
+        try {
+            const rows = db.prepare(`
+        SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
+        FROM task_runs tr
+        LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
+        LEFT JOIN devices d ON d.id = tr.device_id
+        WHERE tr.workspace_id = ? AND tr.task_type = 'publish_reel'
+        ORDER BY COALESCE(tr.scheduled_for, tr.created_at) DESC, tr.id DESC
+        LIMIT 50
+      `).all(req.user.workspaceId);
+            const publications = rows
+                .filter((row) => {
+                const params = deps.parseParams(row.params);
+                return params.asset_id || params.assetId || params.video_url;
+            })
+                .map((row) => {
+                const params = deps.parseParams(row.params);
+                const assetId = String(params.asset_id || params.assetId || '');
+                return {
+                    id: Number(row.id),
+                    clusterId: row.cluster_id === null || row.cluster_id === undefined
+                        ? null
+                        : Number(row.cluster_id),
+                    clusterName: params.cluster_name || null,
+                    title: params.title || '',
+                    status: row.status,
+                    scheduledFor: row.scheduled_for,
+                    platform: row.platform || params.platform || '',
+                    account: row.account_username || params.account || '',
+                    assetUrl: assetId ? `/assets/cluster/${assetId}` : null,
+                    createdAt: row.created_at,
+                    completedAt: row.completed_at,
+                    params,
+                };
+            });
+            res.json({ publications });
+        }
+        catch (error) {
+            res.status(400).json({ error: error.message || 'Unable to load publications' });
+        }
+    });
+}
+// ─── Startup (seed + initial plan), non-blocking ───
+export function runActivityPlannerStartup(deps) {
+    setTimeout(() => {
+        try {
+            seedDemoData(deps);
+        }
+        catch (error) {
+            console.error('[ActivityPlanner] Seed failed:', error);
+        }
+        try {
+            generateStartupPlans(deps);
+        }
+        catch (error) {
+            console.error('[ActivityPlanner] Startup generation failed:', error);
+        }
+    }, 800);
+}

@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Editor de rutinas · Activity Planner</title>
+<link rel="stylesheet" href="planner.css">
+<style>
+  /* Layout: rutina a la izquierda, preview a la derecha */
+  .ap-routine-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 0.9fr); gap: 16px; align-items: start; }
+  .ap-routine-preview { position: sticky; top: 106px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  /* Cards de rutina por tipo */
+  .ap-routine-card { padding: 0; border: 1px solid var(--border-subtle); border-radius: 14px; background: rgba(15, 15, 18, 0.84); overflow: hidden; }
+  .ap-routine-card + .ap-routine-card { margin-top: 14px; }
+  .ap-routine-card-head {
+    display: flex; align-items: center; gap: 13px;
+    flex-wrap: wrap;
+    padding: 17px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: linear-gradient(120deg, rgba(255, 255, 255, 0.022), transparent 60%);
+  }
+  .ap-routine-glyph {
+    width: 38px; height: 38px; flex: 0 0 38px;
+    display: grid; place-items: center;
+    border: 1px solid currentColor; border-radius: 11px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+  .ap-routine-card-head > div:not(.ap-state-toggle) { min-width: 0; flex: 1 1 200px; }
+  .ap-routine-card-head h3 { margin: 0; color: var(--text-primary); font-size: 15px; letter-spacing: -0.03em; }
+  .ap-routine-card-head p { margin: 5px 0 0; color: var(--text-muted); font-size: 10px; line-height: 1.45; }
+
+  /* ============ Toggle de estado de rutina (3 posiciones) ============
+     Aprobado / Editando / Pausado — reutiliza la anatomía de .ap-segmented
+     (planner.css) con un thumb deslizante y color por estado. */
+  .ap-state-toggle {
+    display: flex; position: relative; flex: 0 0 auto;
+    padding: 3px;
+    border: 1px solid var(--border-subtle); border-radius: 9px;
+    background: rgba(0, 0, 0, 0.22);
+    margin-left: auto;
+  }
+  .ap-state-toggle-thumb {
+    position: absolute; top: 3px; bottom: 3px; left: 3px;
+    width: calc((100% - 6px) / 3);
+    border-radius: 6px;
+    background: var(--bg-hover); box-shadow: var(--shadow-sm);
+    border: 1px solid transparent;
+    transition: transform 0.22s cubic-bezier(0.34, 1.3, 0.32, 1), background 0.22s ease, border-color 0.22s ease;
+  }
+  .ap-state-toggle button {
+    position: relative; z-index: 1;
+    flex: 1 1 0;
+    min-width: 62px; min-height: 28px; padding: 0 10px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    color: var(--text-muted); font-size: 10px; font-weight: 700;
+    border: 0; background: transparent; border-radius: 6px;
+    transition: color 0.18s ease;
+  }
+  .ap-state-toggle button:focus-visible { outline: 2px solid #86efac; outline-offset: 2px; }
+  /* "Editando" es un estado derivado, no una acción: nunca se clickea */
+  .ap-state-toggle button:disabled { cursor: default; opacity: 0.55; }
+  .ap-state-toggle[data-state="editing"] button[data-state="editing"] { opacity: 1; }
+  .ap-state-toggle button svg { display: block; }
+
+  /* thumb + item según estado */
+  .ap-state-toggle[data-state="approved"] .ap-state-toggle-thumb {
+    background: rgba(34, 197, 94, 0.2); border-color: rgba(34, 197, 94, 0.35);
+  }
+  .ap-state-toggle[data-state="editing"] .ap-state-toggle-thumb {
+    background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.36);
+  }
+  .ap-state-toggle[data-state="paused"] .ap-state-toggle-thumb {
+    background: rgba(255, 255, 255, 0.05); border-color: var(--border-default);
+  }
+  .ap-state-toggle[data-state="approved"] .ap-state-toggle button[data-state="approved"] { color: #4ade80; }
+  .ap-state-toggle[data-state="editing"] .ap-state-toggle button[data-state="editing"] { color: #fbbf24; }
+  .ap-state-toggle[data-state="paused"] .ap-state-toggle button[data-state="paused"] { color: var(--text-secondary); }
+
+  /* card atenuada cuando está pausada — el toggle queda fuera del atenuado:
+     es la única vía de salida del estado, siempre visible y operable */
+  .ap-routine-card.is-paused .ap-routine-card-head > div:not(.ap-state-toggle),
+  .ap-routine-card.is-paused .ap-routine-card-head .ap-routine-glyph { opacity: 0.55; }
+  .ap-routine-card.is-paused .ap-routine-card-head .ap-routine-glyph { border-style: dashed; color: var(--text-muted); }
+  .ap-routine-card.is-paused .ap-routine-card-head h3 { color: var(--text-secondary); }
+  .ap-routine-card.is-paused .ap-routine-card-head p { color: var(--text-dim); }
+  .ap-routine-card.is-paused .ap-routine-body { opacity: 0.42; pointer-events: none; }
+  /* sliders/chips de la card pausada: disabled visual además de la opacidad */
+  .ap-routine-card.is-paused input[type="range"] { background: rgba(255, 255, 255, 0.06); }
+  .ap-routine-card.is-paused input[type="range"]::-webkit-slider-thumb { background: var(--text-dim); border-color: var(--bg-surface); box-shadow: none; }
+  .ap-routine-card.is-paused input[type="range"]::-moz-range-thumb { background: var(--text-dim); border-color: var(--bg-surface); box-shadow: none; }
+  .ap-routine-card.is-paused .ap-day-chip.is-on { color: var(--text-muted); border-color: var(--border-subtle); background: rgba(255, 255, 255, 0.02); }
+  .ap-routine-card.is-paused .ap-cluster-check label.is-on { color: var(--text-muted); border-color: var(--border-subtle); background: rgba(255, 255, 255, 0.02); }
+  .ap-routine-card.is-paused .ap-wp-task { opacity: 0.55; }
+
+  /* franja sutil de "cambios sin aplicar" mientras se edita */
+  .ap-routine-card.is-editing { border-color: rgba(245, 158, 11, 0.3); }
+  .ap-routine-hint {
+    display: flex; align-items: center; gap: 8px;
+    max-height: 0; opacity: 0; overflow: hidden;
+    color: #fbbf24; font-size: 10px; line-height: 1.45;
+    padding: 0 12px;
+    border: 1px solid transparent; border-radius: 8px;
+    background: rgba(245, 158, 11, 0.05);
+    transition: max-height 0.28s ease, opacity 0.28s ease, padding 0.28s ease, border-color 0.28s ease, margin-top 0.28s ease;
+  }
+  .ap-routine-card.is-editing .ap-routine-hint {
+    max-height: 48px; opacity: 1;
+    margin-top: 2px; padding: 8px 12px;
+    border-color: rgba(245, 158, 11, 0.24);
+  }
+  .ap-routine-hint svg { flex: 0 0 auto; }
+  .ap-routine-hint em { font-style: normal; color: #fde68a; }
+
+  /* micro-animación al aprobar: la card hace un flash verde sutil y asienta */
+  @keyframes apApplyFlash {
+    0% { border-color: rgba(245, 158, 11, 0.3); }
+    35% { border-color: rgba(34, 197, 94, 0.55); box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.07), var(--shadow-sm); }
+    100% { border-color: var(--border-subtle); box-shadow: var(--shadow-sm); }
+  }
+  .ap-routine-card.is-applying { animation: apApplyFlash 0.7s ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .ap-routine-card.is-applying { animation: none; }
+  }
+
+  .ap-routine-body { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 14px; }
+
+  .ap-rule-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .ap-rule-box {
+    display: flex; flex-direction: column; gap: 7px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-subtle); border-radius: 10px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .ap-rule-box > span { color: var(--text-dim); font-size: 9px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+  .ap-rule-box > strong { color: var(--text-primary); font-size: 15px; letter-spacing: -0.03em; }
+  .ap-rule-box > strong small { color: var(--text-muted); font-size: 10px; font-weight: 500; }
+
+  .ap-days-row { display: flex; gap: 6px; }
+  .ap-day-chip {
+    flex: 1; min-height: 40px;
+    display: grid; place-items: center;
+    color: var(--text-muted); font-size: 10px; font-weight: 700;
+    border: 1px solid var(--border-subtle); border-radius: 9px;
+    background: rgba(255, 255, 255, 0.018);
+    transition: 0.15s ease;
+  }
+  .ap-day-chip:hover { color: var(--text-secondary); border-color: var(--border-default); }
+  .ap-day-chip.is-on { color: #bbf7d0; border-color: rgba(34, 197, 94, 0.32); background: var(--accent-dim); }
+
+  .ap-slider-row { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center; }
+  .ap-slider-row output { color: var(--text-primary); font-size: 17px; font-weight: 700; letter-spacing: -0.04em; white-space: nowrap; }
+  .ap-slider-row output small { color: var(--text-muted); font-size: 10px; font-weight: 500; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 99px;
+    background: linear-gradient(90deg, var(--accent) var(--fill, 50%), rgba(255, 255, 255, 0.08) var(--fill, 50%));
+    outline: none;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #86efac; border: 2px solid #062b15;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.22), 0 2px 6px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: #86efac; border: 2px solid #062b15;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.22);
+    cursor: pointer;
+  }
+  input[type="range"]:focus-visible { outline: 2px solid #86efac; outline-offset: 4px; }
+
+  .ap-hint { color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+
+  /* toast en variante neutra (pausa) — el verde queda para "aplicada" */
+  .ap-toast.is-muted { color: var(--text-secondary); border-color: var(--border-default); background: rgba(24, 24, 27, 0.94); }
+  .ap-toast.is-muted svg { color: #fbbf24; }
+
+  /* Publicación de cluster */
+  .ap-cluster-pub {
+    border-color: rgba(192, 38, 211, 0.28);
+    background: linear-gradient(150deg, rgba(192, 38, 211, 0.06), rgba(15, 15, 18, 0.9) 55%);
+  }
+  .ap-dropzone {
+    display: flex; align-items: center; flex-direction: column; gap: 6px;
+    margin: 4px 0 2px; padding: 24px 16px;
+    color: var(--text-muted); text-align: center;
+    border: 1px dashed var(--border-default); border-radius: 11px;
+    background: rgba(255, 255, 255, 0.012);
+    cursor: pointer; transition: 0.16s ease;
+  }
+  .ap-dropzone:hover { border-color: rgba(192, 38, 211, 0.42); background: rgba(192, 38, 211, 0.05); color: #e879f9; }
+  .ap-dropzone strong { color: var(--text-secondary); font-size: 11px; }
+  .ap-dropzone small { color: var(--text-dim); font-size: 9px; }
+  .ap-drop-icon {
+    width: 37px; height: 37px; margin-bottom: 2px;
+    display: grid; place-items: center;
+    color: #e879f9;
+    border: 1px solid rgba(192, 38, 211, 0.3); border-radius: 11px;
+    background: rgba(192, 38, 211, 0.09);
+  }
+
+  .ap-cluster-check { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ap-cluster-check label {
+    display: inline-flex; align-items: center; gap: 8px;
+    min-height: 36px; padding: 0 12px;
+    color: var(--text-muted); font-size: 11px; font-weight: 600;
+    border: 1px solid var(--border-subtle); border-radius: 9px;
+    background: rgba(255, 255, 255, 0.018);
+    cursor: pointer; transition: 0.15s ease;
+  }
+  .ap-cluster-check label:hover { color: var(--text-secondary); border-color: var(--border-default); }
+  .ap-cluster-check label.is-on { color: #f5d0fe; border-color: rgba(192, 38, 211, 0.38); background: rgba(192, 38, 211, 0.08); }
+  .ap-cluster-check input { accent-color: var(--accent); width: 13px; height: 13px; }
+  .ap-cluster-check .ap-bubble { width: 22px; height: 22px; flex-basis: 22px; font-size: 8px; }
+
+  /* ============ Preview de la semana ============ */
+  .ap-preview-card { border-color: rgba(34, 197, 94, 0.2); }
+  .ap-preview-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .ap-preview-head > div:first-child p { margin: 0; }
+  .ap-preview-head h3 { margin: 5px 0 0; color: var(--text-primary); font-size: 15px; letter-spacing: -0.03em; }
+  .ap-preview-flow {
+    display: flex; align-items: center; gap: 0;
+    margin: 0 20px; padding: 14px 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .ap-flow-step {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; gap: 4px;
+    color: var(--text-muted); font-size: 9px; line-height: 1.4;
+    position: relative; padding-right: 26px;
+  }
+  .ap-flow-step b { color: var(--text-secondary); font-size: 10px; }
+  .ap-flow-step::after {
+    content: "→"; position: absolute; right: 8px; top: 2px;
+    color: var(--text-dim); font-size: 11px;
+  }
+  .ap-flow-step:last-child { padding-right: 0; }
+  .ap-flow-step:last-child::after { display: none; }
+  .ap-flow-step.is-here b { color: var(--accent); }
+
+  /* grilla semanal generada */
+  .ap-week-preview { padding: 16px 20px 20px; }
+  .ap-wp-grid { display: grid; grid-template-columns: 92px repeat(7, minmax(0, 1fr)); gap: 5px; }
+  .ap-wp-day {
+    display: flex; flex-direction: column; gap: 4px;
+    min-height: 118px; padding: 8px 7px;
+    border: 1px solid var(--border-subtle); border-radius: 10px;
+    background: rgba(255, 255, 255, 0.016);
+  }
+  .ap-wp-day > span { color: var(--text-dim); font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-align: center; }
+  .ap-wp-day.is-today { border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.045); }
+  .ap-wp-task {
+    display: flex; align-items: center; gap: 5px;
+    min-height: 20px; padding: 2px 6px;
+    color: var(--text-secondary); font-size: 9px; font-weight: 600;
+    border: 1px solid; border-radius: 6px;
+    background: rgba(0, 0, 0, 0.2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ap-wp-task i { width: 5px; height: 5px; border-radius: 50%; flex: 0 0 5px; background: currentColor; }
+  .ap-wp-task.t-warmup { color: #86efac; border-color: rgba(34, 197, 94, 0.24); }
+  .ap-wp-task.t-scan { color: #93c5fd; border-color: rgba(59, 130, 246, 0.24); }
+  .ap-wp-task.t-publish { color: #e879f9; border-color: rgba(192, 38, 211, 0.28); }
+  .ap-wp-task.t-manual { color: #fcd34d; border-color: rgba(245, 158, 11, 0.26); border-style: dashed; }
+  .ap-wp-count { margin-top: auto; color: var(--text-dim); font-size: 8px; text-align: center; }
+  /* tarea generada con una regla en edición: se muestra, pero atenuada */
+  .ap-wp-task.is-stale { opacity: 0.45; border-style: dashed; }
+  .ap-wp-task.is-stale i { animation: apPulse 1.6s ease-in-out infinite; }
+
+  .ap-wp-gutter { display: flex; flex-direction: column; gap: 5px; }
+  .ap-wp-gutter span {
+    flex: 1; display: flex; align-items: center; justify-content: flex-end;
+    color: var(--text-dim); font-size: 8px; font-weight: 700;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    padding-right: 6px; text-align: right;
+  }
+
+  .ap-preview-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 14px 20px 18px;
+  }
+  .ap-preview-foot small { color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+  .ap-preview-total {
+    display: flex; align-items: baseline; gap: 8px;
+    color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .ap-preview-total strong { color: var(--accent); font-size: 22px; letter-spacing: -0.05em; }
+
+  /* reglas de validación */
+  .ap-rule-check { display: flex; align-items: flex-start; gap: 8px; color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+  .ap-rule-check svg { flex: 0 0 auto; margin-top: 1px; }
+  .ap-rule-check.ok { color: #86efac; }
+  .ap-rule-check.warn { color: #fbbf24; }
+
+  @media (max-width: 1180px) {
+    .ap-routine-layout { grid-template-columns: 1fr; }
+    .ap-routine-preview { position: static; }
+  }
+  @media (max-width: 760px) {
+    .ap-rule-grid { grid-template-columns: 1fr; }
+    .ap-wp-grid { grid-template-columns: 60px repeat(7, minmax(0, 1fr)); }
+    .ap-wp-day { min-height: 96px; padding: 6px 4px; }
+    .ap-wp-task { font-size: 8px; padding: 2px 3px; }
+  }
+</style>
+</head>
+<body>
+<div class="ap-app">
+
+  <!-- ==================== SIDEBAR ==================== -->
+  <aside class="ap-sidebar">
+    <div class="ap-sidebar-top">
+      <div class="ap-brand-lockup">
+        <div class="ap-brand-mark">SF</div>
+        <div><strong>SouthFarm</strong><small>command center</small></div>
+      </div>
+      <div class="ap-workspace-chip"><span class="ap-online-dot"></span>Agencia Sur</div>
+    </div>
+    <nav class="ap-side-nav" aria-label="Navegación del workspace">
+      <p class="ap-nav-caption">WORKSPACE</p>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M10 20v-5h4v5"/></svg>
+      </span><span>Command center</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </span><span>Crear publicación</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="19" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      </span><span>Device fleet</span></a>
+      <a class="ap-nav-item is-active" href="planner-week.html" aria-current="page"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="16" rx="2.5"/><path d="M3.5 9.5h17M8 3v3M16 3v3"/><path d="m9 15 2 2 4-4.5"/></svg>
+      </span><span>Activity Planner</span><b>NEW</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2.5"/></svg>
+      </span><span>Activity history</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/><path d="M16 8.5a3 3 0 1 1 4.2 4"/></svg>
+      </span><span>Team</span><b>RBAC</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.15-1.4l2-1.55-2-3.4-2.4.9A7 7 0 0 0 14 4.7L13.6 2h-3.2L10 4.7a7 7 0 0 0-2.45 1.4l-2.4-.9-2 3.4 2 1.55A7 7 0 0 0 5 12c0 .48.05.95.15 1.4l-2 1.55 2 3.4 2.4-.9A7 7 0 0 0 10 19.3l.4 2.7h3.2l.4-2.7a7 7 0 0 0 2.45-1.4l2.4.9 2-3.4-2-1.55c.1-.45.15-.92.15-1.4Z"/></svg>
+      </span><span>Settings</span></a>
+    </nav>
+    <div class="ap-sidebar-bottom">
+      <div class="ap-user-chip">
+        <div class="ap-avatar">J</div>
+        <div class="ap-user-copy"><strong>Josué</strong><span>owner</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==================== MAIN ==================== -->
+  <div class="ap-main">
+    <header class="ap-topbar">
+      <div>
+        <p class="ap-eyebrow ap-eyebrow-accent">ACTIVITY PLANNER / MARCZELL CLIPS</p>
+        <h1>Rutinas semanales</h1>
+      </div>
+      <div class="ap-topbar-actions">
+        <span class="ap-last-sync">Se aplicará a la semana del lun 17 – dom 23 ago</span>
+        <a class="ap-btn ap-btn-ghost" href="cluster-detail.html">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+          Volver al cluster
+        </a>
+        <a class="ap-btn ap-btn-ghost" href="index.html">Hub</a>
+      </div>
+    </header>
+
+    <main class="ap-content">
+      <div class="ap-page-stack">
+
+        <!-- Intro: el modelo rutina -> generación -> edición -->
+        <section class="ap-week-head" style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap">
+          <div>
+            <p class="ap-eyebrow ap-eyebrow-accent">ROUTINE → AUTOPLAN</p>
+            <h2 style="margin:8px 0 6px;font-size:clamp(24px,2.6vw,32px);line-height:1.05;letter-spacing:-.055em">Definí la rutina. <em style="color:var(--accent);font-style:normal">El sistema arma la semana.</em></h2>
+            <p style="color:var(--text-secondary);font-size:13px">Todo lo que genera el planificador queda editable: mover, cancelar o sumar tareas a mano cuando quieras.</p>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <span class="ap-pill ap-pill-ig">IG</span>
+            <span class="ap-pill ap-pill-tt">TT</span>
+            <span class="ap-pill ap-pill-yt">YT</span>
+            <span style="color:var(--text-dim);font-size:10px">3 cuentas reciben esta rutina</span>
+          </div>
+        </section>
+
+        <div class="ap-routine-layout">
+          <!-- ============ Columna izquierda: rutinas ============ -->
+          <div style="min-width:0">
+
+            <!-- Warmup · estado: EDITANDO (mientras cambia un valor, el segmented salta a Editando) -->
+            <section class="ap-routine-card is-editing" id="card-warmup" data-routine="warmup">
+              <div class="ap-routine-card-head" style="color:#4ade80">
+                <span class="ap-routine-glyph">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l3.5-3.5"/><circle cx="12" cy="15" r="1.6"/></svg>
+                </span>
+                <div>
+                  <h3>Warmup diario</h3>
+                  <p>Cada cuenta del cluster ve Reels/Shorts y da likes, imitando uso humano. Se reparte en sesiones dentro de la ventana 12:00–22:00.</p>
+                </div>
+                <div class="ap-state-toggle" data-state="editing" role="radiogroup" aria-label="Estado de la rutina Warmup diario">
+                  <span class="ap-state-toggle-thumb" aria-hidden="true" style="transform:translateX(100%)"></span>
+                  <button type="button" data-state="approved" role="radio" aria-checked="false" aria-label="Aprobado">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                    Aprobado
+                  </button>
+                  <button type="button" data-state="editing" role="radio" aria-checked="true" disabled tabindex="-1">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
+                    Editando
+                  </button>
+                  <button type="button" data-state="paused" role="radio" aria-checked="false" aria-label="Pausado">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14"/></svg>
+                    Pausado
+                  </button>
+                </div>
+              </div>
+              <div class="ap-routine-body">
+                <div class="ap-routine-hint" role="status">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+                  <span>Cambios sin aplicar — pasá a <em>Aprobado</em> para que el sistema replanifique.</span>
+                </div>
+                <div class="ap-rule-grid">
+                  <div class="ap-rule-box">
+                    <span>Mínimo por cuenta / día</span>
+                    <div class="ap-slider-row" style="grid-template-columns:auto 1fr;gap:10px">
+                      <output id="warmupOut">50 <small>min</small></output>
+                      <input type="range" id="warmupMin" min="20" max="90" step="5" value="50" aria-label="Minutos mínimos de warmup por cuenta por día">
+                    </div>
+                    <span class="ap-hint">El planificador reparte el total en 2–3 sesiones por cuenta.</span>
+                  </div>
+                  <div class="ap-rule-box">
+                    <span>Sesiones por cuenta / día</span>
+                    <div class="ap-slider-row" style="grid-template-columns:auto 1fr;gap:10px">
+                      <output id="sessOut">2 <small>sesiones</small></output>
+                      <input type="range" id="sessCount" min="1" max="4" step="1" value="2" aria-label="Cantidad de sesiones de warmup por cuenta por día">
+                    </div>
+                    <span class="ap-hint">Más sesiones = actividad más repartida y natural.</span>
+                  </div>
+                </div>
+                <div class="ap-rule-box">
+                  <span>Días activos</span>
+                  <div class="ap-days-row" id="warmupDays"></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Scan · estado: APROBADO (la regla aplica y el sistema planifica con ella) -->
+            <section class="ap-routine-card" id="card-scan" data-routine="scan">
+              <div class="ap-routine-card-head" style="color:#93c5fd">
+                <span class="ap-routine-glyph">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg>
+                </span>
+                <div>
+                  <h3>Scan automático</h3>
+                  <p>Reconocimiento de cuentas en los celulares del cluster. Sirve para detectar altas/bajas y mantener el inventario al día.</p>
+                </div>
+                <div class="ap-state-toggle" data-state="approved" role="radiogroup" aria-label="Estado de la rutina Scan automático">
+                  <span class="ap-state-toggle-thumb" aria-hidden="true"></span>
+                  <button type="button" data-state="approved" role="radio" aria-checked="true">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                    Aprobado
+                  </button>
+                  <button type="button" data-state="editing" role="radio" aria-checked="false" disabled tabindex="-1">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
+                    Editando
+                  </button>
+                  <button type="button" data-state="paused" role="radio" aria-checked="false" aria-label="Pausado">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14"/></svg>
+                    Pausado
+                  </button>
+                </div>
+              </div>
+              <div class="ap-routine-body">
+                <div class="ap-rule-grid">
+                  <div class="ap-rule-box">
+                    <span>Frecuencia diaria</span>
+                    <div class="ap-slider-row" style="grid-template-columns:auto 1fr;gap:10px">
+                      <output id="scanOut">2 <small>veces/día</small></output>
+                      <input type="range" id="scanCount" min="1" max="4" step="1" value="2" aria-label="Cantidad de scans por día">
+                    </div>
+                    <span class="ap-hint">Ejemplo generado: 13:00 y 22:00 (separación de 9 h o más).</span>
+                  </div>
+                  <div class="ap-rule-box">
+                    <span>Separación mínima</span>
+                    <div class="ap-slider-row" style="grid-template-columns:auto 1fr;gap:10px">
+                      <output id="gapOut">9 <small>horas</small></output>
+                      <input type="range" id="scanGap" min="4" max="16" step="1" value="9" aria-label="Separación mínima entre scans en horas">
+                    </div>
+                    <span class="ap-hint">Evita dos scans seguidos sobre el mismo teléfono.</span>
+                  </div>
+                </div>
+                <div class="ap-rule-box">
+                  <span>Horarios sugeridos por el sistema</span>
+                  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:2px">
+                    <span class="ap-wp-task t-scan" style="min-height:26px"><i></i>13:00</span>
+                    <span class="ap-wp-task t-scan" style="min-height:26px"><i></i>22:00</span>
+                    <span class="ap-hint" style="align-self:center">editable a mano en la semana</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Publicaciones · estado: PAUSADO (no genera tareas; card atenuada, inputs disabled) -->
+            <section class="ap-routine-card is-paused" id="card-pub" data-routine="pub">
+              <div class="ap-routine-card-head" style="color:#e879f9">
+                <span class="ap-routine-glyph">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="m10.5 9.5 5 3-5 3z"/></svg>
+                </span>
+                <div>
+                  <h3>Publicaciones</h3>
+                  <p>Cada cuenta de red social cargada en los celulares publica un mínimo de videos por semana.</p>
+                </div>
+                <div class="ap-state-toggle" data-state="paused" role="radiogroup" aria-label="Estado de la rutina Publicaciones">
+                  <span class="ap-state-toggle-thumb" aria-hidden="true" style="transform:translateX(200%)"></span>
+                  <button type="button" data-state="approved" role="radio" aria-checked="false" aria-label="Aprobado">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                    Aprobado
+                  </button>
+                  <button type="button" data-state="editing" role="radio" aria-checked="false" disabled tabindex="-1">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/></svg>
+                    Editando
+                  </button>
+                  <button type="button" data-state="paused" role="radio" aria-checked="true">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14"/></svg>
+                    Pausado
+                  </button>
+                </div>
+              </div>
+              <div class="ap-routine-body">
+                <div class="ap-rule-grid">
+                  <div class="ap-rule-box">
+                    <span>Mínimo por cuenta / semana</span>
+                    <div class="ap-slider-row" style="grid-template-columns:auto 1fr;gap:10px">
+                      <output id="pubOut">2 <small>videos</small></output>
+                      <input type="range" id="pubMin" min="1" max="7" step="1" value="2" aria-label="Cantidad mínima de videos por cuenta por semana">
+                    </div>
+                    <span class="ap-hint">Sin video en cola el día asignado, la tarea queda en atrasada y avisa.</span>
+                  </div>
+                  <div class="ap-rule-box">
+                    <span>Publicado en nombre de</span>
+                    <div class="ap-cluster-check" id="pubAccounts"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Publicación de cluster -->
+            <section class="ap-routine-card ap-cluster-pub">
+              <div class="ap-routine-card-head" style="color:#e879f9">
+                <span class="ap-routine-glyph">
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="m10.5 9.5 5 3-5 3z"/><path d="M12 3v3"/></svg>
+                </span>
+                <div>
+                  <h3>Publicación de cluster</h3>
+                  <p>Un mismo video + título publicado en todas las cuentas del cluster a la hora que elijas.</p>
+                </div>
+              </div>
+              <div class="ap-routine-body">
+                <div class="ap-dropzone" id="dropzone" role="button" tabindex="0" aria-label="Subir video para la publicación de cluster">
+                  <span class="ap-drop-icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/></svg>
+                  </span>
+                  <strong>Arrastrá el video o hacé click para subirlo</strong>
+                  <small>MP4 vertical 9:16 · hasta 300 MB · se sube una vez y se publica en todas</small>
+                </div>
+                <label class="ap-field">
+                  <span>Título de la publicación <em>— igual para todas las cuentas</em></span>
+                  <input class="ap-input" id="pubTitle" value="Skate park al atardecer — cut fijo" maxlength="90" placeholder="Título del video">
+                </label>
+                <div class="ap-rule-box">
+                  <span>Publicar en</span>
+                  <div class="ap-cluster-check" id="pubTargets"></div>
+                </div>
+                <div class="ap-rule-grid">
+                  <label class="ap-field">
+                    <span>Fecha</span>
+                    <input class="ap-input" type="date" value="2026-08-21">
+                  </label>
+                  <label class="ap-field">
+                    <span>Hora <em>— Buenos Aires</em></span>
+                    <input class="ap-input" type="time" value="18:30">
+                  </label>
+                </div>
+                <button class="ap-btn ap-btn-primary" id="scheduleClusterPub" style="width:100%;min-height:40px">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                  Programar publicación de cluster
+                </button>
+              </div>
+            </section>
+
+          </div>
+
+          <!-- ============ Columna derecha: preview ============ -->
+          <aside class="ap-routine-preview">
+
+            <section class="ap-card ap-preview-card" style="padding:0">
+              <div class="ap-preview-head">
+                <div>
+                  <p class="ap-eyebrow ap-eyebrow-accent">AUTOPLAN PREVIEW</p>
+                  <h3>Así queda la semana</h3>
+                </div>
+                <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Simulación</span>
+              </div>
+              <div class="ap-preview-flow">
+                <div class="ap-flow-step"><b>Rutina</b>Definís mínimos y días</div>
+                <div class="ap-flow-step is-here"><b>Sistema planifica</b>Reparte horarios y celulares</div>
+                <div class="ap-flow-step"><b>Vos editás</b>Movés o cancelás lo que quieras</div>
+              </div>
+              <div class="ap-week-preview">
+                <div class="ap-wp-grid" id="wpGrid"></div>
+              </div>
+              <div class="ap-preview-foot">
+                <div class="ap-preview-total">
+                  <strong id="totalTasks">63</strong>
+                  <span>tareas generadas<br>para la semana</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:6px;max-width:210px" id="ruleChecks">
+                  <span class="ap-rule-check" data-check="warmup">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                    <span id="chkWarmup">Warmup ≥ 40 min/cuenta/día</span>
+                  </span>
+                  <span class="ap-rule-check" data-check="scan">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 13 4 4L19 7"/></svg>
+                    <span id="chkScan">Scans con ≥ 9 h de separación</span>
+                  </span>
+                  <span class="ap-rule-check warn" data-check="pub">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5M12 16.5h.01"/></svg>
+                    <span id="chkPub">Jue 20 sin video en cola (publish)</span>
+                  </span>
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;padding:0 20px 18px">
+                <button class="ap-btn ap-btn-primary" id="applyBtn" style="flex:1">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>
+                  Aplicar y replanificar semana
+                </button>
+                <a class="ap-btn ap-btn-ghost" href="planner-week.html" style="flex:1">Ver en la semana</a>
+              </div>
+            </section>
+
+            <div class="ap-mockup-note">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+              <span><strong>Mockup 3/4</strong> · Cada rutina tiene un estado: <strong>Aprobado</strong> (aplica al plan), <strong>Editando</strong> (cambios sin aplicar — mové un slider y mirá el segmented saltar) y <strong>Pausado</strong> (no genera tareas). El preview recalcula en vivo.</span>
+            </div>
+
+          </aside>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="ap-toast" id="toast" role="status"></div>
+
+<script>
+/* ============================================================
+   Estado de la rutina + generación del preview
+   ============================================================ */
+
+var DAYS = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+var TODAY = 2;
+
+var state = {
+  warmupMin: 50,
+  sessCount: 2,
+  warmupDays: [true, true, true, true, true, true, true],
+  scanCount: 2,
+  scanGap: 9,
+  pubMin: 2
+};
+
+var ACCOUNTS = [
+  { u: 'marczell.clips', p: 'ig', plabel: 'Instagram' },
+  { u: 'marczellclips', p: 'tt', plabel: 'TikTok' },
+  { u: 'Marczell Clips', p: 'yt', plabel: 'YouTube' }
+];
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+var toast = document.getElementById('toast');
+var toastTimer = null;
+function showToast(msg, opts) {
+  opts = opts || {};
+  toast.textContent = '';
+  var icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('width', '13'); icon.setAttribute('height', '13');
+  icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('fill', 'none');
+  icon.setAttribute('stroke', 'currentColor'); icon.setAttribute('stroke-width', '2.2');
+  icon.setAttribute('stroke-linecap', 'round'); icon.setAttribute('stroke-linejoin', 'round');
+  var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', opts.muted ? 'M12 8v5M12 16.5h.01' : 'm5 13 4 4L19 7');
+  icon.appendChild(path);
+  var span = document.createElement('span');
+  span.textContent = msg;
+  toast.appendChild(icon);
+  toast.appendChild(span);
+  toast.classList.toggle('is-muted', !!opts.muted);
+  toast.classList.add('is-visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toast.classList.remove('is-visible'); }, opts.muted ? 2400 : 2800);
+}
+
+/* ============================================================
+   Toggle de estado de rutina — Aprobado / Editando / Pausado
+   - Aprobado: la regla aplica; el sistema planifica con ella.
+   - Editando: estado derivado. Editar cualquier parámetro de la card
+     pasa el toggle a Editando: la regla nueva todavía NO aplica al plan.
+   - Pausado: la rutina no genera tareas; card atenuada, inputs disabled.
+   ============================================================ */
+var ROUTINES = {};
+var ROUTINE_LABEL = { warmup: 'Warmup diario', scan: 'Scan automático', pub: 'Publicaciones' };
+
+Array.prototype.forEach.call(document.querySelectorAll('.ap-routine-card[data-routine]'), function (card) {
+  var key = card.dataset.routine;
+  var toggle = card.querySelector('.ap-state-toggle');
+  var thumb = toggle.querySelector('.ap-state-toggle-thumb');
+  var btns = toggle.querySelectorAll('button');
+
+  /* los controles del body se consultan en el momento: los day-chips y los
+     checkboxes de cuentas se generan por JS después de este bloque */
+  function syncControls() {
+    var dis = ROUTINES[key].state === 'paused';
+    Array.prototype.forEach.call(card.querySelectorAll('.ap-routine-body input, .ap-routine-body button'), function (c) {
+      c.disabled = dis;
+    });
+  }
+
+  function setState(next, opts) {
+    opts = opts || {};
+    if (ROUTINES[key].state === next) return;
+    ROUTINES[key].state = next;
+    toggle.dataset.state = next;
+    thumb.style.transform = 'translateX(' + (next === 'approved' ? 0 : next === 'editing' ? '100%' : '200%') + ')';
+
+    Array.prototype.forEach.call(btns, function (b) {
+      var isOn = b.dataset.state === next;
+      b.setAttribute('aria-checked', isOn ? 'true' : 'false');
+      b.disabled = b.dataset.state === 'editing' ? !isOn : false;
+    });
+
+    card.classList.toggle('is-editing', next === 'editing');
+    card.classList.toggle('is-paused', next === 'paused');
+
+    /* la card deja de generar tareas al pausarse: los inputs quedan disabled */
+    syncControls();
+
+    if (!opts.silent) {
+      if (next === 'approved') {
+        card.classList.remove('is-applying');
+        void card.offsetWidth; /* restart de la animación */
+        card.classList.add('is-applying');
+        setTimeout(function () { card.classList.remove('is-applying'); }, 750);
+        showToast('Rutina aplicada — replanificando la semana…');
+      } else if (next === 'paused') {
+        showToast('Rutina pausada: ' + ROUTINE_LABEL[key] + ' no generará tareas esta semana.', { muted: true });
+      }
+    }
+
+    renderPreview();
+  }
+
+  ROUTINES[key] = { card: card, toggle: toggle, state: toggle.dataset.state, setState: setState, syncControls: syncControls };
+
+  Array.prototype.forEach.call(btns, function (b) {
+    b.addEventListener('click', function () {
+      if (b.disabled) return;
+      setState(b.dataset.state);
+    });
+  });
+
+  /* editar cualquier parámetro => el segmented salta a Editando.
+     Delegación sobre la card para incluir los controles generados por JS */
+  function markEditing(e) {
+    if (ROUTINES[key].state !== 'approved') return;
+    var inBody = e.target.closest && e.target.closest('.ap-routine-body');
+    if (!inBody) return;
+    if (e.type === 'click' && !e.target.closest('.ap-day-chip')) return;
+    setState('editing', { silent: true });
+  }
+  card.addEventListener('input', markEditing);
+  card.addEventListener('change', markEditing);
+  card.addEventListener('click', markEditing);
+});
+
+/* helpers para el preview: ¿qué rutinas están aplicadas ahora? */
+function routineActive(key) {
+  return ROUTINES[key] && ROUTINES[key].state === 'approved';
+}
+function routineEditing(key) {
+  return ROUTINES[key] && ROUTINES[key].state === 'editing';
+}
+
+/* ---- chips de días (warmup) ---- */
+var warmupDays = document.getElementById('warmupDays');
+warmupDays.innerHTML = DAYS.map(function (d, i) {
+  return '<button class="ap-day-chip is-on" data-day="' + i + '" aria-pressed="true">' + d + '</button>';
+}).join('');
+Array.prototype.forEach.call(warmupDays.querySelectorAll('.ap-day-chip'), function (chip) {
+  chip.addEventListener('click', function () {
+    var i = +chip.dataset.day;
+    state.warmupDays[i] = !state.warmupDays[i];
+    chip.classList.toggle('is-on', state.warmupDays[i]);
+    chip.setAttribute('aria-pressed', state.warmupDays[i] ? 'true' : 'false');
+    renderPreview();
+  });
+});
+
+/* ---- checkboxes de cuentas ---- */
+function checkRow(acc, on) {
+  return '<label class="' + (on ? 'is-on' : '') + '">'
+    + '<input type="checkbox" checked data-account="' + acc.p + '">'
+    + '<span class="ap-bubble ap-bubble-' + acc.p + '" style="width:22px;height:22px;flex-basis:22px;font-size:8px;border-radius:50%">' + (acc.p === 'ig' ? 'IG' : acc.p === 'tt' ? 'TT' : 'YT') + '</span>'
+    + '@' + esc(acc.u) + '</label>';
+}
+document.getElementById('pubAccounts').innerHTML = ACCOUNTS.map(function (a) { return checkRow(a, true); }).join('');
+document.getElementById('pubTargets').innerHTML = ACCOUNTS.map(function (a) { return checkRow(a, true); }).join('');
+Array.prototype.forEach.call(document.querySelectorAll('.ap-cluster-check input'), function (input) {
+  input.addEventListener('change', function () {
+    input.closest('label').classList.toggle('is-on', input.checked);
+  });
+});
+
+/* ---- sliders ---- */
+function bindRange(id, outId, key, suffix, cb) {
+  var range = document.getElementById(id);
+  var out = document.getElementById(outId);
+  function update() {
+    state[key] = +range.value;
+    out.innerHTML = range.value + ' <small>' + suffix + '</small>';
+    var pct = ((range.value - range.min) / (range.max - range.min)) * 100;
+    range.style.setProperty('--fill', pct + '%');
+    if (cb) cb();
+    renderPreview();
+  }
+  range.addEventListener('input', update);
+  update();
+}
+bindRange('warmupMin', 'warmupOut', 'warmupMin', 'min');
+bindRange('sessCount', 'sessOut', 'sessCount', 'sesiones');
+bindRange('scanCount', 'scanOut', 'scanCount', 'veces/día');
+bindRange('scanGap', 'gapOut', 'scanGap', 'horas');
+bindRange('pubMin', 'pubOut', 'pubMin', 'videos');
+
+/* ---- generación del preview de semana ---- */
+function taskChip(type, time, extra, dim) {
+  return '<span class="ap-wp-task t-' + type + (dim ? ' is-stale' : '') + '" title="' + (extra || '') + '"><i></i>' + time + '</span>';
+}
+
+function dayPlan(dayIdx) {
+  var chips = [];
+  var active = state.warmupDays[dayIdx];
+  /* regla aprobada = aplica; editando = preview con la regla nueva atenuada;
+     pausada = la rutina no genera tareas */
+  var warmUpOn = routineActive('warmup');
+  var warmUpEdit = routineEditing('warmup');
+  var scanOn = routineActive('scan');
+  var scanEdit = routineEditing('scan');
+  var pubOn = routineActive('pub');
+  var pubEdit = routineEditing('pub');
+
+  /* warmups: sesiones por cuenta, horarios fijos coherentes */
+  if (active && (warmUpOn || warmUpEdit)) {
+    var times = { 1: ['13:00'], 2: ['13:30', '19:00'], 3: ['12:30', '16:00', '20:30'], 4: ['12:30', '15:00', '17:30', '20:00'] };
+    var slots = times[Math.min(4, Math.max(1, state.sessCount))] || times[2];
+    var per = Math.round((state.warmupMin / state.sessCount) / 5) * 5 || state.warmupMin;
+    slots.forEach(function (t, i) {
+      chips.push(taskChip('warmup', t, ACCOUNTS.length + ' cuentas · ' + per + ' min c/u', warmUpEdit));
+    });
+  }
+
+  /* scans: según frecuencia, respetando gap */
+  if (scanOn || scanEdit) {
+    var scanTimes = { 1: ['13:00'], 2: ['13:00', '22:00'], 3: ['12:30', '18:00', '22:00'], 4: ['12:15', '15:30', '19:00', '22:00'] };
+    var st = scanTimes[Math.min(4, Math.max(1, state.scanCount))] || scanTimes[2];
+    if (state.scanGap > 10 && state.scanCount >= 2) st = ['12:15', '22:00'];
+    st.forEach(function (t) { chips.push(taskChip('scan', t, 'todas las plataformas', scanEdit)); });
+  }
+
+  /* publish: mínimo semanal repartido */
+  if ((pubOn || pubEdit) && (dayIdx === 1 || dayIdx === 3 || (state.pubMin >= 3 && dayIdx === 5) || (state.pubMin >= 5 && dayIdx === 0) || (state.pubMin >= 6 && dayIdx === 4) || (state.pubMin >= 7 && dayIdx === 2))) {
+    chips.push(taskChip('publish', '18:30', ACCOUNTS.length + ' cuentas · mismo video', pubEdit));
+  }
+
+  /* una manual de ejemplo */
+  if (dayIdx === 2) chips.push(taskChip('manual', '16:00', 'Manual · vos la creaste'));
+
+  return chips;
+}
+
+function renderPreview() {
+  var grid = document.getElementById('wpGrid');
+  var total = 0;
+  var html = '<div class="ap-wp-gutter">'
+    + '<span>Warmup</span><span>Scan</span><span>Publish</span><span>Manual</span>'
+    + '</div>';
+  DAYS.forEach(function (d, i) {
+    var chips = dayPlan(i);
+    total += chips.length;
+    html += '<div class="ap-wp-day' + (i === TODAY ? ' is-today' : '') + '">'
+      + '<span>' + d + (i === TODAY ? ' · hoy' : '') + '</span>'
+      + chips.join('')
+      + '<span class="ap-wp-count">' + chips.length + ' tareas</span>'
+      + '</div>';
+  });
+  grid.innerHTML = html;
+  document.getElementById('totalTasks').textContent = total * ACCOUNTS.length - 2;
+
+  /* checks de reglas: reflejan el estado de cada rutina */
+  var CHK_ICON_OK = 'm5 13 4 4L19 7';
+  var CHK_ICON_WARN = 'M12 8v5M12 16.5h.01';
+  function setCheck(key, text, cls, icon) {
+    var row = document.querySelector('#ruleChecks [data-check="' + key + '"]');
+    if (!row) return;
+    row.className = 'ap-rule-check' + (cls ? ' ' + cls : '');
+    row.querySelector('svg path').setAttribute('d', icon);
+    row.querySelector('span').textContent = text;
+  }
+  if (routineActive('warmup')) setCheck('warmup', 'Warmup ≥ ' + state.warmupMin + ' min/cuenta/día', 'ok', CHK_ICON_OK);
+  else if (routineEditing('warmup')) setCheck('warmup', 'Warmup: cambios sin aplicar (' + state.warmupMin + ' min)', 'warn', CHK_ICON_WARN);
+  else setCheck('warmup', 'Warmup pausado — no genera tareas', '', CHK_ICON_WARN);
+
+  if (routineActive('scan')) setCheck('scan', 'Scans con ≥ ' + state.scanGap + ' h de separación', 'ok', CHK_ICON_OK);
+  else if (routineEditing('scan')) setCheck('scan', 'Scan: cambios sin aplicar (≥ ' + state.scanGap + ' h)', 'warn', CHK_ICON_WARN);
+  else setCheck('scan', 'Scan pausado — no genera tareas', '', CHK_ICON_WARN);
+
+  if (routineActive('pub')) setCheck('pub', 'Publicaciones: ≥ ' + state.pubMin + ' videos/semana aplicados', 'ok', CHK_ICON_OK);
+  else if (routineEditing('pub')) setCheck('pub', 'Publicaciones: cambios sin aplicar (≥ ' + state.pubMin + ')', 'warn', CHK_ICON_WARN);
+  else setCheck('pub', 'Publicaciones pausadas — sin posts generados', '', CHK_ICON_WARN);
+}
+
+renderPreview();
+
+/* estado inicial de controles: las cards pausadas arrancan con inputs disabled
+   (se corre acá porque los day-chips y checkboxes recién se generaron) */
+Object.keys(ROUTINES).forEach(function (k) { ROUTINES[k].syncControls(); });
+
+/* ---- acciones ---- */
+document.getElementById('applyBtn').addEventListener('click', function () {
+  /* aprueba toda rutina que quedó en edición: la regla nueva pasa a aplicar */
+  var pending = 0;
+  Object.keys(ROUTINES).forEach(function (k) {
+    if (ROUTINES[k].state === 'editing') { pending++; ROUTINES[k].setState('approved', { silent: true }); }
+  });
+  if (pending > 0) {
+    showToast('Rutina aplicada — replanificando la semana…');
+  } else {
+    showToast('Semana replanificada: ' + document.getElementById('totalTasks').textContent + ' tareas · lo generado sigue siendo editable.');
+  }
+});
+document.getElementById('scheduleClusterPub').addEventListener('click', function () {
+  showToast('Publicación de cluster programada: vie 21 · 18:30 · 3 cuentas.');
+});
+document.getElementById('dropzone').addEventListener('click', function () {
+  showToast('Abriría el selector de archivos (mockup).');
+});
+document.getElementById('dropzone').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showToast('Abriría el selector de archivos (mockup).'); }
+});
+</script>
+</body>
+</html>
