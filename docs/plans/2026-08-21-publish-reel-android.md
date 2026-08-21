@@ -90,3 +90,37 @@
 - Worktree `semiorganic-publishing` sucio (WIP del dueño, código que corrió en prod hasta el
   21/08 — ordenarlo/commitearlo).
 - Hotfix `hotfix/upload-retry` (6756853, webapp) nunca desplegado — decisión del dueño.
+
+## 7. Fase 1 — COMPLETADA (2026-08-21, commit 1e79c3a)
+
+Ítems a+b+c hechos y verificados end-to-end en staging.
+
+**Qué se implementó**
+- App: whitelist `publish_reel` en el claim + `executeRemotePublishTask` (preflight heartbeat,
+  GET `/assets/cluster/:assetId` a nivel raíz con device_token, stream a cache, keep-alive del
+  lease cada 10s con abort limpio, MediaStore `Movies/SouthFarm` IS_PENDING→0 con fallbacks
+  legacy/app storage, PATCH completed/error con evidencia en `result`).
+- App: override debug-only de api base y device token por broadcast (`SET_API_BASE` /
+  `SET_DEVICE_TOKEN`, solo builds debuggeables; cleartext HTTP solo en manifest debug).
+- Backend: env `SOUTHFARM_EXTRA_EXECUTABLE_TYPES` agrega types al claim sin tocar la base
+  (staging corre con `publish_reel`; producción idéntica hasta Fase 3).
+
+**QA real (staging :3102)**
+- Publication multipart al cluster Marczellclips → tasks 1791/1792 → claim automático del
+  piloto → 204800 bytes descargados → 2 filas `video/mp4` en `Movies/SouthFarm/` del
+  MediaStore → `completed` con `{downloaded:true, uri, bytes, account, saved_to:"media_store"}`.
+
+**Entorno de staging (nuevo)**
+- Backend :3102 relanzado con `PORT=3102 SOUTHFARM_DB_PATH=...\southfarm-planner-staging.db
+  SOUTHFARM_EXTRA_EXECUTABLE_TYPES=publish_reel node dist/index.js` (log:
+  `backend/staging-3102.log`). PRODUCCIÓN corre en otro proceso (:3001 → Cloudflare) — no tocar.
+- Piloto de prueba: **192.168.0.22** = device row 24 (alias "07", ws 6, dueño del cluster
+  Marczellclips). Emparejado con script que hace UPDATE de `devices` (device_id, token hash)
+  + broadcasts al teléfono. ATENCIÓN: la app corre en otro usuario Android → su ANDROID_ID
+  (`af4069fe3eec1309`) difiere del del shell (`f9e621f7db7dee8f`) — leerlo del log del
+  heartbeat. `adb reverse tcp:3102 tcp:3102` ya configurado en ese teléfono.
+- Celulares: .22 y .31 libres (sin emparejar); .21/.27/.32/.36 YA polean producción (no tocar).
+
+**Para Fase 2**: relevar el creator de IG en el piloto con `DUMP_UI` ANTES de escribir
+selectores; el APK debug del piloto ya descarga y guarda el video — el flujo IG se inserta
+entre la descarga y el PATCH final. Presupuestar iteración (ids de IG rotan).
