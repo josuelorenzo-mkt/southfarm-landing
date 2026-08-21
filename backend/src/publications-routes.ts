@@ -23,15 +23,19 @@ export const PLATFORM_MEDIA_RULES: Record<string, PlatformMediaRules> = {
   youtube: { maxWidth: 1080, maxHeight: 1920, allowedVideoCodecs: ['h264', 'hevc'] },
 };
 
+// TEMPORARY RELAXATION (owner decision 2026-08-21): platform dimension and
+// codec restrictions are disabled so publications accept any video whose
+// ffprobe inspection succeeds. The inspection stays mandatory — a corrupt,
+// truncated or non-video upload must still fail closed before spending phone
+// minutes. To restore the strict rules revert this function (see git history
+// of this comment); callers (publications-routes + planner-publication-bridge)
+// already handle both outcomes.
 export function mediaSupportedForPlatform(platform: string, metadata: { width: number | null; height: number | null; video_codec: string | null }): { supported: boolean; reason?: 'dimensions' | 'codec' | 'metadata' } {
-  const rules = PLATFORM_MEDIA_RULES[platform];
-  if (!rules) return { supported: false, reason: 'codec' };
-  if (typeof metadata.video_codec !== 'string' || !metadata.video_codec || typeof metadata.width !== 'number' || !Number.isInteger(metadata.width) || typeof metadata.height !== 'number' || !Number.isInteger(metadata.height)) {
-    return { supported: false, reason: 'metadata' };
-  }
-  if (metadata.width > rules.maxWidth || metadata.height > rules.maxHeight) return { supported: false, reason: 'dimensions' };
-  if (!rules.allowedVideoCodecs.includes(metadata.video_codec)) return { supported: false, reason: 'codec' };
-  return { supported: true };
+  void platform;
+  const hasMetadata = typeof metadata.video_codec === 'string' && metadata.video_codec !== ''
+    && typeof metadata.width === 'number' && Number.isInteger(metadata.width)
+    && typeof metadata.height === 'number' && Number.isInteger(metadata.height);
+  return hasMetadata ? { supported: true } : { supported: false, reason: 'metadata' };
 }
 
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
