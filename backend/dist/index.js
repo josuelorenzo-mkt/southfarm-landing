@@ -13,6 +13,8 @@ import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
+import { applyClusterMigrations } from './cluster-migrations.js';
+import { registerActivityPlanner, runActivityPlannerStartup } from './activity-planner.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import { BUENOS_AIRES_TIMEZONE, DAILY_MAX_WARMUP_SECONDS, DAILY_MIN_WARMUP_SECONDS, DEFAULT_FIXED_WARMUP_SECONDS, chooseDailyTargetSeconds, chooseSessionCount, expiresAtIso, isTaskExpired, isTaskOverdue, localDateTimeToIso, overdueAtIso, splitWarmupDurationSeconds, } from './scheduler.js';
 const __filename = fileURLToPath(import.meta.url);
@@ -49,6 +51,21 @@ const SUPPORTED_TASK_TYPES = new Set([
     'scan_tiktok',
     'scan_youtube',
 ]);
+// FIX 1 [CRÍTICO] — Task types the Android accessibility service can actually
+// execute (SouthFarmAccessibilityService.kt handles exactly these 6). The
+// claim endpoint only hands out these types: anything else (currently
+// publish_reel, which requires the web panel to upload the video first, and
+// any future type) stays pending/overdue in the queue instead of entering the
+// claim → silent discard → lease-expire → re-claim loop that inflated
+// attempt_count and left phantom "running" tasks.
+export const EXECUTABLE_TASK_TYPES = [
+    'warmup_ig',
+    'warmup_tiktok',
+    'warmup_youtube',
+    'scan_instagram',
+    'scan_tiktok',
+    'scan_youtube',
+];
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -314,6 +331,7 @@ db.exec(`
 applySchedulerMigrations(db);
 applyAuthMigrations(db);
 applyPublicationMigrations(db);
+applyClusterMigrations(db);
 cleanupRefreshSessions(db, new Date().toISOString());
 const publicationStore = new PublicationStore(db);
 function nowIso() {
@@ -2824,12 +2842,13 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             const existing = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND status IN ('running', 'paused')
           AND claim_token IS NOT NULL
           AND lease_expires_at > ?
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
-      `).get(userId, device.id, now);
+      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now);
             if (existing) {
                 const leaseExpiresAt = taskLeaseExpiresAt();
                 db.prepare(`
@@ -2846,6 +2865,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             const candidate = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -2866,7 +2886,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
           COALESCE(scheduled_for, created_at) ASC,
           id ASC
         LIMIT 1
-      `).get(userId, device.id, now, now, now);
+      `).get(userId, device.id, ...EXECUTABLE_TASK_TYPES, now, now, now);
             if (!candidate)
                 return { device, task: null, reused: false };
             const claimToken = randomUUID();
@@ -2882,6 +2902,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             attempt_count = COALESCE(attempt_count, 0) + 1,
             updated_at = ?
         WHERE id = ? AND user_id = ? AND device_id = ?
+          AND task_type IN (${EXECUTABLE_TASK_TYPES.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -2891,7 +2912,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             )
             OR (status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
           )
-      `).run(claimToken, now, leaseExpiresAt, now, now, now, candidate.id, userId, device.id, now, now, now);
+      `).run(claimToken, now, leaseExpiresAt, now, now, now, candidate.id, userId, device.id, ...EXECUTABLE_TASK_TYPES, now, now, now);
             if (update.changes !== 1)
                 return { device, task: null, reused: false };
             const claimed = db.prepare('SELECT * FROM task_runs WHERE id = ?').get(candidate.id);
@@ -3745,4 +3766,47 @@ if (AUTO_PLANNER_ENABLED) {
         + `tick every ${Math.round(AUTO_PLANNER_TICK_MS / 1000)}s`
         + (AUTO_PLANNER_WORKSPACE_ID ? ` for workspace ${AUTO_PLANNER_WORKSPACE_ID}.` : '.'));
 }
+// ─── Activity Planner (clusters + routines + weekly generation) ───
+registerActivityPlanner(app, {
+    db,
+    auth,
+    requireRole,
+    nowIso,
+    parseParams,
+    stringValue,
+    numberValue,
+    jsonValue,
+    workspaceMembership,
+    scopedUsers,
+    dateKeyInTimezone,
+    taskView,
+    recordTaskEvent,
+    ensureWorkspaceControl,
+    workspaceControlBlocksAutomatic,
+    normalizePlatform,
+    accountKeyFor,
+    deviceIsOnline,
+    plannerDateKey,
+});
+runActivityPlannerStartup({
+    db,
+    auth,
+    requireRole,
+    nowIso,
+    parseParams,
+    stringValue,
+    numberValue,
+    jsonValue,
+    workspaceMembership,
+    scopedUsers,
+    dateKeyInTimezone,
+    taskView,
+    recordTaskEvent,
+    ensureWorkspaceControl,
+    workspaceControlBlocksAutomatic,
+    normalizePlatform,
+    accountKeyFor,
+    deviceIsOnline,
+    plannerDateKey,
+});
 app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));
