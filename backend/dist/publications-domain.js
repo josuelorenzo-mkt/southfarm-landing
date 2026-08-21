@@ -124,8 +124,12 @@ export class PublicationStore {
             // pending/overdue tasks, so they must not block publication claims —
             // otherwise a single overdue scan blocks the device forever.
             const deviceRow = this.db.prepare('SELECT workspace_id FROM devices WHERE id = ?').get(worker.deviceId);
-            const control = deviceRow ? this.db.prepare('SELECT scheduler_mode, queue_paused FROM workspace_controls WHERE workspace_id = ?').get(deviceRow.workspace_id) : null;
-            const autoBlocked = String(control?.scheduler_mode || '') === 'manual_only' || Boolean(Number(control?.queue_paused || 0));
+            let autoBlocked = false;
+            try {
+                const control = deviceRow ? this.db.prepare('SELECT scheduler_mode, queue_paused FROM workspace_controls WHERE workspace_id = ?').get(deviceRow.workspace_id) : null;
+                autoBlocked = String(control?.scheduler_mode || '') === 'manual_only' || Boolean(Number(control?.queue_paused || 0));
+            }
+            catch { /* workspace_controls may not exist in isolated store DBs */ }
             const routineGate = autoBlocked ? "AND (run.source = 'manual' OR run.manual_override = 1)" : '';
             const eligibility = `job.device_id = ? AND job.status = 'queued' AND job.scheduled_for <= ?
         AND NOT EXISTS (SELECT 1 FROM publication_jobs review WHERE review.social_account_id = job.social_account_id AND review.status = 'review_required')
