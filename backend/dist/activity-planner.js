@@ -1797,9 +1797,14 @@ export function registerActivityPlanner(app, deps) {
             const cluster = clusterById(req.user.workspaceId, req.params.id);
             if (!cluster)
                 return res.status(404).json({ error: 'Cluster not found' });
-            const blocked = workspaceBlockedMessage(req.user.workspaceId);
-            if (blocked)
-                return res.status(409).json({ error: blocked });
+            // A cluster publish is a MANUAL action (the user triggers it with a
+            // button), so manual_only/queue_paused workspaces may publish — the same
+            // semantics as manual task creation. Only a full workspace pause blocks
+            // it (workspaceBlockedMessage would also reject manual_only).
+            const control = deps.ensureWorkspaceControl(req.user.workspaceId);
+            if (String(control?.scheduler_mode) === 'paused') {
+                return res.status(409).json({ error: 'El workspace está en pausa general; reanudá las actividades antes de publicar' });
+            }
             const file = req.file;
             // A publication job executes a real video on a real phone, so the file
             // upload is now mandatory; the legacy videoUrl-only body could never be
