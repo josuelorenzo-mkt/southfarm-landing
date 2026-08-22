@@ -339,12 +339,42 @@ class InstagramPublisher(GuardedPublisher):
             if error.code != "UI_TIMEOUT": raise
             raise PublisherError("CAPTION_DIVERGED", "Caption text diverged before publishing") from None
 
+    def _goto_caption_field(self, device: Any, editor: dict[str, str]) -> dict[str, str]:
+        """Tap the editor's Next and land on the caption screen. Some builds
+        and states (leftover draft promo) redirect Next into Google Play's
+        'Edits' sheet instead: dismiss it and retry once; a second redirect is
+        terminal EDITS_HANDOFF (clearly diagnosable, vs UI_TIMEOUT)."""
+        self._tap(device, editor)
+        try:
+            return self.wait_for(device, error="CAPTION_FIELD", predicate=self._caption_field)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+        nodes = self._nodes(device)
+        edits_redirect = any(node.get("package") == "com.android.vending" or "Edits" in (node.get("text") or "") for node in nodes)
+        if not edits_redirect:
+            raise PublisherError("CAPTION_FIELD", "Caption field did not appear after the editor Next tap")
+        self._back(device)
+        self._tap(device, editor)
+        try:
+            return self.wait_for(device, error="CAPTION_FIELD", predicate=self._caption_field)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+            raise PublisherError("EDITS_HANDOFF", "Instagram kept redirecting the editor Next into the Edits app") from None
+
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption)
         duration = job.media.get("duration_seconds") if isinstance(job.media, dict) else None
         if type(duration) is not int or duration <= 0:
             raise PublisherError("MEDIA_METADATA_INVALID", "Instagram requires verified video duration metadata")
         nodes = self._nodes(device)
+        # A leftover draft surfaces a 'Keep editing your draft?' dialog on the
+        # way in; discard it so publishing starts clean.
+        discard = next((node for node in nodes if (node.get("text") or "") == "Discard"), None)
+        if discard is not None:
+            self._tap(device, discard)
+            nodes = self._nodes(device)
         if any(node.get("resource-id") == self._SHARE for node in nodes):
             raise PublisherError("MID_FLOW_ABORT", "Instagram was already in a publish flow; refusing to resume")
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create New", required=False)
@@ -352,7 +382,7 @@ class InstagramPublisher(GuardedPublisher):
         reel = self.tap_and_wait(device, create, error="REEL_SELECTOR", content_desc="Create new reel")
         self.tap_and_wait(device, reel, error="GALLERY_MEDIA", predicate=self._gallery_arrival); checkpoint("selecting_media", 25, evidence={"platform": "instagram", "stage": "gallery", "duration_label": next(iter(self._duration_formats(duration)))})
         editor = self._select_video(device, duration); checkpoint("editing", 45, evidence={"platform": "instagram", "stage": "editor"})
-        field = self.tap_and_wait(device, editor, error="CAPTION_FIELD", predicate=self._caption_field)
+        field = self._goto_caption_field(device, editor)
         self._write_caption(device, field, job.caption); checkpoint("captioning", 65, evidence={"platform": "instagram", "caption_words": len(job.caption.split())})
         # The IME covers Share after typing: back closes only the keyboard.
         self._back(device)
