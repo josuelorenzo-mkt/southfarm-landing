@@ -237,6 +237,18 @@ class InstagramPublisher(GuardedPublisher):
     def _count_matches(self, nodes: list[dict[str, str]], expected: int) -> dict[str, str] | None:
         return next((node for node in nodes if node.get("resource-id") == self._POST_COUNT and (node.get("content-desc") or "").strip() == f"{expected}posts"), None)
 
+    def _baseline_ready(self, nodes: list[dict[str, str]]) -> list[dict[str, str]] | None:
+        """The profile is baseline-ready when exactly one post count AND at
+        least one reel tile have rendered. Both load asynchronously after the
+        account switch / profile landing: a single early dump races the grid
+        (the 2026-08-21 TILE_BASELINE_INVALID false failure), so poll."""
+        counts = self._post_counts(nodes)
+        if len(counts) != 1:
+            return None
+        if not self._tile_signatures(nodes):
+            return None
+        return nodes
+
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
@@ -247,17 +259,26 @@ class InstagramPublisher(GuardedPublisher):
         title = self.account_control(nodes, resource_id=self._TITLE, error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
             raise PublisherError("ACCOUNT_MISMATCH", "Instagram active profile account does not match the publication account")
+        try:
+            # wait_for returns the nodes only once _baseline_ready accepted
+            # them (exactly one post count AND at least one reel tile).
+            nodes = self.wait_for(device, error="PROFILE_BASELINE", predicate=self._baseline_ready)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+            # Fail-closed after the full polling window, with a precise code.
+            late_nodes = self._nodes(device)
+            counts = self._post_counts(late_nodes)
+            if not counts or len(counts) != 1:
+                raise PublisherError("POST_COUNT_INVALID", "Instagram profile post count never rendered") from None
+            raise PublisherError("TILE_BASELINE_INVALID", "Instagram profile grid exposes no Reel tiles to baseline against") from None
         counts = self._post_counts(nodes)
-        if len(counts) != 1:
-            raise PublisherError("POST_COUNT_INVALID", "Instagram profile post count is absent or ambiguous")
         # Baseline evidence is the post count plus the visible grid tile
         # signatures, captured BEFORE publishing: the delta phase proves the
         # new reel by a tile description that did not exist in this baseline
         # (the count reaching baseline+1 remains a complementary signal).
         self._baseline_posts = counts.pop()
         tiles = self._tile_signatures(nodes)
-        if not tiles:
-            raise PublisherError("TILE_BASELINE_INVALID", "Instagram profile grid exposes no Reel tiles to baseline against")
         self._baseline_tiles = tiles
         self._capture_baseline(nodes)
 
