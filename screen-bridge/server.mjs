@@ -24,12 +24,32 @@ import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.SCREEN_BRIDGE_PORT || 8100);
+// Auth opt-in para exponer el bridge fuera de la LAN (túnel): si SCREEN_AUTH_TOKEN
+// está definido, HTTP y WebSocket exigen el token (?token=... o Authorization Bearer).
+// Sin la variable, el bridge queda abierto (modo LAN confiable, comportamiento previo).
+const AUTH_TOKEN = process.env.SCREEN_AUTH_TOKEN || "";
+
+/** Chequeo en tiempo constante para no filtrar el token por timing. */
+function tokenMatches(candidate) {
+  if (!AUTH_TOKEN || typeof candidate !== "string") return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(AUTH_TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function isAuthorizedRequest(req, url) {
+  if (!AUTH_TOKEN) return true;
+  if (tokenMatches(url.searchParams.get("token"))) return true;
+  const header = req.headers.authorization || "";
+  return tokenMatches(header.startsWith("Bearer ") ? header.slice(7) : null);
+}
 const ADB = process.env.SCREEN_ADB || pickDefaultAdb();
 const SCRCPY_JAR =
   process.env.SCREEN_SCRCPY_JAR ||
@@ -571,6 +591,10 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  if (!isAuthorizedRequest(req, url)) {
+    res.writeHead(401, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ error: "token requerido" }));
+  }
   try {
     if (url.pathname === "/api/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -605,9 +629,14 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false }); // comprimir video es CPU y latencia regalados
 
 server.on("upgrade", (req, socket, head) => {
-  const match = req.url.match(/^\/ws\/stream\/(.+)$/);
+  const parsed = new URL(req.url, `http://localhost:${PORT}`);
+  const match = parsed.pathname.match(/^\/ws\/stream\/(.+)$/); // pathname: sin query (el token va aparte)
   if (!match) {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    return socket.destroy();
+  }
+  if (!isAuthorizedRequest(req, parsed)) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     return socket.destroy();
   }
   const serial = decodeURIComponent(match[1]);
