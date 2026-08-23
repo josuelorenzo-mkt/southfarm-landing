@@ -373,16 +373,18 @@ class ScreenSource {
       }
     }
     this.teardownProc();
-    // Auto-reinicio con espectadores conectados y backoff simple; tras 5 fallos
-    // seguidos rendimos hasta que un cliente nuevo vuelva a intentar.
-    if (this.clients.size > 0 && this.failureCount <= 5) {
+    // Auto-reinicio indefinido mientras haya espectadores: bajo stalls crónicos
+    // (WiFi saturado) un tope duro dejaba la vista muerta hasta reabrirla.
+    // Backoff creciente acota el martilleo sin rendirse.
+    if (this.clients.size > 0 && this.failureCount <= 50) {
+      const delayMs = Math.min(3000 * this.failureCount, 15000);
       setTimeout(() => {
         if (this.clients.size > 0 && this.status === "error") {
           this.log(`auto-reintento #${this.failureCount}`);
           this.status = "idle";
           void this.start();
         }
-      }, 3000);
+      }, delayMs);
     }
   }
 
