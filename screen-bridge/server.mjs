@@ -23,7 +23,7 @@
 import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
@@ -97,7 +97,9 @@ function killTreeWindows(pid) {
   // adb.exe no siempre propaga el kill al shell remoto; igualmente el server
   // del teléfono corta solo cuando el socket se cierra.
   try {
-    spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    // Sin handler de 'error', un ENOENT de taskkill salta como uncaughtException.
+    spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true })
+      .on("error", () => {}); /* best effort */
   } catch {
     /* best effort */
   }
@@ -136,6 +138,9 @@ class ScreenSource {
     this.startTimeout = null;
     this.lastActivity = 0;
     this.logTail = [];
+    this.failureCount = 0;
+    this.gen = 0; // token de generación: invalida un start() en vuelo cuando llega stop()/fail()
+    this.tearingDown = false; // teardown intencional: los 'close' posteriores no son fallas
   }
 
   log(line) {
@@ -147,6 +152,17 @@ class ScreenSource {
 
   async ensureJarPushed() {
     if (!existsSync(SCRCPY_JAR)) throw new Error(`No se encontró scrcpy-server en ${SCRCPY_JAR}`);
+    // Recuperación rápida: si el jar ya está en el teléfono con el tamaño correcto,
+    // nos ahorramos el push de ~11MB por WiFi en cada reintento.
+    const localSize = statSync(SCRCPY_JAR).size;
+    const probe = await adb(["-s", this.serial, "shell", `ls -l ${DEVICE_JAR_PATH}`], 8000).catch(() => null);
+    if (probe && probe.code === 0) {
+      const digits = probe.stdout.split(/\s+/).filter((token) => /^\d+$/.test(token)).map(Number);
+      if (digits.length && Math.max(...digits) === localSize) {
+        this.log(`jar ya presente (${localSize}B): push omitido`);
+        return;
+      }
+    }
     const res = await adb(["-s", this.serial, "push", SCRCPY_JAR, DEVICE_JAR_PATH], 30000);
     if (!res.stdout.includes("file pushed") && res.code !== 0) {
       throw new Error(`push falló: ${res.stderr || res.stdout}`);
@@ -155,7 +171,9 @@ class ScreenSource {
 
   async start() {
     if (this.status === "live" || this.status === "starting") return;
+    const gen = ++this.gen; // si llega stop()/fail() durante los await, este intento queda invalidado
     this.status = "starting";
+    this.tearingDown = false; // arranque nuevo: los cierres vuelven a contar como fallas
     this.error = null;
     this.gopCache = [];
     this.pendingConfig = null;
@@ -164,11 +182,25 @@ class ScreenSource {
     this.metaSent = false;
     try {
       // Limpiar capturadores huérfanos de sesiones anteriores en ESTE teléfono
-      // (nombre de jar propio: nunca toca procesos de otras herramientas).
+      // (nunca toca procesos de otras herramientas). Dos patrones: el nombre del
+      // jar propio, y la clase real del server (el jar va por CLASSPATH, así que
+      // el cmdline del huérfano contiene com.genymobile.scrcpy.Server).
       await adb(["-s", this.serial, "shell", "pkill -f sf_scrcpy_server || true"], 8000).catch(() => {});
+      if (gen !== this.gen) return;
+      await adb(["-s", this.serial, "shell", "pkill -f com.genymobile.scrcpy.Server || true"], 8000).catch(() => {});
+      if (gen !== this.gen) return;
       await this.ensureJarPushed();
-      this.port = await listenOnFreePort(this.tcpServer = net.createServer((sock) => this.onConnection(sock)));
+      if (gen !== this.gen) return;
+      if (this.tcpServer && this.tcpServer.listening) {
+        // Recuperación rápida: reuso el listener y el puerto del intento anterior
+        // (solo hace falta respawnear el capturador dentro del teléfono).
+        this.log(`reuso túnel en puerto ${this.port}`);
+      } else {
+        this.port = await listenOnFreePort(this.tcpServer = net.createServer((sock) => this.onConnection(sock)));
+      }
+      if (gen !== this.gen) return;
       const rev = await adb(["-s", this.serial, "reverse", `${REVERSE_SOCKET}`, `tcp:${this.port}`]);
+      if (gen !== this.gen) return;
       this.log(`reverse code=${rev.code} out=${rev.stdout.trim().slice(0, 80)} err=${rev.stderr.trim().slice(0, 80)}`);
       if (rev.code !== 0) throw new Error(`adb reverse falló: ${rev.stderr || rev.stdout}`);
       const shellArgs = [
@@ -179,23 +211,31 @@ class ScreenSource {
           `send_frame_meta=true control=false cleanup=false` +
           (CODEC_OPTIONS ? ` video_codec_options=${CODEC_OPTIONS}` : ""),
       ];
-      this.proc = spawn(ADB, shellArgs, { windowsHide: true });
-      this.proc.stdout?.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
-      this.proc.stderr.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
-      this.proc.on("close", (code) => {
+      const proc = (this.proc = spawn(ADB, shellArgs, { windowsHide: true }));
+      proc.stdout?.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
+      proc.stderr?.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
+      proc.on("close", (code) => {
         this.log(`server exited (${code})`);
-        if (this.status !== "idle") this.fail(`El capturador del teléfono se cerró (código ${code}).`);
+        // Cierre intencional (teardown) o de una sesión vieja: no cuenta como falla.
+        if (this.tearingDown || this.proc !== proc || this.status === "idle") return;
+        this.fail(`El capturador del teléfono se cerró (código ${code}).`, false); // recuperable: respawn silencioso
+      });
+      proc.on("error", (err) => {
+        this.log(`error lanzando adb: ${err.message}`);
+        if (this.tearingDown || this.proc !== proc || this.status === "idle") return;
+        this.fail(`No se pudo lanzar adb: ${err.message}`, false);
       });
 
       this.startTimeout = setTimeout(() => {
         if (this.status === "starting") {
-          this.fail("El teléfono no empezó a enviar video a tiempo. ¿Está con la pantalla encendida?");
+          this.fail("El teléfono no empezó a enviar video a tiempo. ¿Está con la pantalla encendida?", false);
         }
       }, START_TIMEOUT_MS);
       this.status = "awaiting"; // esperando la conexión TCP del server
       this.log(`esperando conexión del server en puerto ${this.port}`);
     } catch (cause) {
-      this.fail(cause instanceof Error ? cause.message : String(cause));
+      if (gen !== this.gen) return; // el incidente ya lo resolvió stop()/fail()
+      this.fail(cause instanceof Error ? cause.message : String(cause), false);
     }
   }
 
@@ -210,6 +250,8 @@ class ScreenSource {
     sock.setKeepAlive(true, 10000);
     this.status = "live";
     this.failureCount = 0; // la sesión arrancó bien: limpiar historial de fallos
+    this.frameCount = 0; // sesión nueva: contadores del watchdog en cero, sin herencia
+    this.lastStallFrameCount = -1; // de la sesión anterior (si no, stallTicks espurios → refail)
     this.stallTicks = 0; // ticks del watchdog sin frames nuevos (solo si hubo actividad)
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
@@ -226,6 +268,7 @@ class ScreenSource {
       // (en pantalla estática el encoder igual emite IDRs periódicos).
       const sinceLastByte = now - this.lastActivity;
       if (sinceLastByte > 30000 && this.clients.size > 0) {
+        this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
         this.fail("stall de red: túnel mudo >30s; reconectando", false);
         return;
       }
@@ -237,6 +280,7 @@ class ScreenSource {
       }
       this.lastStallFrameCount = this.frameCount;
       if (this.stallTicks >= 3 && this.clients.size > 0) {
+        this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
         this.fail("stall de red: el túnel dejó de entregar datos; reconectando", false); // silencioso: se recupera solo
         return;
       }
@@ -248,9 +292,11 @@ class ScreenSource {
     }, 2500);
     this.log("server conectado, transmitiendo");
     sock.on("data", (chunk) => this.consume(chunk));
-    sock.on("error", (e) => this.fail(`socket: ${e.message}`));
+    sock.on("error", (e) => this.fail(`socket: ${e.message}`, false));
     sock.on("close", () => {
-      if (this.status !== "idle") this.fail("El teléfono dejó de enviar video.");
+      // Cierre intencional (teardown) o de un socket reemplazado: no cuenta como falla.
+      if (this.tearingDown || this.mediaSock !== sock || this.status === "idle") return;
+      this.fail("El teléfono dejó de enviar video.", false); // recuperable: respawn silencioso
     });
   }
 
@@ -292,12 +338,12 @@ class ScreenSource {
       const len = this.buffer.readUInt32BE(8);
       if (len <= 0 || len > 8 * 1024 * 1024) {
         this.log(`frame inválido (len=${len}) bufferHead=${this.buffer.subarray(0, 48).toString("hex")} offset=${this.buffer.length}`);
-        this.fail(`frame inválido (len=${len}), reiniciando`);
+        this.fail(`frame inválido (len=${len}), reiniciando`, false);
         return;
       }
       if (this.buffer.length < 12 + len) break;
       // Vista zero-copy: el buffer base nunca se muta in-place, solo se reasigna.
-      // Lo único que se retiene entre chunks (GOP cache) se copia una vez por IDR.
+      // Todo lo que se retiene entre chunks (GOP cache) se copia antes de guardarse.
       const payload = this.buffer.subarray(12, 12 + len);
       this.buffer = this.buffer.subarray(12 + len);
       this.dispatchPayload(payload);
@@ -319,7 +365,8 @@ class ScreenSource {
       }
       this.gopCache = [Buffer.from(out)]; // nuevo GOP: copia única por IDR
     } else if (this.gopCache.length) {
-      this.gopCache.push(payload);
+      // Copia obligatoria: el subarray retendría el chunk TCP completo en memoria.
+      this.gopCache.push(Buffer.from(payload));
       if (this.gopCache.length > 120) this.gopCache.shift(); // techo de seguridad
     }
     const isKey = kinds.idr;
@@ -360,7 +407,11 @@ class ScreenSource {
   }
 
   fail(message, notify = true) {
-    if (this.status === "idle") return;
+    // Un solo fail efectivo por incidente: los 'close' derivados del teardown
+    // llegan después y no deben re-contar fallos ni mandar otro {type:"error"}
+    // (el navegador cerraba el WS y cancelaba la auto-recuperación).
+    if (this.status === "idle" || this.status === "error") return;
+    this.gen++; // invalida cualquier start() en vuelo de la sesión que se cae
     this.log(`FAIL: ${message}`);
     this.error = message;
     this.status = "error";
@@ -372,12 +423,15 @@ class ScreenSource {
         if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "error", message }), { binary: false });
       }
     }
-    this.teardownProc();
+    this.teardownProc(true); // recuperación: conserva listener + reverse para reintentar rápido
     // Auto-reinicio indefinido mientras haya espectadores: bajo stalls crónicos
-    // (WiFi saturado) un tope duro dejaba la vista muerta hasta reabrirla.
-    // Backoff creciente acota el martilleo sin rendirse.
-    if (this.clients.size > 0 && this.failureCount <= 50) {
-      const delayMs = Math.min(3000 * this.failureCount, 15000);
+    // (WiFi saturado) un tope duro dejaba la vista muerta para siempre, con el
+    // WS abierto mostrando el último frame congelado. Backoff creciente con
+    // jitter ±25% acota el martilleo sin rendirse (y desfasa los reintentos de
+    // N dispositivos que sufrieron el mismo blip del AP).
+    if (this.clients.size > 0) {
+      const baseMs = Math.min(3000 * this.failureCount, 15000);
+      const delayMs = Math.round(baseMs * (0.75 + Math.random() * 0.5)); // jitter ±25%
       setTimeout(() => {
         if (this.clients.size > 0 && this.status === "error") {
           this.log(`auto-reintento #${this.failureCount}`);
@@ -390,11 +444,18 @@ class ScreenSource {
 
   stop(reason = "manual") {
     this.log(`stop (${reason})`);
+    this.gen++; // cancela un start() en curso si lo hubiera
     this.status = "idle";
     this.teardownProc();
   }
 
-  teardownProc() {
+  /**
+   * keepTunnel: en la recuperación automática (fail → reintento) conservamos el
+   * listener TCP y el `adb reverse`: solo hace falta respawnear el capturador.
+   * stop() definitivo sí desarma todo.
+   */
+  teardownProc(keepTunnel = false) {
+    this.tearingDown = true; // los 'close' de socket/proceso que llegan después no son fallas
     clearInterval(this.watchdog);
     this.watchdog = null;
     clearTimeout(this.startTimeout);
@@ -409,11 +470,13 @@ class ScreenSource {
       if (pid) killTreeWindows(pid);
       this.proc = null;
     }
-    if (this.tcpServer) {
-      this.tcpServer.close();
-      this.tcpServer = null;
+    if (!keepTunnel) {
+      if (this.tcpServer) {
+        this.tcpServer.close();
+        this.tcpServer = null;
+      }
+      adb(["-s", this.serial, "reverse", "--remove", REVERSE_SOCKET]).catch(() => {});
     }
-    adb(["-s", this.serial, "reverse", "--remove", REVERSE_SOCKET]).catch(() => {});
     this.buffer = Buffer.alloc(0);
     this.gopCache = [];
     this.pendingConfig = null;
@@ -462,10 +525,12 @@ setInterval(() => {
   for (const [serial, src] of sources) {
     if (
       src.clients.size === 0 &&
-      src.status === "idle" &&
+      (src.status === "idle" || src.status === "error") && // un source muerto en error también se recolecta
       !src.proc &&
+      !src.watchdog &&
       Date.now() - (src.lastActivity || 0) > 60000
     ) {
+      src.stop("recolector"); // cierra túnel conservado de una recuperación, si lo hay
       sources.delete(serial);
     }
   }
