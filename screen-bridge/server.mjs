@@ -163,6 +163,9 @@ class ScreenSource {
     this.codecSent = false;
     this.metaSent = false;
     try {
+      // Limpiar capturadores huérfanos de sesiones anteriores en ESTE teléfono
+      // (nombre de jar propio: nunca toca procesos de otras herramientas).
+      await adb(["-s", this.serial, "shell", "pkill -f sf_scrcpy_server || true"], 8000).catch(() => {});
       await this.ensureJarPushed();
       this.port = await listenOnFreePort(this.tcpServer = net.createServer((sock) => this.onConnection(sock)));
       const rev = await adb(["-s", this.serial, "reverse", `${REVERSE_SOCKET}`, `tcp:${this.port}`]);
@@ -205,6 +208,7 @@ class ScreenSource {
     this.mediaSock = sock;
     sock.setNoDelay(true); // sin Nagle: cada frame sale inmediatamente
     this.status = "live";
+    this.failureCount = 0; // la sesión arrancó bien: limpiar historial de fallos
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
     this.lastActivity = Date.now();
@@ -216,9 +220,10 @@ class ScreenSource {
       this.lastWdTick = now;
       this.lastWdFrames = this.frameCount || 0;
       if (this.status !== "live") return;
-      const idleMs = now - this.lastActivity;
-      if (idleMs > 10000 || (!this.metaSent && this.buffer.length > 4096)) {
-        this.fail(`stall: ${idleMs}ms sin datos del teléfono (bufLen=${this.buffer.length})`);
+      // Pantalla estática = silencio válido: NO cortamos por falta de datos.
+      // Solo intervenimos si el protocolo desincroniza antes de los metadatos.
+      if (!this.metaSent && this.buffer.length > 4096) {
+        this.fail(`stall: protocolo desincronizado (bufLen=${this.buffer.length} sin metadata)`);
         return;
       }
       this.log(`wd fps=${this.fpsMeasured} bytes=${this.totalBytes} bufLen=${this.buffer.length} clients=${this.clients.size}`);
@@ -341,13 +346,24 @@ class ScreenSource {
     this.log(`FAIL: ${message}`);
     this.error = message;
     this.status = "error";
+    this.failureCount = (this.failureCount || 0) + 1;
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
     for (const ws of this.clients) {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "error", message }), { binary: false });
     }
     this.teardownProc();
-    // Con clientes vivos, permitir reintento automático en la próxima conexión.
+    // Auto-reinicio con espectadores conectados y backoff simple; tras 5 fallos
+    // seguidos rendimos hasta que un cliente nuevo vuelva a intentar.
+    if (this.clients.size > 0 && this.failureCount <= 5) {
+      setTimeout(() => {
+        if (this.clients.size > 0 && this.status === "error") {
+          this.log(`auto-reintento #${this.failureCount}`);
+          this.status = "idle";
+          void this.start();
+        }
+      }, 3000);
+    }
   }
 
   stop(reason = "manual") {
@@ -441,6 +457,26 @@ function cors(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+function serialTransport(serial) {
+  return /:\d+$/.test(serial) ? "wifi" : "usb";
+}
+
+async function buildDeviceInfo(serial, aliases) {
+  let model = modelCache.get(serial);
+  if (!model) {
+    const r = await adb(["-s", serial, "shell", "getprop ro.product.model"], 8000).catch(() => null);
+    model = r ? r.stdout.trim() : "";
+    if (model) modelCache.set(serial, model);
+  }
+  return {
+    serial,
+    alias: aliases[serial] || (serialTransport(serial) === "wifi" ? serial.split(":")[0] : serial),
+    model,
+    online: true,
+    transport: serialTransport(serial),
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") {
@@ -464,16 +500,8 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/devices") {
       const aliases = loadAliases();
       const serials = await listDeviceSerials();
-      const devices = [];
-      for (const serial of serials) {
-        let model = modelCache.get(serial);
-        if (!model) {
-          const r = await adb(["-s", serial, "shell", "getprop ro.product.model"], 8000).catch(() => null);
-          model = r ? r.stdout.trim() : "";
-          if (model) modelCache.set(serial, model);
-        }
-        devices.push({ serial, alias: aliases[serial] || serial.split(":")[0], model, online: true });
-      }
+      // Paralelo: con 10 teléfonos el getprop secuencial sería lento al primer pedido.
+      const devices = await Promise.all(serials.map((serial) => buildDeviceInfo(serial, aliases)));
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ devices }));
     }
