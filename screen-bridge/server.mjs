@@ -37,8 +37,18 @@ const SCRCPY_JAR =
 const SERVER_VERSION = "4.1";
 const DEVICE_JAR_PATH = "/data/local/tmp/sf_scrcpy_server.jar";
 const REVERSE_SOCKET = "localabstract:scrcpy"; // nombre default del socket en v4
-const MAX_SIZE = 1024;
-const MAX_FPS = 15;
+const MAX_SIZE = Number(process.env.SCREEN_MAX_SIZE || 1024);
+const MAX_FPS = Number(process.env.SCREEN_MAX_FPS || 30);
+const VIDEO_BIT_RATE = process.env.SCREEN_VIDEO_BITRATE || "8000000"; // bits/s (el server no acepta sufijos tipo "8M")
+// repeat-previous-frame-after: re-emite el último cuadro (µs) aunque la pantalla
+// no cambie → fps estable incluso con pantalla estática. i-frame-interval (s):
+// GOP corto para resyncs rápidos. Vacío para desactivar ambas.
+const CODEC_OPTIONS =
+  process.env.SCREEN_CODEC_OPTIONS ?? "repeat-previous-frame-after=33333,i-frame-interval=2";
+const WS_SOFT_LIMIT = 2 * 1024 * 1024; // cliente lento: descartar deltas
+const WS_HARD_LIMIT = 8 * 1024 * 1024; // cliente muerto: cortar
+const SEND_OPTS = { binary: true };
+const START_CODE = Buffer.from([0x00, 0x00, 0x01]);
 const IDLE_STOP_MS = 3000;
 const START_TIMEOUT_MS = 9000;
 
@@ -117,7 +127,7 @@ class ScreenSource {
     this.tcpServer = null;
     this.port = 0;
     this.proc = null;
-    this.gopCache = null; // último chunk key (SPS/PPS+IDR) para join instantáneo
+    this.gopCache = []; // GOP completo (IDR inclusive) para replay instantáneo de joins
     this.pendingConfig = null;
     this.buffer = Buffer.alloc(0);
     this.codecSent = false;
@@ -147,7 +157,7 @@ class ScreenSource {
     if (this.status === "live" || this.status === "starting") return;
     this.status = "starting";
     this.error = null;
-    this.gopCache = null;
+    this.gopCache = [];
     this.pendingConfig = null;
     this.buffer = Buffer.alloc(0);
     this.codecSent = false;
@@ -162,7 +172,9 @@ class ScreenSource {
         "-s", this.serial, "shell",
         `CLASSPATH=${DEVICE_JAR_PATH} app_process / com.genymobile.scrcpy.Server ` +
           `${SERVER_VERSION} log_level=info max_size=${MAX_SIZE} max_fps=${MAX_FPS} ` +
-          `video_codec=h264 video=true audio=false send_frame_meta=true control=false cleanup=false`,
+          `video_bit_rate=${VIDEO_BIT_RATE} video_codec=h264 video=true audio=false ` +
+          `send_frame_meta=true control=false cleanup=false` +
+          (CODEC_OPTIONS ? ` video_codec_options=${CODEC_OPTIONS}` : ""),
       ];
       this.proc = spawn(ADB, shellArgs, { windowsHide: true });
       this.proc.stdout?.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
@@ -191,15 +203,25 @@ class ScreenSource {
       return;
     }
     this.mediaSock = sock;
+    sock.setNoDelay(true); // sin Nagle: cada frame sale inmediatamente
     this.status = "live";
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
     this.lastActivity = Date.now();
     this.totalBytes = 0;
     this.watchdog = setInterval(() => {
-      if (this.status === "live") {
-        this.log(`wd bytes=${this.totalBytes} bufLen=${this.buffer.length} metaSent=${!!this.metaSent} clients=${this.clients.size}`);
+      const now = Date.now();
+      const elapsedSec = Math.max(0.001, (now - (this.lastWdTick || now - 2500)) / 1000);
+      this.fpsMeasured = Math.round(((this.frameCount || 0) - ((this.lastWdFrames ?? this.frameCount) || 0)) / elapsedSec);
+      this.lastWdTick = now;
+      this.lastWdFrames = this.frameCount || 0;
+      if (this.status !== "live") return;
+      const idleMs = now - this.lastActivity;
+      if (idleMs > 10000 || (!this.metaSent && this.buffer.length > 4096)) {
+        this.fail(`stall: ${idleMs}ms sin datos del teléfono (bufLen=${this.buffer.length})`);
+        return;
       }
+      this.log(`wd fps=${this.fpsMeasured} bytes=${this.totalBytes} bufLen=${this.buffer.length} clients=${this.clients.size}`);
     }, 2500);
     this.log("server conectado, transmitiendo");
     sock.on("data", (chunk) => this.consume(chunk));
@@ -228,7 +250,6 @@ class ScreenSource {
       this.codecName = this.buffer.subarray(64, 68).toString("ascii").trim().toLowerCase() || "h264";
       this.codecSent = true;
       this.log(`device="${this.deviceLabel}" codec=${this.codecName}`);
-      this.broadcastText(JSON.stringify({ codec: this.codecName }));
       this.buffer = this.buffer.subarray(68);
     }
 
@@ -241,7 +262,6 @@ class ScreenSource {
       if (!plausible) return; // aún no hay 12B de metadatos coherentes: seguir esperando
       this.metaSent = true;
       this.log(`metadata ${width}x${height} flags=0x${flags.toString(16)}`);
-      this.broadcastText(JSON.stringify({ codec: this.codecName, width, height }));
       this.buffer = this.buffer.subarray(12);
     }
 
@@ -253,16 +273,19 @@ class ScreenSource {
         return;
       }
       if (this.buffer.length < 12 + len) break;
-      const payload = Buffer.from(this.buffer.subarray(12, 12 + len)); // copia: buffer muta
+      // Vista zero-copy: el buffer base nunca se muta in-place, solo se reasigna.
+      // Lo único que se retiene entre chunks (GOP cache) se copia una vez por IDR.
+      const payload = this.buffer.subarray(12, 12 + len);
       this.buffer = this.buffer.subarray(12 + len);
       this.dispatchPayload(payload);
     }
   }
 
   dispatchPayload(payload) {
+    this.frameCount = (this.frameCount || 0) + 1;
     const kinds = classifyAnnexB(payload); // {sps,pps,idr}
     if ((kinds.sps || kinds.pps) && !kinds.idr) {
-      this.pendingConfig = payload; // SPS/PPS suelto: pegarlo al próximo keyframe
+      this.pendingConfig = Buffer.from(payload); // SPS/PPS suelto: copiado, se retiene
       return;
     }
     let out = payload;
@@ -271,10 +294,24 @@ class ScreenSource {
         out = Buffer.concat([this.pendingConfig, payload]);
         this.pendingConfig = null;
       }
-      this.gopCache = out;
+      this.gopCache = [Buffer.from(out)]; // nuevo GOP: copia única por IDR
+    } else if (this.gopCache.length) {
+      this.gopCache.push(payload);
+      if (this.gopCache.length > 120) this.gopCache.shift(); // techo de seguridad
     }
+    const isKey = kinds.idr;
     for (const ws of this.clients) {
-      if (ws.readyState === ws.OPEN) ws.send(out, { binary: true });
+      if (ws.readyState !== ws.OPEN) continue;
+      if (ws.bufferedAmount > WS_HARD_LIMIT) {
+        // Cliente muerto: cortar. El navegador reconecta y entra por el replay del GOP.
+        this.log(`cliente lento (${ws.bufferedAmount}B en buffer): terminate`);
+        this.clients.delete(ws);
+        ws.terminate();
+        continue;
+      }
+      // Cliente lento pero vivo: descartar deltas; se re-sincroniza con el próximo IDR.
+      if (!isKey && ws.bufferedAmount > WS_SOFT_LIMIT) continue;
+      ws.send(out, SEND_OPTS);
     }
   }
 
@@ -287,8 +324,8 @@ class ScreenSource {
   addClient(ws) {
     this.clients.add(ws);
     clearTimeout(this.idleTimer);
-    this.broadcastText(JSON.stringify({ codec: this.codecName || "h264" }));
-    if (this.gopCache) ws.send(this.gopCache, { binary: true }); // imagen inmediata a mitad de stream
+    ws.send(JSON.stringify({ codec: this.codecName || "h264" }), { binary: false });
+    for (const chunk of this.gopCache) ws.send(chunk, SEND_OPTS); // replay del GOP: imagen al toque
     if (this.status === "idle" || this.status === "error") void this.start();
   }
 
@@ -340,7 +377,7 @@ class ScreenSource {
     }
     adb(["-s", this.serial, "reverse", "--remove", REVERSE_SOCKET]).catch(() => {});
     this.buffer = Buffer.alloc(0);
-    this.gopCache = null;
+    this.gopCache = [];
     this.pendingConfig = null;
   }
 }
@@ -355,28 +392,17 @@ function listenOnFreePort(server) {
 /** Detecta NAL types H264 en un buffer Annex B. 5=IDR 7=SPS 8=PPS */
 function classifyAnnexB(buf) {
   const kinds = { sps: false, pps: false, idr: false };
-  let i = 0;
-  let nalStart = -1;
-  const n = buf.length;
-  while (i < n - 2) {
-    if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) {
-      if (nalStart >= 0) {
-        const t = buf[nalStart] & 0x1f;
-        if (t === 5) kinds.idr = true;
-        if (t === 7) kinds.sps = true;
-        if (t === 8) kinds.pps = true;
-      }
-      nalStart = i + 3;
-      i += 3;
-    } else {
-      i += 1;
+  let sc = buf.indexOf(START_CODE);
+  while (sc !== -1) {
+    const nalStart = sc + 3;
+    if (nalStart < buf.length) {
+      const t = buf[nalStart] & 0x1f;
+      if (t === 5) kinds.idr = true;
+      else if (t === 7) kinds.sps = true;
+      else if (t === 8) kinds.pps = true;
     }
-  }
-  if (nalStart >= 0 && nalStart < n) {
-    const t = buf[nalStart] & 0x1f;
-    if (t === 5) kinds.idr = true;
-    if (t === 7) kinds.sps = true;
-    if (t === 8) kinds.pps = true;
+    if (kinds.idr && kinds.sps && kinds.pps) break; // early-exit
+    sc = buf.indexOf(START_CODE, nalStart);
   }
   return kinds;
 }
@@ -430,6 +456,9 @@ const server = http.createServer(async (req, res) => {
         service: "southfarm-screen-bridge",
         uptimeSeconds: Math.round(process.uptime()),
         activeStreams: [...sources.values()].filter((s) => s.status === "live").length,
+        streams: [...sources.values()]
+          .filter((s) => s.status !== "idle")
+          .map((s) => ({ serial: s.serial, status: s.status, clients: s.clients.size, fps: s.fpsMeasured || 0 })),
       }));
     }
     if (url.pathname === "/api/devices") {
@@ -458,7 +487,7 @@ const server = http.createServer(async (req, res) => {
 
 // -------------------------------------------------------------- websocket
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false }); // comprimir video es CPU y latencia regalados
 
 server.on("upgrade", (req, socket, head) => {
   const match = req.url.match(/^\/ws\/stream\/(.+)$/);
