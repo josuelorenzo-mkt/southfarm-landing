@@ -1,0 +1,485 @@
+#!/usr/bin/env node
+/**
+ * SouthFarm Screen Bridge — vista en vivo de la flota Android para Device Fleet.
+ *
+ * Arquitectura (protocolo scrcpy-server v4.x verificado empíricamente):
+ *   1. `adb push` del binario scrcpy-server al teléfono.
+ *   2. Listener TCP local + `adb reverse localabstract:scrcpy tcp:<puerto>`
+ *      (en scrcpy v4 el server conecta HACIA la PC, no al revés).
+ *   3. Se lanza el server vía `app_process`; por el socket llega:
+ *        - 64 bytes: nombre del dispositivo (se descarta)
+ *        - 4 bytes : códec en ASCII, ej "h264"
+ *        - paquetes: [header 12B][payload] donde bytes 8..11 = u32 BE longitud
+ *          y el payload es H.264 Annex B (SPS/PPS sueltos + frames).
+ *   4. Se re-empaquetan los chunks por WebSocket:
+ *        - primer mensaje TEXTO: {"codec":"h264"}
+ *        - luego BINARIOS Annex B (config SPS/PPS pegado al primer keyframe,
+ *          y caché de GOP para que quien se conecte a mitad vea imagen al toque).
+ *
+ * El navegador decodifica con WebCodecs (ver fleet-live-view.tsx en webapp).
+ * 100% opt-in: no hay ningún proceso ni conexión hasta que alguien abre la vista.
+ */
+
+import http from "node:http";
+import net from "node:net";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.SCREEN_BRIDGE_PORT || 8100);
+const ADB = process.env.SCREEN_ADB || pickDefaultAdb();
+const SCRCPY_JAR =
+  process.env.SCREEN_SCRCPY_JAR ||
+  "C:\\Users\\josu_\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\\scrcpy-win64-v4.1\\scrcpy-server";
+const SERVER_VERSION = "4.1";
+const DEVICE_JAR_PATH = "/data/local/tmp/sf_scrcpy_server.jar";
+const REVERSE_SOCKET = "localabstract:scrcpy"; // nombre default del socket en v4
+const MAX_SIZE = 1024;
+const MAX_FPS = 15;
+const IDLE_STOP_MS = 3000;
+const START_TIMEOUT_MS = 9000;
+
+function pickDefaultAdb() {
+  const candidates = [
+    "C:\\SouthFarm\\toolchain\\android-sdk\\platform-tools\\adb.exe",
+    "adb",
+  ];
+  return candidates.find((p) => p === "adb" || existsSync(p)) || "adb";
+}
+
+// ---------------------------------------------------------------- adb utils
+
+function adb(args, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ADB, args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`adb ${args[0]} timeout`));
+    }, timeoutMs);
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
+
+async function listDeviceSerials() {
+  const { stdout } = await adb(["devices"]);
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith("\tdevice"))
+    .map((line) => line.slice(0, -"\tdevice".length));
+}
+
+function killTreeWindows(pid) {
+  // adb.exe no siempre propaga el kill al shell remoto; igualmente el server
+  // del teléfono corta solo cuando el socket se cierra.
+  try {
+    spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+  } catch {
+    /* best effort */
+  }
+}
+
+// ------------------------------------------------------------- config alias
+
+function loadAliases() {
+  try {
+    const raw = JSON.parse(readFileSync(path.join(__dirname, "devices.json"), "utf8"));
+    return raw.aliasBySerial || {};
+  } catch {
+    return {};
+  }
+}
+const modelCache = new Map();
+
+// ------------------------------------------------------------ video source
+
+class ScreenSource {
+  constructor(serial) {
+    this.serial = serial;
+    this.codecName = "h264";
+    this.clients = new Set();
+    this.status = "idle"; // idle | starting | live | error
+    this.error = null;
+    this.tcpServer = null;
+    this.port = 0;
+    this.proc = null;
+    this.gopCache = null; // último chunk key (SPS/PPS+IDR) para join instantáneo
+    this.pendingConfig = null;
+    this.buffer = Buffer.alloc(0);
+    this.codecSent = false;
+    this.metaSent = false;
+    this.idleTimer = null;
+    this.startTimeout = null;
+    this.lastActivity = 0;
+    this.logTail = [];
+  }
+
+  log(line) {
+    const entry = `[${this.serial}] ${line}`;
+    console.log(entry);
+    this.logTail.push(entry);
+    if (this.logTail.length > 12) this.logTail.shift();
+  }
+
+  async ensureJarPushed() {
+    if (!existsSync(SCRCPY_JAR)) throw new Error(`No se encontró scrcpy-server en ${SCRCPY_JAR}`);
+    const res = await adb(["-s", this.serial, "push", SCRCPY_JAR, DEVICE_JAR_PATH], 30000);
+    if (!res.stdout.includes("file pushed") && res.code !== 0) {
+      throw new Error(`push falló: ${res.stderr || res.stdout}`);
+    }
+  }
+
+  async start() {
+    if (this.status === "live" || this.status === "starting") return;
+    this.status = "starting";
+    this.error = null;
+    this.gopCache = null;
+    this.pendingConfig = null;
+    this.buffer = Buffer.alloc(0);
+    this.codecSent = false;
+    this.metaSent = false;
+    try {
+      await this.ensureJarPushed();
+      this.port = await listenOnFreePort(this.tcpServer = net.createServer((sock) => this.onConnection(sock)));
+      const rev = await adb(["-s", this.serial, "reverse", `${REVERSE_SOCKET}`, `tcp:${this.port}`]);
+      this.log(`reverse code=${rev.code} out=${rev.stdout.trim().slice(0, 80)} err=${rev.stderr.trim().slice(0, 80)}`);
+      if (rev.code !== 0) throw new Error(`adb reverse falló: ${rev.stderr || rev.stdout}`);
+      const shellArgs = [
+        "-s", this.serial, "shell",
+        `CLASSPATH=${DEVICE_JAR_PATH} app_process / com.genymobile.scrcpy.Server ` +
+          `${SERVER_VERSION} log_level=info max_size=${MAX_SIZE} max_fps=${MAX_FPS} ` +
+          `video_codec=h264 video=true audio=false send_frame_meta=true control=false cleanup=false`,
+      ];
+      this.proc = spawn(ADB, shellArgs, { windowsHide: true });
+      this.proc.stdout?.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
+      this.proc.stderr.on("data", (d) => this.log(`server: ${String(d).trim().slice(0, 160)}`));
+      this.proc.on("close", (code) => {
+        this.log(`server exited (${code})`);
+        if (this.status !== "idle") this.fail(`El capturador del teléfono se cerró (código ${code}).`);
+      });
+
+      this.startTimeout = setTimeout(() => {
+        if (this.status === "starting") {
+          this.fail("El teléfono no empezó a enviar video a tiempo. ¿Está con la pantalla encendida?");
+        }
+      }, START_TIMEOUT_MS);
+      this.status = "awaiting"; // esperando la conexión TCP del server
+      this.log(`esperando conexión del server en puerto ${this.port}`);
+    } catch (cause) {
+      this.fail(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  onConnection(sock) {
+    if (this.status === "live" || this.mediaSock) {
+      // Solo esperamos un socket (video). Conexiones extra: descartar.
+      sock.end();
+      return;
+    }
+    this.mediaSock = sock;
+    this.status = "live";
+    clearTimeout(this.startTimeout);
+    this.startTimeout = null;
+    this.lastActivity = Date.now();
+    this.totalBytes = 0;
+    this.watchdog = setInterval(() => {
+      if (this.status === "live") {
+        this.log(`wd bytes=${this.totalBytes} bufLen=${this.buffer.length} metaSent=${!!this.metaSent} clients=${this.clients.size}`);
+      }
+    }, 2500);
+    this.log("server conectado, transmitiendo");
+    sock.on("data", (chunk) => this.consume(chunk));
+    sock.on("error", (e) => this.fail(`socket: ${e.message}`));
+    sock.on("close", () => {
+      if (this.status !== "idle") this.fail("El teléfono dejó de enviar video.");
+    });
+  }
+
+  /** Parser: [64B name][4B codec][12B metadata][paquetes de 12B header + payload Annex B] */
+  consume(chunk) {
+    if (process.env.SCREEN_DEBUG_RAW && !this.rawDone) {
+      this.rawAcc = Buffer.concat([this.rawAcc || Buffer.alloc(0), chunk]);
+      if (this.rawAcc.length >= 160) {
+        this.rawDone = true;
+        console.log(`RAW ${this.rawAcc.length}B:`, this.rawAcc.subarray(0, 200).toString("hex").replace(/(..)/g, "$1 ").trim());
+      }
+    }
+    this.totalBytes += chunk.length;
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    this.lastActivity = Date.now();
+
+    if (!this.codecSent) {
+      if (this.buffer.length < 68) return; // esperar el bloque completo 64+4
+      this.deviceLabel = this.buffer.subarray(0, 64).toString("ascii").replace(/\0+$/, "").trim();
+      this.codecName = this.buffer.subarray(64, 68).toString("ascii").trim().toLowerCase() || "h264";
+      this.codecSent = true;
+      this.log(`device="${this.deviceLabel}" codec=${this.codecName}`);
+      this.broadcastText(JSON.stringify({ codec: this.codecName }));
+      this.buffer = this.buffer.subarray(68);
+    }
+
+    if (!this.metaSent) {
+      if (this.buffer.length < 12) return;
+      const flags = this.buffer.readUInt32BE(0);
+      const width = this.buffer.readUInt32BE(4);
+      const height = this.buffer.readUInt32BE(8);
+      const plausible = width >= 16 && width <= 8192 && height >= 16 && height <= 8192;
+      if (!plausible) return; // aún no hay 12B de metadatos coherentes: seguir esperando
+      this.metaSent = true;
+      this.log(`metadata ${width}x${height} flags=0x${flags.toString(16)}`);
+      this.broadcastText(JSON.stringify({ codec: this.codecName, width, height }));
+      this.buffer = this.buffer.subarray(12);
+    }
+
+    while (this.buffer.length >= 12) {
+      const len = this.buffer.readUInt32BE(8);
+      if (len <= 0 || len > 8 * 1024 * 1024) {
+        this.log(`frame inválido (len=${len}) bufferHead=${this.buffer.subarray(0, 48).toString("hex")} offset=${this.buffer.length}`);
+        this.fail(`frame inválido (len=${len}), reiniciando`);
+        return;
+      }
+      if (this.buffer.length < 12 + len) break;
+      const payload = Buffer.from(this.buffer.subarray(12, 12 + len)); // copia: buffer muta
+      this.buffer = this.buffer.subarray(12 + len);
+      this.dispatchPayload(payload);
+    }
+  }
+
+  dispatchPayload(payload) {
+    const kinds = classifyAnnexB(payload); // {sps,pps,idr}
+    if ((kinds.sps || kinds.pps) && !kinds.idr) {
+      this.pendingConfig = payload; // SPS/PPS suelto: pegarlo al próximo keyframe
+      return;
+    }
+    let out = payload;
+    if (kinds.idr) {
+      if (this.pendingConfig) {
+        out = Buffer.concat([this.pendingConfig, payload]);
+        this.pendingConfig = null;
+      }
+      this.gopCache = out;
+    }
+    for (const ws of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(out, { binary: true });
+    }
+  }
+
+  broadcastText(text) {
+    for (const ws of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(text, { binary: false });
+    }
+  }
+
+  addClient(ws) {
+    this.clients.add(ws);
+    clearTimeout(this.idleTimer);
+    this.broadcastText(JSON.stringify({ codec: this.codecName || "h264" }));
+    if (this.gopCache) ws.send(this.gopCache, { binary: true }); // imagen inmediata a mitad de stream
+    if (this.status === "idle" || this.status === "error") void this.start();
+  }
+
+  removeClient(ws) {
+    this.clients.delete(ws);
+    if (this.clients.size === 0) {
+      this.idleTimer = setTimeout(() => this.stop("sin espectadores"), IDLE_STOP_MS);
+    }
+  }
+
+  fail(message) {
+    if (this.status === "idle") return;
+    this.log(`FAIL: ${message}`);
+    this.error = message;
+    this.status = "error";
+    clearTimeout(this.startTimeout);
+    this.startTimeout = null;
+    for (const ws of this.clients) {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "error", message }), { binary: false });
+    }
+    this.teardownProc();
+    // Con clientes vivos, permitir reintento automático en la próxima conexión.
+  }
+
+  stop(reason = "manual") {
+    this.log(`stop (${reason})`);
+    this.status = "idle";
+    this.teardownProc();
+  }
+
+  teardownProc() {
+    clearInterval(this.watchdog);
+    this.watchdog = null;
+    clearTimeout(this.startTimeout);
+    this.startTimeout = null;
+    if (this.mediaSock) {
+      this.mediaSock.destroy();
+      this.mediaSock = null;
+    }
+    if (this.proc) {
+      const pid = this.proc.pid;
+      try { this.proc.kill(); } catch {}
+      if (pid) killTreeWindows(pid);
+      this.proc = null;
+    }
+    if (this.tcpServer) {
+      this.tcpServer.close();
+      this.tcpServer = null;
+    }
+    adb(["-s", this.serial, "reverse", "--remove", REVERSE_SOCKET]).catch(() => {});
+    this.buffer = Buffer.alloc(0);
+    this.gopCache = null;
+    this.pendingConfig = null;
+  }
+}
+
+function listenOnFreePort(server) {
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+  });
+}
+
+/** Detecta NAL types H264 en un buffer Annex B. 5=IDR 7=SPS 8=PPS */
+function classifyAnnexB(buf) {
+  const kinds = { sps: false, pps: false, idr: false };
+  let i = 0;
+  let nalStart = -1;
+  const n = buf.length;
+  while (i < n - 2) {
+    if (buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1) {
+      if (nalStart >= 0) {
+        const t = buf[nalStart] & 0x1f;
+        if (t === 5) kinds.idr = true;
+        if (t === 7) kinds.sps = true;
+        if (t === 8) kinds.pps = true;
+      }
+      nalStart = i + 3;
+      i += 3;
+    } else {
+      i += 1;
+    }
+  }
+  if (nalStart >= 0 && nalStart < n) {
+    const t = buf[nalStart] & 0x1f;
+    if (t === 5) kinds.idr = true;
+    if (t === 7) kinds.sps = true;
+    if (t === 8) kinds.pps = true;
+  }
+  return kinds;
+}
+
+// ------------------------------------------------------------- source mgr
+
+const sources = new Map();
+
+function getSource(serial) {
+  let src = sources.get(serial);
+  if (!src) {
+    src = new ScreenSource(serial);
+    sources.set(serial, src);
+  }
+  return src;
+}
+
+setInterval(() => {
+  for (const [serial, src] of sources) {
+    if (
+      src.clients.size === 0 &&
+      src.status === "idle" &&
+      !src.proc &&
+      Date.now() - (src.lastActivity || 0) > 60000
+    ) {
+      sources.delete(serial);
+    }
+  }
+}, 30000);
+
+// ------------------------------------------------------------------- http
+
+function cors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+const server = http.createServer(async (req, res) => {
+  cors(res);
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    return res.end();
+  }
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+  try {
+    if (url.pathname === "/api/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({
+        ok: true,
+        service: "southfarm-screen-bridge",
+        uptimeSeconds: Math.round(process.uptime()),
+        activeStreams: [...sources.values()].filter((s) => s.status === "live").length,
+      }));
+    }
+    if (url.pathname === "/api/devices") {
+      const aliases = loadAliases();
+      const serials = await listDeviceSerials();
+      const devices = [];
+      for (const serial of serials) {
+        let model = modelCache.get(serial);
+        if (!model) {
+          const r = await adb(["-s", serial, "shell", "getprop ro.product.model"], 8000).catch(() => null);
+          model = r ? r.stdout.trim() : "";
+          if (model) modelCache.set(serial, model);
+        }
+        devices.push({ serial, alias: aliases[serial] || serial.split(":")[0], model, online: true });
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ devices }));
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  } catch (cause) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }));
+  }
+});
+
+// -------------------------------------------------------------- websocket
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (req, socket, head) => {
+  const match = req.url.match(/^\/ws\/stream\/(.+)$/);
+  if (!match) {
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    return socket.destroy();
+  }
+  const serial = decodeURIComponent(match[1]);
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    const src = getSource(serial);
+    src.addClient(ws);
+    ws.on("close", () => src.removeClient(ws));
+    ws.on("error", () => src.removeClient(ws));
+  });
+});
+
+process.on("uncaughtException", (err) => console.log("uncaught:", err?.stack || err));
+process.on("unhandledRejection", (err) => console.log("unhandledRejection:", err));
+
+server.listen(PORT, () => {
+  console.log(`southfarm-screen-bridge escuchando en http://localhost:${PORT}`);
+  console.log(`adb: ${ADB}`);
+  console.log(`scrcpy-server: ${SCRCPY_JAR}`);
+});

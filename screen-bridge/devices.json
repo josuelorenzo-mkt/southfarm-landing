@@ -1,0 +1,8 @@
+{
+  "//": "Mapeo serial ADB → alias que ve el operador en Device Fleet. Editá este archivo y recargá la página; no hace falta reiniciar el bridge.",
+  "aliasBySerial": {
+    "192.168.0.21:5555": "cam-21",
+    "192.168.0.32:5555": "cam-32",
+    "192.168.0.36:5555": "cam-36"
+  }
+}
