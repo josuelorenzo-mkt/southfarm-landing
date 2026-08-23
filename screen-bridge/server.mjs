@@ -39,7 +39,7 @@ const DEVICE_JAR_PATH = "/data/local/tmp/sf_scrcpy_server.jar";
 const REVERSE_SOCKET = "localabstract:scrcpy"; // nombre default del socket en v4
 const MAX_SIZE = Number(process.env.SCREEN_MAX_SIZE || 1024);
 const MAX_FPS = Number(process.env.SCREEN_MAX_FPS || 30);
-const VIDEO_BIT_RATE = process.env.SCREEN_VIDEO_BITRATE || "8000000"; // bits/s (el server no acepta sufijos tipo "8M")
+const VIDEO_BIT_RATE = process.env.SCREEN_VIDEO_BITRATE || "4000000"; // bits/s (8M×N teléfonos colapsa el WiFi)
 // repeat-previous-frame-after: re-emite el último cuadro (µs) aunque la pantalla
 // no cambie → fps estable incluso con pantalla estática. i-frame-interval (s):
 // GOP corto para resyncs rápidos. Vacío para desactivar ambas.
@@ -207,8 +207,10 @@ class ScreenSource {
     }
     this.mediaSock = sock;
     sock.setNoDelay(true); // sin Nagle: cada frame sale inmediatamente
+    sock.setKeepAlive(true, 10000);
     this.status = "live";
     this.failureCount = 0; // la sesión arrancó bien: limpiar historial de fallos
+    this.stallTicks = 0; // ticks del watchdog sin frames nuevos (solo si hubo actividad)
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
     this.lastActivity = Date.now();
@@ -220,8 +222,24 @@ class ScreenSource {
       this.lastWdTick = now;
       this.lastWdFrames = this.frameCount || 0;
       if (this.status !== "live") return;
-      // Pantalla estática = silencio válido: NO cortamos por falta de datos.
-      // Solo intervenimos si el protocolo desincroniza antes de los metadatos.
+      // Red absoluta: >30s sin UN byte con espectadores es un túnel muerto
+      // (en pantalla estática el encoder igual emite IDRs periódicos).
+      const sinceLastByte = now - this.lastActivity;
+      if (sinceLastByte > 30000 && this.clients.size > 0) {
+        this.fail("stall de red: túnel mudo >30s; reconectando", false);
+        return;
+      }
+      // Stream ACTIVO (ya emitió >50 frames) sin frames nuevos ~7.5s: túnel colapsado.
+      if (this.frameCount > 50 && this.frameCount === (this.lastStallFrameCount ?? -1)) {
+        this.stallTicks += 1;
+      } else {
+        this.stallTicks = 0;
+      }
+      this.lastStallFrameCount = this.frameCount;
+      if (this.stallTicks >= 3 && this.clients.size > 0) {
+        this.fail("stall de red: el túnel dejó de entregar datos; reconectando", false); // silencioso: se recupera solo
+        return;
+      }
       if (!this.metaSent && this.buffer.length > 4096) {
         this.fail(`stall: protocolo desincronizado (bufLen=${this.buffer.length} sin metadata)`);
         return;
@@ -341,7 +359,7 @@ class ScreenSource {
     }
   }
 
-  fail(message) {
+  fail(message, notify = true) {
     if (this.status === "idle") return;
     this.log(`FAIL: ${message}`);
     this.error = message;
@@ -349,8 +367,10 @@ class ScreenSource {
     this.failureCount = (this.failureCount || 0) + 1;
     clearTimeout(this.startTimeout);
     this.startTimeout = null;
-    for (const ws of this.clients) {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "error", message }), { binary: false });
+    if (notify) {
+      for (const ws of this.clients) {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: "error", message }), { binary: false });
+      }
     }
     this.teardownProc();
     // Auto-reinicio con espectadores conectados y backoff simple; tras 5 fallos

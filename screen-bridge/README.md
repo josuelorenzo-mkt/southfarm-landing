@@ -36,7 +36,7 @@ Variables de entorno opcionales:
 | `SCREEN_SCRCPY_JAR` | ruta winget scrcpy 4.1 | Binario scrcpy-server |
 | `SCREEN_MAX_FPS` | `30` | Techo de fps del encoder del teléfono |
 | `SCREEN_MAX_SIZE` | `1024` | Lado mayor de la captura (px) |
-| `SCREEN_VIDEO_BITRATE` | `8000000` | Bitrate de video en bits/s |
+| `SCREEN_VIDEO_BITRATE` | `4000000` | Bitrate de video en bits/s (subilo si tu red WiFi lo banca) |
 | `SCREEN_CODEC_OPTIONS` | `repeat-previous-frame-after=33333,i-frame-interval=2` | Opciones MediaCodec (fps estable en pantalla estática + GOP corto) |
 | `SCREEN_DEBUG_RAW` | — | Si está seteado, vuelca bytes crudos del protocolo |
 
