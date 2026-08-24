@@ -381,9 +381,12 @@ class ScreenSource {
     }
     let out = payload;
     if (kinds.idr) {
+      // Pegar SPS/PPS a TODOS los IDR, no solo al primero: el codificador los
+      // emite una sola vez por sesión, y un cliente que entra (o reconecta)
+      // después necesita parameter sets in-band para inicializar su decoder
+      // (WebCodecs sin description espera SPS/PPS eternamente sin dar error).
       if (this.pendingConfig) {
         out = Buffer.concat([this.pendingConfig, payload]);
-        this.pendingConfig = null;
       }
       this.gopCache = [Buffer.from(out)]; // nuevo GOP: copia única por IDR
     } else if (this.gopCache.length) {
