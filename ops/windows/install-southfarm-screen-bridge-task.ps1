@@ -4,10 +4,10 @@
 [CmdletBinding()]
 param(
   [string]$TaskName = "SouthFarm Screen Bridge",
-  [string]$SourcePath = (Join-Path $PSScriptRoot "..\..\screen-bridge"),
-  [string]$NodePath = (Join-Path $env:LOCALAPPDATA "SouthFarm\node-v22.23.1-win-x64\node.exe"),
+  [string]$SourcePath = "",
+  [string]$NodePath = "",
   [string]$AdbPath = "C:\SouthFarm\toolchain\android-sdk\platform-tools\adb.exe",
-  [string]$ScrcpyJarPath = (Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy-server"),
+  [string]$ScrcpyJarPath = "",
   [string]$RuntimeRoot = (Join-Path $env:ProgramData "SouthFarm"),
   [int]$Bitrate = 2000000,
   [int]$MaxSize = 720,
@@ -17,6 +17,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Defaults resueltos en el cuerpo: $PSScriptRoot y $env:LOCALAPPDATA pueden no
+# estar disponibles durante el binding de parámetros según cómo se invoque.
+if ([string]::IsNullOrWhiteSpace($SourcePath)) { $SourcePath = Join-Path $PSScriptRoot "..\..\screen-bridge" }
+if ([string]::IsNullOrWhiteSpace($NodePath)) { $NodePath = Join-Path $env:LOCALAPPDATA "SouthFarm\node-v22.23.1-win-x64\node.exe" }
+if ([string]::IsNullOrWhiteSpace($ScrcpyJarPath)) { $ScrcpyJarPath = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Genymobile.scrcpy_Microsoft.Winget.Source_8wekyb3d8bbwe\scrcpy-win64-v4.1\scrcpy-server" }
 $SourcePath = [IO.Path]::GetFullPath($SourcePath)
 $NodePath = [IO.Path]::GetFullPath($NodePath)
 $AdbPath = [IO.Path]::GetFullPath($AdbPath)
