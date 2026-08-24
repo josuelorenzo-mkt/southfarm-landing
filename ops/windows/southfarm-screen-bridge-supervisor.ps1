@@ -29,9 +29,6 @@ $OutputLog = Join-Path $LogDirectory "screen-bridge.out.log"
 $ErrorLog = Join-Path $LogDirectory "screen-bridge.error.log"
 
 New-Item -ItemType Directory -Force -Path $LogDirectory | Out-Null
-if (!(Test-Path -LiteralPath $NodePath)) { throw "Node executable not found: $NodePath" }
-if (!(Test-Path -LiteralPath (Join-Path $BridgePath "server.mjs"))) { throw "server.mjs not found under: $BridgePath" }
-if (!(Test-Path -LiteralPath $RuntimeConfigPath)) { throw "Runtime config not found: $RuntimeConfigPath" }
 
 function Rotate-LogIfNeeded([string]$Path) {
   if (!(Test-Path -LiteralPath $Path)) { return }
@@ -40,15 +37,19 @@ function Rotate-LogIfNeeded([string]$Path) {
   Move-Item -LiteralPath $Path -Destination $rotatedPath -Force
 }
 
-$runtimeConfig = Get-Content -LiteralPath $RuntimeConfigPath -Raw | ConvertFrom-Json
-$authToken = [string]$runtimeConfig.auth_token
-if ([string]::IsNullOrWhiteSpace($authToken)) { throw "auth_token vacío en $RuntimeConfigPath" }
-
+# TODO el pre-loop está protegido: si algo falla acá, queda registrado en el
+# error log y el supervisor reintenta, en vez de morir en silencio (State=Ready).
 $restartDelay = $InitialRestartDelaySeconds
+$exitCode = 1
 while ($true) {
   try {
+    if (!(Test-Path -LiteralPath $NodePath)) { throw "Node executable not found: $NodePath" }
+    if (!(Test-Path -LiteralPath (Join-Path $BridgePath "server.mjs"))) { throw "server.mjs not found under: $BridgePath" }
     Rotate-LogIfNeeded $OutputLog
     Rotate-LogIfNeeded $ErrorLog
+    $runtimeConfig = Get-Content -LiteralPath $RuntimeConfigPath -Raw | ConvertFrom-Json
+    $authToken = [string]$runtimeConfig.auth_token
+    if ([string]::IsNullOrWhiteSpace($authToken)) { throw "auth_token vacío en $RuntimeConfigPath" }
     $env:SCREEN_BRIDGE_PORT = [string]$Port
     $env:SCREEN_AUTH_TOKEN = $authToken
     $env:SCREEN_ADB = $AdbPath
@@ -63,7 +64,7 @@ while ($true) {
     $exitCode = $LASTEXITCODE
     "[$(Get-Date -Format o)] bridge salió (exit=$exitCode); reinicio en ${restartDelay}s" | Add-Content -LiteralPath $OutputLog
   } catch {
-    # El supervisor NUNCA muere: cualquier error de log/rotación se registra y se sigue.
+    # El supervisor NUNCA muere: cualquier error de init/log/rotación se registra y se sigue.
     "[$(Get-Date -Format o)] supervisor: $($_.Exception.Message)" | Add-Content -LiteralPath $ErrorLog
     $exitCode = 1
   }
