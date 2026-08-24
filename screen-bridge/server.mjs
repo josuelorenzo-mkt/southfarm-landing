@@ -279,7 +279,7 @@ class ScreenSource {
     this.totalBytes = 0;
     this.watchdog = setInterval(() => {
       const now = Date.now();
-      const elapsedSec = Math.max(0.001, (now - (this.lastWdTick || now - 2500)) / 1000);
+      const elapsedSec = Math.max(0.001, (now - (this.lastWdTick || now - 2000)) / 1000);
       this.fpsMeasured = Math.round(((this.frameCount || 0) - ((this.lastWdFrames ?? this.frameCount) || 0)) / elapsedSec);
       this.lastWdTick = now;
       this.lastWdFrames = this.frameCount || 0;
@@ -292,14 +292,16 @@ class ScreenSource {
         this.fail("stall de red: túnel mudo >30s; reconectando", false);
         return;
       }
-      // Stream ACTIVO (ya emitió >50 frames) sin frames nuevos ~7.5s: túnel colapsado.
+      // Stream ACTIVO (ya emitió >50 frames) sin frames nuevos ~4s: túnel colapsado.
+      // Umbral agresivo a propósito: un stream vivo a 30fps nunca tiene 4s de silencio,
+      // y recuperar rápido vale más que evitar un respawn de más.
       if (this.frameCount > 50 && this.frameCount === (this.lastStallFrameCount ?? -1)) {
         this.stallTicks += 1;
       } else {
         this.stallTicks = 0;
       }
       this.lastStallFrameCount = this.frameCount;
-      if (this.stallTicks >= 3 && this.clients.size > 0) {
+      if (this.stallTicks >= 2 && this.clients.size > 0) {
         this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
         this.fail("stall de red: el túnel dejó de entregar datos; reconectando", false); // silencioso: se recupera solo
         return;
@@ -309,7 +311,7 @@ class ScreenSource {
         return;
       }
       this.log(`wd fps=${this.fpsMeasured} bytes=${this.totalBytes} bufLen=${this.buffer.length} clients=${this.clients.size}`);
-    }, 2500);
+    }, 2000);
     this.log("server conectado, transmitiendo");
     sock.on("data", (chunk) => this.consume(chunk));
     sock.on("error", (e) => this.fail(`socket: ${e.message}`, false));
