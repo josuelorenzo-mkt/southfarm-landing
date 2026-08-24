@@ -46,21 +46,27 @@ if ([string]::IsNullOrWhiteSpace($authToken)) { throw "auth_token vacío en $Run
 
 $restartDelay = $InitialRestartDelaySeconds
 while ($true) {
-  Rotate-LogIfNeeded $OutputLog
-  Rotate-LogIfNeeded $ErrorLog
-  $env:SCREEN_BRIDGE_PORT = [string]$Port
-  $env:SCREEN_AUTH_TOKEN = $authToken
-  $env:SCREEN_ADB = $AdbPath
-  if (![string]::IsNullOrWhiteSpace($ScrcpyJarPath)) { $env:SCREEN_SCRCPY_JAR = $ScrcpyJarPath }
-  $env:SCREEN_VIDEO_BITRATE = [string]$Bitrate
-  $env:SCREEN_MAX_SIZE = [string]$MaxSize
-  "[$(Get-Date -Format o)] iniciando bridge (puerto $Port, bitrate $Bitrate, maxSize $MaxSize)" | Add-Content -LiteralPath $OutputLog
-  Push-Location $BridgePath
   try {
-    & $NodePath server.mjs 2>> $ErrorLog 1>> $OutputLog
-  } finally { Pop-Location }
-  $exitCode = $LASTEXITCODE
-  "[$(Get-Date -Format o)] bridge salió (exit=$exitCode); reinicio en ${restartDelay}s" | Add-Content -LiteralPath $OutputLog
+    Rotate-LogIfNeeded $OutputLog
+    Rotate-LogIfNeeded $ErrorLog
+    $env:SCREEN_BRIDGE_PORT = [string]$Port
+    $env:SCREEN_AUTH_TOKEN = $authToken
+    $env:SCREEN_ADB = $AdbPath
+    if (![string]::IsNullOrWhiteSpace($ScrcpyJarPath)) { $env:SCREEN_SCRCPY_JAR = $ScrcpyJarPath }
+    $env:SCREEN_VIDEO_BITRATE = [string]$Bitrate
+    $env:SCREEN_MAX_SIZE = [string]$MaxSize
+    "[$(Get-Date -Format o)] iniciando bridge (puerto $Port, bitrate $Bitrate, maxSize $MaxSize)" | Add-Content -LiteralPath $OutputLog
+    Push-Location $BridgePath
+    try {
+      & $NodePath server.mjs 2>> $ErrorLog 1>> $OutputLog
+    } finally { Pop-Location }
+    $exitCode = $LASTEXITCODE
+    "[$(Get-Date -Format o)] bridge salió (exit=$exitCode); reinicio en ${restartDelay}s" | Add-Content -LiteralPath $OutputLog
+  } catch {
+    # El supervisor NUNCA muere: cualquier error de log/rotación se registra y se sigue.
+    "[$(Get-Date -Format o)] supervisor: $($_.Exception.Message)" | Add-Content -LiteralPath $ErrorLog
+    $exitCode = 1
+  }
   Start-Sleep -Seconds $restartDelay
   $restartDelay = [Math]::Min($restartDelay * 2, $MaxRestartDelaySeconds)
   # Tras una corrida estable (>5 min) volvemos al delay base.
