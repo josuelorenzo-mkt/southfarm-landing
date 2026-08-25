@@ -2643,8 +2643,17 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
       });
     }
     const device = touchDevice(req.user.userId, req.body);
-    const deviceToken = issueDeviceToken(Number(device.id));
-    res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+    // Rotar el token SOLO cuando el registro lo inicia un usuario (pairing web).
+    // Si quien llama es el propio dispositivo con su token vigente (authType
+    // 'device'), NO rotar: la app llama a register antes de cada scan/carga de
+    // cuentas, y rotar aquí invalida el token que la tarea remota capturó al
+    // reclamar → el POST final de resultados falla con 401 y las cuentas
+    // detectadas se pierden.
+    const deviceToken = req.user.authType === 'device' ? null : issueDeviceToken(Number(device.id));
+    res.status(200).json({
+      device: deviceView(device),
+      ...(deviceToken ? { device_token: deviceToken } : {}),
+    });
   } catch (error: any) {
     res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
       error: error.message || 'device_id required',
