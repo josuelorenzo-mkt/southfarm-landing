@@ -3990,8 +3990,22 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
 
-  db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
-    .run(dataUserId, numericDeviceId, platform);
+  try {
+    // Desvincular referencias ANTES del borrado: task_runs.social_account_id
+    // apunta a social_accounts y, con foreign_keys=ON, borrar cuentas
+    // referenciadas por tareas (warmups/scan) tira SQLITE_CONSTRAINT.
+    db.prepare(`
+      UPDATE task_runs SET social_account_id = NULL
+      WHERE social_account_id IN (
+        SELECT id FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?
+      )
+    `).run(dataUserId, numericDeviceId, platform);
+    db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
+      .run(dataUserId, numericDeviceId, platform);
+  } catch (error: any) {
+    console.error('[SocialAccounts] replace failed:', error?.code || error?.message);
+    return res.status(500).json({ error: 'Could not replace scanned accounts' });
+  }
   const insert = db.prepare(
     `INSERT OR IGNORE INTO social_accounts
       (user_id, device_id, platform, username, profile_pic_url,
@@ -4472,3 +4486,13 @@ runActivityPlannerStartup({
 } as PlannerDeps);
 
 app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));
+
+// Red de seguridad: un rechazo no manejado en un handler async (Express 4 no
+// los captura) NO debe tumbar la API entera con toda la flota colgando de
+// ella. Se registra con stack en stderr y el proceso sigue vivo.
+process.on('unhandledRejection', (reason) => {
+  console.error('[Fatal-guard] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[Fatal-guard] uncaughtException:', error);
+});
