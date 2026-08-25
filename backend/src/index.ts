@@ -2643,17 +2643,14 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
       });
     }
     const device = touchDevice(req.user.userId, req.body);
-    // Rotar el token SOLO cuando el registro lo inicia un usuario (pairing web).
-    // Si quien llama es el propio dispositivo con su token vigente (authType
-    // 'device'), NO rotar: la app llama a register antes de cada scan/carga de
-    // cuentas, y rotar aquí invalida el token que la tarea remota capturó al
-    // reclamar → el POST final de resultados falla con 401 y las cuentas
-    // detectadas se pierden.
-    const deviceToken = req.user.authType === 'device' ? null : issueDeviceToken(Number(device.id));
-    res.status(200).json({
-      device: deviceView(device),
-      ...(deviceToken ? { device_token: deviceToken } : {}),
-    });
+    // Este endpoint SOLO re-registra dispositivos ya emparejados (si no existe
+    // la fila responde 409 y el emparejamiento real ocurre en /devices/claim).
+    // Nunca rotar el token acá: la app llama a register como "ensure registered"
+    // antes de/durante cada scan (con JWT de usuario o token de dispositivo), y
+    // rotar invalida el token que la tarea remota capturó al reclamar → el POST
+    // final a /social-accounts llega con 401, las cuentas detectadas se pierden
+    // y la tarea queda trabada. La rotación de token vive únicamente en claim.
+    res.status(200).json({ device: deviceView(device) });
   } catch (error: any) {
     res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
       error: error.message || 'device_id required',
