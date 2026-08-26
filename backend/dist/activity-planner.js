@@ -289,6 +289,20 @@ function existingNonCancelledForDay(deps, clusterId, routineId, dateKey) {
   `).all(clusterId, routineId);
     return rows.filter((row) => deps.dateKeyInTimezone(row.scheduled_for || row.created_at) === dateKey);
 }
+// Los clústeres pueden compartir dispositivos (un teléfono con cuentas de
+// varias cuentas/clústeres). existingNonCancelledForDay solo deduplica dentro
+// de SU rutina, así que dos rutinas aprobadas que cubren el mismo teléfono
+// generaban tareas idénticas para el mismo slot. Este chequeo es global por
+// dispositivo+tipo+horario, sin importar de qué rutina venga la tarea.
+function hasActiveTaskForSlot(deps, deviceId, taskType, scheduledFor) {
+    const row = deps.db.prepare(`
+    SELECT 1 FROM task_runs
+    WHERE device_id = ? AND task_type = ? AND scheduled_for = ?
+      AND status NOT IN ('cancelled', 'expired', 'error')
+    LIMIT 1
+  `).get(deviceId, taskType, scheduledFor);
+    return !!row;
+}
 // FIX 6 [MEDIO] — Overdue tasks belong to a past slot; keep them claimable
 // (claim still works for overdue) but they must not block regeneration of the
 // same day, so generate cancels and re-creates them (see generateWarmupDay /
@@ -491,6 +505,8 @@ function generateWarmupDay(deps, workspaceId, ownerId, cluster, routine, account
             continue;
         for (const slot of slots) {
             const scheduledFor = localDateTimeToIso(dateKey, slot.time, BUENOS_AIRES_TIMEZONE);
+            if (hasActiveTaskForSlot(deps, account.device_id, taskTypeForPlatform(account.platform), scheduledFor))
+                continue;
             insertRoutineTask(deps, {
                 workspaceId,
                 userId: ownerId,
@@ -525,6 +541,8 @@ function generateScanDay(deps, workspaceId, ownerId, cluster, routine, accounts,
             continue;
         for (const time of hours) {
             const scheduledFor = localDateTimeToIso(dateKey, time, BUENOS_AIRES_TIMEZONE);
+            if (hasActiveTaskForSlot(deps, account.device_id, 'scan_' + account.platform, scheduledFor))
+                continue;
             insertRoutineTask(deps, {
                 workspaceId,
                 userId: ownerId,
