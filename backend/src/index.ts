@@ -379,6 +379,14 @@ for (const [name, type] of [
   }
 }
 
+const workspaceColumns = new Set(
+  (db.prepare('PRAGMA table_info(workspaces)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!workspaceColumns.has('bridge_url')) {
+  db.exec('ALTER TABLE workspaces ADD COLUMN bridge_url TEXT');
+}
+
 const taskRunColumns = new Set(
   (db.prepare('PRAGMA table_info(task_runs)').all() as Array<{ name: string }>)
     .map((column) => column.name),
@@ -1400,7 +1408,7 @@ function revokeRefreshToken(rawToken: string): void {
 
 function workspaceMembership(userId: number): any | null {
   return db.prepare(`
-    SELECT wm.*, w.name AS workspace_name, w.owner_user_id
+    SELECT wm.*, w.name AS workspace_name, w.owner_user_id, w.bridge_url AS workspace_bridge_url
     FROM workspace_members wm
     JOIN workspaces w ON w.id = wm.workspace_id
     WHERE wm.user_id = ? AND wm.status = 'active'
@@ -2329,6 +2337,7 @@ function authUserView(userId: number): any | null {
       id: membership.workspace_id,
       name: membership.workspace_name,
       owner_user_id: membership.owner_user_id,
+      bridge_url: membership.workspace_bridge_url || null,
     },
   };
 }
@@ -2450,9 +2459,33 @@ app.get('/api/team/members', auth, (req: any, res) => {
     workspace: {
       id: req.user.workspaceId,
       name: workspaceMembership(req.user.userId)?.workspace_name || 'SouthFarm workspace',
+      bridge_url: workspaceMembership(req.user.userId)?.workspace_bridge_url || null,
     },
     members: members.map(memberUserView),
   });
+});
+
+app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const membership = workspaceMembership(req.user.userId);
+  if (!membership) return res.status(403).json({ error: 'User is not a member of a workspace' });
+
+  if ('bridge_url' in req.body) {
+    const rawBridgeUrl = stringValue(req.body.bridge_url);
+    let bridgeUrl: string | null = null;
+    if (rawBridgeUrl) {
+      try {
+        const parsed = new URL(rawBridgeUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        bridgeUrl = parsed.toString().replace(/\/$/, '');
+      } catch {
+        return res.status(400).json({ error: 'bridge_url must be a valid http(s) URL' });
+      }
+    }
+    db.prepare('UPDATE workspaces SET bridge_url = ? WHERE id = ?').run(bridgeUrl, membership.workspace_id);
+  }
+
+  const updated = db.prepare('SELECT bridge_url FROM workspaces WHERE id = ?').get(membership.workspace_id) as any;
+  res.json({ workspace: { id: membership.workspace_id, name: membership.workspace_name, bridge_url: updated?.bridge_url || null } });
 });
 
 app.get('/api/team/invites', auth, requireRole('owner', 'admin'), (req: any, res) => {
