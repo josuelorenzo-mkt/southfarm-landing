@@ -15,7 +15,7 @@ import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup, type PlannerDeps } from './activity-planner.js';
-import { busyUntilForDevice, reserveSlot } from './slot-reservation.js';
+import { busyUntilForDevice, nextFreeSlot, reserveSlot } from './slot-reservation.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
@@ -3280,7 +3280,7 @@ app.patch('/api/tasks/runs/:id/schedule', auth, requireRole('owner', 'admin', 'o
       device = findDeviceForWorkspace(req.user.userId, req.body.device_id);
       if (!device) return res.status(404).json({ error: 'Assigned device not found' });
     }
-    const nextDeviceId = Number((device as any)?.id || run.device_id || 0) || null;
+    const now = nowIso();
     const nextUserId = Number((device as any)?.user_id || run.user_id);
     const nextParams = req.body.params === undefined
       ? parseParams(run.params)
@@ -3288,7 +3288,34 @@ app.patch('/api/tasks/runs/:id/schedule', auth, requireRole('owner', 'admin', 'o
     const nextDuration = req.body.planned_duration_sec === undefined
       ? run.planned_duration_sec
       : numberValue(req.body.planned_duration_sec);
-    const now = nowIso();
+    // Validación del sistema de reservas: la ventana destino no puede solapar
+    // ninguna tarea viva del teléfono destino (excluyendo a la propia tarea).
+    const nextDeviceId = Number((device as any)?.id || run.device_id || 0) || null;
+    if (nextDeviceId) {
+      const reservation = reserveSlot({
+        db,
+        deviceId: nextDeviceId,
+        desiredStart: scheduledFor,
+        durationSec: nextDuration === null ? null : Number(nextDuration),
+        policy: 'reject',
+        excludeTaskId: Number(run.id),
+      });
+      if (!reservation.ok) {
+        const suggested = nextFreeSlot({
+          db,
+          deviceId: nextDeviceId,
+          from: scheduledFor,
+          durationSec: nextDuration === null ? null : Number(nextDuration),
+          shiftLimitMs: 24 * 60 * 60 * 1000,
+        });
+        return res.status(409).json({
+          error: 'El horario elegido choca con otra tarea del teléfono',
+          conflicts: reservation.conflicts,
+          ...(suggested ? { next_free_slot: suggested } : {}),
+          requested_scheduled_for: scheduledFor,
+        });
+      }
+    }
     db.prepare(`
       UPDATE task_runs
       SET user_id = ?, device_id = ?, workspace_id = ?, source = 'manual',
@@ -3315,6 +3342,9 @@ app.patch('/api/tasks/runs/:id/schedule', auth, requireRole('owner', 'admin', 'o
     recordTaskEvent(updated, 'rescheduled_manual', {
       previous_status: run.status,
       scheduled_for: scheduledFor,
+      from: run.scheduled_for,
+      to: scheduledFor,
+      by_user_id: req.user.userId,
     });
     const recalculated = recalculatePlannerDay(
       req.user.userId,

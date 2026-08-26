@@ -263,6 +263,56 @@ try {
   `).get();
   check('el corrimiento entre clústeres queda auditado', Number(shiftedEvents.n) > 0, `eventos=${shiftedEvents.n}`);
 
+  // ── 5c. Movimiento individual (Fase 2): PATCH /api/tasks/runs/:id/schedule ──
+  // Mover una tarea a un hueco libre (el sugerido por nextFreeSlot).
+  const moveBase = new Date(Date.now() + 26 * 3600e3);
+  const freeTarget = reservationModule.nextFreeSlot({
+    db,
+    deviceId: devId,
+    from: moveBase.toISOString(),
+    durationSec: 20 * 60,
+    shiftLimitMs: 72 * 3600e3,
+  });
+  const batchSnapshot = db.prepare(
+    "SELECT id, scheduled_for FROM task_runs WHERE device_id = ? AND source = 'automatic' AND status = 'pending' ORDER BY id",
+  ).all(devId);
+  const moved = await api('PATCH', `/api/tasks/runs/${firstId}/schedule`, { scheduled_for: freeTarget }, token);
+  check('mover tarea pendiente a hueco libre devuelve ok', moved.status === 200 && moved.json?.ok === true, `status=${moved.status} ${JSON.stringify(moved.json?.error)}`);
+  check('la tarea quedó en el horario pedido', moved.json?.task_run?.scheduled_for === freeTarget, `scheduled=${moved.json?.task_run?.scheduled_for}`);
+  const batchAfter = db.prepare(
+    "SELECT id, scheduled_for FROM task_runs WHERE device_id = ? AND source = 'automatic' AND status = 'pending' ORDER BY id",
+  ).all(devId);
+  check(
+    'mover una tarea no tocó el resto de la cola',
+    JSON.stringify(batchAfter) === JSON.stringify(batchSnapshot),
+  );
+  const reschedEvent = db.prepare(
+    "SELECT payload FROM task_events WHERE task_run_id = ? AND event_type = 'rescheduled_manual' ORDER BY id DESC LIMIT 1",
+  ).get(firstId);
+  let reschedPayload = {};
+  try { reschedPayload = JSON.parse(reschedEvent?.payload || '{}'); } catch {}
+  check("evento 'rescheduled_manual' audita from/to/usuario", !!reschedPayload.from && !!reschedPayload.to && Number(reschedPayload.by_user_id) === userId, reschedEvent?.payload);
+
+  // Mover encima de una ventana ocupada → 409 con conflicto y próximo hueco.
+  const occupiedSlot = db.prepare(`
+    SELECT scheduled_for FROM task_runs
+    WHERE device_id = ? AND source = 'automatic' AND status = 'pending'
+      AND task_type LIKE 'warmup%' ORDER BY scheduled_for DESC LIMIT 1
+  `).get(devId);
+  const clash = await api('PATCH', `/api/tasks/runs/${firstId}/schedule`, { scheduled_for: occupiedSlot.scheduled_for }, token);
+  check('mover encima de otra tarea devuelve 409', clash.status === 409, `status=${clash.status}`);
+  check('el 409 incluye conflictos y next_free_slot sugerido', Array.isArray(clash.json?.conflicts) && clash.json.conflicts.length > 0 && !!clash.json.next_free_slot, `sugerido=${clash.json?.next_free_slot}`);
+  const unchanged = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(firstId);
+  check('tras el rechazo la tarea conserva su horario', unchanged.scheduled_for === freeTarget);
+
+  // No se puede mover una tarea en ejecución.
+  db.prepare("UPDATE task_runs SET status = 'running', started_at = ?, lease_expires_at = ? WHERE id = ?")
+    .run(new Date().toISOString(), new Date(Date.now() + 3600e3).toISOString(), Number(nowTask.json.task_run.id));
+  const moveRunning = await api('PATCH', `/api/tasks/runs/${nowTask.json.task_run.id}/schedule`, { scheduled_for: freeTarget }, token);
+  check('mover una tarea running devuelve 409', moveRunning.status === 409, `status=${moveRunning.status}`);
+  db.prepare("UPDATE task_runs SET status = 'pending', started_at = NULL, lease_expires_at = NULL WHERE id = ?")
+    .run(Number(nowTask.json.task_run.id));
+
   // ── 6. Auditoría de solapes sobre la DB del test ──
   const { spawnSync } = await import('node:child_process');
   const audit = spawnSync(process.execPath, [path.join(BACKEND_ROOT, 'scripts', 'audit-slot-overlaps.mjs'), DB_PATH], { encoding: 'utf8' });
