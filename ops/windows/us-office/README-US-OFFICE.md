@@ -86,11 +86,11 @@ curl.exe "https://screen-us.southfarm.tech/api/health?token=<EL_TOKEN>"
    ```json
    { "863d...": "US01", "863d...": "CLIENTE01" }
    ```
-5. Instalar la app:
+5. Instalar la app (el APK viene en el kit, junto al instalador):
    ```powershell
-   Invoke-WebRequest "https://southfarm-webapp.vercel.app/southfarm.apk" -OutFile southfarm.apk
-   adb install -r southfarm.apk
+   adb install -r .\southfarm.apk
    ```
+   (Alternativa: descargarlo autenticado desde la web, Fleet → "Instalar SouthFarm".)
 6. Abrir la app → escanear el QR del workspace EEUU correspondiente (generado
    en la web: Fleet → Vincular celular) → habilitar el **servicio de
    accesibilidad** de SouthFarm → desactivar optimización de batería →

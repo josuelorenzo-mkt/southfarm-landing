@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import https from 'https';
 import path from 'path';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { existsSync, statSync } from 'fs';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
@@ -15,7 +16,7 @@ import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup, type PlannerDeps } from './activity-planner.js';
-import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
+import { signSouthFarmJwt, verifySouthFarmJwt, JWT_SECRET } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
   DAILY_MAX_WARMUP_SECONDS,
@@ -39,6 +40,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
+const APP_APK_PATH = path.resolve(String(process.env.SOUTHFARM_APP_APK_PATH || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'app', 'southfarm.apk')));
+const APP_LINK_TTL_SECONDS = Math.min(3600, Math.max(60, Number(process.env.SOUTHFARM_APP_LINK_TTL_SECONDS || 900)));
 const PUBLISHER_WORKER_TOKEN = String(process.env.SOUTHFARM_PUBLISHER_WORKER_TOKEN || '').trim();
 const PUBLISHER_WORKER_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.SOUTHFARM_PUBLISHER_WORKER_ENABLED || 'false'));
 if (PUBLISHER_WORKER_ENABLED && !PUBLISHER_WORKER_TOKEN) {
@@ -2486,6 +2489,36 @@ app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req: any,
 
   const updated = db.prepare('SELECT bridge_url FROM workspaces WHERE id = ?').get(membership.workspace_id) as any;
   res.json({ workspace: { id: membership.workspace_id, name: membership.workspace_name, bridge_url: updated?.bridge_url || null } });
+});
+
+// ─── App móvil: descarga autenticada (el APK NO es público) ───
+function signAppDownloadLink(expiresAtEpoch: number): string {
+  const payload = String(expiresAtEpoch);
+  const sig = createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32);
+  return `${payload}.${sig}`;
+}
+
+app.post('/api/devices/app/install-link', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  const expiresAt = Math.floor(Date.now() / 1000) + APP_LINK_TTL_SECONDS;
+  res.json({
+    path: `/api/devices/app/download/${signAppDownloadLink(expiresAt)}`,
+    expires_at: new Date(expiresAt * 1000).toISOString(),
+    size_bytes: statSync(APP_APK_PATH).size,
+  });
+});
+
+app.get('/api/devices/app/download/:token', (req, res) => {
+  const [payload, sig] = String(req.params.token || '').split('.');
+  const expected = payload ? createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32) : '';
+  const sigBuf = Buffer.from(String(sig || ''), 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  if (!payload || !sig || sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+    return res.status(403).json({ error: 'Invalid download link' });
+  }
+  if (Number(payload) * 1000 < Date.now()) return res.status(410).json({ error: 'Download link expired' });
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  res.download(APP_APK_PATH, 'southfarm.apk');
 });
 
 app.get('/api/team/invites', auth, requireRole('owner', 'admin'), (req: any, res) => {
