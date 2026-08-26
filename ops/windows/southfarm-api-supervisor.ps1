@@ -76,7 +76,14 @@ try {
     Add-Content -LiteralPath $OutputLog -Value ("{0:o} Starting SouthFarm API from {1}" -f (Get-Date), $BackendPath)
     Set-Location -LiteralPath $BackendPath
 
+    # Con EAP=Stop, PowerShell 5.1 convierte la PRIMERA línea que el backend
+    # escriba a stderr (redirigida con *>>) en NativeCommandError terminal,
+    # matando al supervisor y al árbol del proceso node. Bajamos EAP solo para
+    # la invocación: stderr sigue cayendo al log pero nunca termina el script.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     & $NodePath (Join-Path $BackendPath "dist\index.js") *>> $OutputLog
+    $ErrorActionPreference = $previousEap
     $exitCode = $LASTEXITCODE
     Add-Content -LiteralPath $ErrorLog -Value ("{0:o} SouthFarm API exited with code {1}; restarting in {2}s." -f (Get-Date), $exitCode, $restartDelay)
     Start-Sleep -Seconds $restartDelay
