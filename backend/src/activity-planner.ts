@@ -24,6 +24,7 @@ import {
   overdueAtIso,
   expiresAtIso,
 } from './scheduler.js';
+import { msUntilEndOfLocalDay, reserveSlot } from './slot-reservation.js';
 
 // Uploads live under backend/data/uploads (git-ignored via backend/data/).
 // The module compiles to backend/dist, so the data dir is one level up.
@@ -316,6 +317,9 @@ function insertRoutineTask(
     routineId: number | null;
     clusterName: string;
     priority: number;
+    // Si la reserva tuvo que correr la tarea al próximo hueco, el horario
+    // original pedido (para auditoría en task_events).
+    shiftedFrom?: string | null;
   },
 ): any {
   const createdAt = deps.nowIso();
@@ -374,6 +378,7 @@ function insertRoutineTask(
     routine_id: opts.routineId,
     scheduled_for: opts.scheduledFor,
     planned_duration_sec: opts.plannedDurationSec,
+    ...(opts.shiftedFrom ? { shifted_from: opts.shiftedFrom } : {}),
   });
   return task;
 }
@@ -641,22 +646,41 @@ function generateWarmupDay(
     if (!accountHasActiveDevice(account)) continue;
     for (const slot of slots) {
       const scheduledFor = localDateTimeToIso(dateKey, slot.time, BUENOS_AIRES_TIMEZONE);
+      // Backstop: coincidencia exacta (device+tipo+instante) sigue salteándose.
       if (hasActiveTaskForSlot(deps, account.device_id, taskTypeForPlatform(account.platform), scheduledFor)) continue;
-      insertRoutineTask(deps, {
-        workspaceId,
-        userId: ownerId,
+      // Reserva de ventana: si el slot pedido solapa con otra tarea viva del
+      // teléfono, la tarea se corre al próximo hueco libre del mismo día local.
+      const reservation = reserveSlot({
+        db: deps.db,
         deviceId: account.device_id,
-        taskType: taskTypeForPlatform(account.platform),
-        platform: account.platform,
-        account,
-        params: { duration_minutes: Math.max(1, Math.round(slot.durationSec / 60)) },
-        scheduledFor,
-        plannedDurationSec: slot.durationSec,
-        clusterId: cluster.id,
-        routineId: routine.id,
-        clusterName: cluster.name,
-        priority: 0,
+        desiredStart: scheduledFor,
+        durationSec: slot.durationSec,
+        policy: 'shift',
+        shiftLimitMs: msUntilEndOfLocalDay(scheduledFor),
+        insert: (effectiveStart, shiftedFrom) => insertRoutineTask(deps, {
+          workspaceId,
+          userId: ownerId,
+          deviceId: account.device_id,
+          taskType: taskTypeForPlatform(account.platform),
+          platform: account.platform,
+          account,
+          params: { duration_minutes: Math.max(1, Math.round(slot.durationSec / 60)) },
+          scheduledFor: effectiveStart,
+          plannedDurationSec: slot.durationSec,
+          clusterId: cluster.id,
+          routineId: routine.id,
+          clusterName: cluster.name,
+          priority: 0,
+          shiftedFrom,
+        }),
       });
+      if (!reservation.ok) {
+        console.warn(
+          `[ActivityPlanner] Slot sin hueco ese día: cluster ${cluster.id}, `
+          + `device ${account.device_id}, ${scheduledFor} (${reservation.reason}).`,
+        );
+        continue;
+      }
       created += 1;
     }
   }
@@ -683,22 +707,40 @@ function generateScanDay(
     if (!accountHasActiveDevice(account)) continue;
     for (const time of hours) {
       const scheduledFor = localDateTimeToIso(dateKey, time, BUENOS_AIRES_TIMEZONE);
+      // Backstop de coincidencia exacta + reserva con corrimiento (misma
+      // mecánica que los warmups; scans duran 10 min planeados).
       if (hasActiveTaskForSlot(deps, account.device_id, 'scan_' + account.platform, scheduledFor)) continue;
-      insertRoutineTask(deps, {
-        workspaceId,
-        userId: ownerId,
+      const reservation = reserveSlot({
+        db: deps.db,
         deviceId: account.device_id,
-        taskType: 'scan_' + account.platform,
-        platform: account.platform,
-        account,
-        params: { duration_minutes: 10, times_per_day: config.timesPerDay },
-        scheduledFor,
-        plannedDurationSec: 600,
-        clusterId: cluster.id,
-        routineId: routine.id,
-        clusterName: cluster.name,
-        priority: 100,
+        desiredStart: scheduledFor,
+        durationSec: 600,
+        policy: 'shift',
+        shiftLimitMs: msUntilEndOfLocalDay(scheduledFor),
+        insert: (effectiveStart, shiftedFrom) => insertRoutineTask(deps, {
+          workspaceId,
+          userId: ownerId,
+          deviceId: account.device_id,
+          taskType: 'scan_' + account.platform,
+          platform: account.platform,
+          account,
+          params: { duration_minutes: 10, times_per_day: config.timesPerDay },
+          scheduledFor: effectiveStart,
+          plannedDurationSec: 600,
+          clusterId: cluster.id,
+          routineId: routine.id,
+          clusterName: cluster.name,
+          priority: 100,
+          shiftedFrom,
+        }),
       });
+      if (!reservation.ok) {
+        console.warn(
+          `[ActivityPlanner] Scan sin hueco ese día: cluster ${cluster.id}, `
+          + `device ${account.device_id}, ${scheduledFor} (${reservation.reason}).`,
+        );
+        continue;
+      }
       created += 1;
     }
   }

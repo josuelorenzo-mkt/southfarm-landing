@@ -15,6 +15,7 @@ import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup } from './activity-planner.js';
+import { busyUntilForDevice, reserveSlot } from './slot-reservation.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import { BUENOS_AIRES_TIMEZONE, DAILY_MAX_WARMUP_SECONDS, DAILY_MIN_WARMUP_SECONDS, DEFAULT_FIXED_WARMUP_SECONDS, chooseDailyTargetSeconds, chooseSessionCount, expiresAtIso, isTaskExpired, isTaskOverdue, localDateTimeToIso, overdueAtIso, splitWarmupDurationSeconds, } from './scheduler.js';
 const __filename = fileURLToPath(import.meta.url);
@@ -424,6 +425,11 @@ function deviceView(device) {
         online,
         device_status: device.lifecycle_status || 'active',
         connection_status: online ? 'online' : device.last_seen_at ? 'offline' : 'never_seen',
+        // Fin de la ventana que ocupa el teléfono AHORA (tarea running con lease
+        // vivo, o pendiente cuya ventana cubre el presente); null si está libre.
+        busy_until: Number.isInteger(Number(device.id))
+            ? busyUntilForDevice(db, Number(device.id))
+            : null,
         current_task: currentTask ? {
             id: currentTask.id,
             task_type: currentTask.task_type,
@@ -2519,8 +2525,6 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
         }
         scheduledFor = new Date(scheduledTimestamp).toISOString();
     }
-    const overdueAt = overdueAtIso(scheduledFor);
-    const expiresAt = expiresAtIso(scheduledFor);
     const workspaceId = Number(device.workspace_id || req.user.workspaceId);
     const control = ensureWorkspaceControl(workspaceId);
     if (normalizeSchedulerControlMode(control.scheduler_mode) === 'paused') {
@@ -2551,30 +2555,57 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
     const serializedParams = typeof normalizedParams === 'string'
         ? normalizedParams
         : (normalizedParams ? JSON.stringify(normalizedParams) : null);
-    const r = db.prepare(`
-    INSERT INTO task_runs
-      (user_id, device_id, workspace_id, task_type, platform, source, params,
-       status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
-       actual_duration_sec, social_account_id, account_key, plan_item_id,
-       manual_override, priority, attempt_count, account_snapshot,
-       created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-  `).run(device.user_id, device.id, workspaceId, task_type, platform, source, serializedParams, scheduledFor, overdueAt, expiresAt, plannedDurationSeconds, socialAccount?.id || socialAccountId, accountKey, planItemId, manualOverride, priority, jsonValue({
-        account: account || null,
-        platform,
-        device_id: device.device_id,
-        social_account_id: socialAccount?.id || socialAccountId,
-    }), createdAt, createdAt);
-    const task = db.prepare('SELECT * FROM task_runs WHERE id = ?').get(r.lastInsertRowid);
-    recordTaskEvent(task, 'created', {
-        source,
-        scheduled_for: scheduledFor,
-        device_online: deviceIsOnline(device.last_seen_at),
+    // Reserva de ventana sobre el teléfono: si el horario pedido solapa con
+    // una tarea viva, la tarea se corre al próximo hueco libre (hasta 24 h para
+    // manuales). overdue_at/expires_at se derivan del horario EFECTIVO.
+    const reservation = reserveSlot({
+        db,
+        deviceId: Number(device.id),
+        desiredStart: scheduledFor,
+        durationSec: plannedDurationSeconds,
+        policy: 'shift',
+        shiftLimitMs: 24 * 60 * 60 * 1000,
+        insert: (effectiveStart, shiftedFrom) => {
+            const r = db.prepare(`
+        INSERT INTO task_runs
+          (user_id, device_id, workspace_id, task_type, platform, source, params,
+           status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
+           actual_duration_sec, social_account_id, account_key, plan_item_id,
+           manual_override, priority, attempt_count, account_snapshot,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      `).run(device.user_id, device.id, workspaceId, task_type, platform, source, serializedParams, effectiveStart, overdueAtIso(effectiveStart), expiresAtIso(effectiveStart), plannedDurationSeconds, socialAccount?.id || socialAccountId, accountKey, planItemId, manualOverride, priority, jsonValue({
+                account: account || null,
+                platform,
+                device_id: device.device_id,
+                social_account_id: socialAccount?.id || socialAccountId,
+            }), createdAt, createdAt);
+            const task = db.prepare('SELECT * FROM task_runs WHERE id = ?').get(r.lastInsertRowid);
+            recordTaskEvent(task, 'created', {
+                source,
+                scheduled_for: effectiveStart,
+                ...(shiftedFrom ? { shifted_from: shiftedFrom } : {}),
+                device_online: deviceIsOnline(device.last_seen_at),
+            });
+            return task;
+        },
     });
+    if (!reservation.ok) {
+        return res.status(409).json({
+            error: 'No hay hueco libre en el teléfono dentro de las próximas 24 horas',
+            reason: reservation.reason,
+            requested_scheduled_for: scheduledFor,
+            conflicts: reservation.conflicts,
+        });
+    }
+    const task = reservation.result;
     res.status(201).json({
         task_run: taskView(task),
         device_online: deviceIsOnline(device.last_seen_at),
         queued: true,
+        scheduled_for_effective: reservation.scheduledFor,
+        shifted: !!reservation.shiftedFrom,
+        ...(reservation.shiftedFrom ? { shifted_from: reservation.shiftedFrom } : {}),
     });
 });
 app.get('/api/planner/accounts', auth, (req, res) => {
