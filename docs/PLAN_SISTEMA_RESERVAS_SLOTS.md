@@ -5,10 +5,14 @@
 > desarrollador pueda comenzar desde cero: contexto completo, qué existe, qué cambiar,
 > decisiones de diseño ya tomadas, fases con criterios de aceptación y procedimiento de deploy.
 >
-> Última actualización: 2026-08-26. Estado: **Fase 1 implementada en la branch
-> `feature/slot-reservations`** (21/21 checks de integración pasando, incluido el caso
-> multi-clúster: 96 tareas automáticas con cero solapes). Pendiente: deploy al runtime y
-> Fases 2-4. Herramientas nuevas: `backend/scripts/test-slot-reservation.mjs` (suite) y
+> Última actualización: 2026-08-26. Estado: **Fases 1 y 2 implementadas** (backend en
+> `feature/slot-reservations` de southfarm-landing, 29/29 checks; webapp en
+> `feature/slot-reservations` de southfarm-webapp, lint + build + 38/38 tests). Nota: el
+> endpoint de movimiento individual es el ya existente `PATCH /api/tasks/runs/:id/schedule`
+> (no se creó `/reschedule`): ahora valida con `reserveSlot('reject')`, responde 409 con
+> `conflicts` + `next_free_slot` y audita `rescheduled_manual {from, to, by_user_id}`.
+> Pendiente: deploy al runtime + merge webapp → main, y Fases 3-4. Herramientas:
+> `backend/scripts/test-slot-reservation.mjs` (suite) y
 > `backend/scripts/audit-slot-overlaps.mjs` (auditoría post-deploy; correr con el node 22
 > del runtime por el ABI del binario better-sqlite3).
 
