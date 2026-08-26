@@ -5,7 +5,12 @@
 > desarrollador pueda comenzar desde cero: contexto completo, qué existe, qué cambiar,
 > decisiones de diseño ya tomadas, fases con criterios de aceptación y procedimiento de deploy.
 >
-> Última actualización: 2026-08-26. Estado: **aprobado, sin comenzar**.
+> Última actualización: 2026-08-26. Estado: **Fase 1 implementada en la branch
+> `feature/slot-reservations`** (21/21 checks de integración pasando, incluido el caso
+> multi-clúster: 96 tareas automáticas con cero solapes). Pendiente: deploy al runtime y
+> Fases 2-4. Herramientas nuevas: `backend/scripts/test-slot-reservation.mjs` (suite) y
+> `backend/scripts/audit-slot-overlaps.mjs` (auditoría post-deploy; correr con el node 22
+> del runtime por el ABI del binario better-sqlite3).
 
 ---
 
