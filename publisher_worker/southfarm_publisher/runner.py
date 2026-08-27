@@ -125,6 +125,10 @@ class PublicationRunner:
                 if remote_path:
                     try: device.remove(remote_path)
                     except Exception: pass
+                # Close the social app so the next job starts from its home screen
+                if getattr(adapter, "package", None):
+                    try: device.force_stop(adapter.package)
+                    except Exception: pass
         return True
     def run_forever(self, device_id: int, *, stop: threading.Event, sleep: Callable[[float], None] = time.sleep, random_value: Callable[[], float] = random.random) -> None:
         while not stop.is_set():

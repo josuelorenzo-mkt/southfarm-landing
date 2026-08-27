@@ -366,6 +366,7 @@ class SafeAdb:
     def tap_bounds(self, bounds: tuple[int, int, int, int], delay_seconds: float = 0.2) -> None:
         x1,y1,x2,y2 = bounds; self.command("shell", "input", "tap", str((x1+x2)//2), str((y1+y2)//2)); time.sleep(max(0.0, min(delay_seconds, 2.0)))
     def back(self) -> None: self.command("shell", "input", "keyevent", "4")
+    def force_stop(self, package: str) -> None: self.command("shell", "am", "force-stop", package)
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> None:
         if not all(isinstance(value, int) and 0 <= value <= 10000 for value in (x1, y1, x2, y2)) or not 50 <= duration_ms <= 2000:
             raise ValueError("swipe coordinates are invalid")
