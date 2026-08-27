@@ -289,6 +289,24 @@ try {
   const diaInvalido = await api('GET', '/api/planner/day?cluster_id=999999', undefined, token);
   check('cluster_id inexistente devuelve 404', diaInvalido.status === 404);
 
+  // Creación con cluster_id (acciones rápidas): la tarea queda asociada y
+  // la vista día de ESE clúster la muestra.
+  const conCluster = await api('POST', '/api/tasks/run', {
+    task_type: 'warmup_ig', device_id: 'test-dev-01', cluster_id: aId,
+    params: { duration_minutes: 30 }, scheduled_for: '2026-08-28T18:00:00Z',
+  }, token);
+  check('creación con cluster_id devuelve 201', conCluster.status === 201, `status=${conCluster.status} ${JSON.stringify(conCluster.json?.error)}`);
+  const fila = conCluster.json?.task_run ? db.prepare('SELECT cluster_id, scheduled_for FROM task_runs WHERE id = ?').get(Number(conCluster.json.task_run.id)) : null;
+  check('la fila guarda el cluster_id', !!fila && Number(fila.cluster_id) === aId, JSON.stringify(fila));
+  const diaTrasCreacion = await api('GET', `/api/planner/day?date=2026-08-28&cluster_id=${aId}`, undefined, token);
+  check('la nueva tarea aparece en el día de ese clúster', diaTrasCreacion.status === 200
+    && (diaTrasCreacion.json.tasks || []).some((t) => Number(t.id) === Number(conCluster.json.task_run.id)));
+  const conClusterMalo = await api('POST', '/api/tasks/run', {
+    task_type: 'warmup_ig', device_id: 'test-dev-01', cluster_id: 999999,
+    scheduled_for: '2026-08-28T18:00:00Z',
+  }, token);
+  check('cluster_id de otro workspace rechazado (404)', conClusterMalo.status === 404);
+
   // ── 5c. Movimiento individual (Fase 2): PATCH /api/tasks/runs/:id/schedule ──
   // Mover una tarea a un hueco libre (el sugerido por nextFreeSlot).
   const moveBase = new Date(Date.now() + 26 * 3600e3);

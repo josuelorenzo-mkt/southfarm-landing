@@ -2536,6 +2536,23 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
     const priority = source === 'manual'
         ? 1000
         : Math.max(0, Math.min(500, numberValue(req.body.priority)));
+    // Clúster opcional (acciones rápidas del planner): se valida pertenencia al
+    // workspace para que la vista día de ESE clúster lo muestre.
+    const rawClusterId = req.body.cluster_id;
+    const requestedClusterId = rawClusterId === undefined || rawClusterId === null || rawClusterId === ''
+        ? null
+        : Number(rawClusterId);
+    let clusterIdValue = null;
+    if (requestedClusterId !== null) {
+        if (!Number.isInteger(requestedClusterId) || requestedClusterId <= 0) {
+            return res.status(400).json({ error: 'Invalid cluster_id' });
+        }
+        const clusterExists = db.prepare('SELECT id FROM account_clusters WHERE id = ? AND workspace_id = ?').get(requestedClusterId, workspaceId);
+        if (!clusterExists) {
+            return res.status(404).json({ error: 'Cluster not found in this workspace' });
+        }
+        clusterIdValue = requestedClusterId;
+    }
     const planItemId = req.body.plan_item_id === undefined || req.body.plan_item_id === null
         ? null
         : numberValue(req.body.plan_item_id);
@@ -2572,17 +2589,18 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
            status, scheduled_for, overdue_at, expires_at, planned_duration_sec,
            actual_duration_sec, social_account_id, account_key, plan_item_id,
            manual_override, priority, attempt_count, account_snapshot,
-           created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+           cluster_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
       `).run(device.user_id, device.id, workspaceId, task_type, platform, source, serializedParams, effectiveStart, overdueAtIso(effectiveStart), expiresAtIso(effectiveStart), plannedDurationSeconds, socialAccount?.id || socialAccountId, accountKey, planItemId, manualOverride, priority, jsonValue({
                 account: account || null,
                 platform,
                 device_id: device.device_id,
                 social_account_id: socialAccount?.id || socialAccountId,
-            }), createdAt, createdAt);
+            }), clusterIdValue, createdAt, createdAt);
             const task = db.prepare('SELECT * FROM task_runs WHERE id = ?').get(r.lastInsertRowid);
             recordTaskEvent(task, 'created', {
                 source,
+                cluster_id: clusterIdValue,
                 scheduled_for: effectiveStart,
                 ...(shiftedFrom ? { shifted_from: shiftedFrom } : {}),
                 device_online: deviceIsOnline(device.last_seen_at),
