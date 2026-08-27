@@ -1286,22 +1286,27 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         }
         xml.append("</hierarchy>\n")
 
-        val dir = getExternalFilesDir(null)
-        if (dir == null) {
-            Log.e(TAG, "dumpActiveWindowXml: getExternalFilesDir(null) is NULL")
-            return
-        }
+        // The dump goes to both the external files dir (legacy PC worker path)
+        // and the internal filesDir: on Android 11+ adb/run-as cannot traverse
+        // /sdcard/Android/data of another app, so the internal copy is the one
+        // `adb shell run-as ... cat files/southfarm_ui.xml` can retrieve.
+        val dirs = mutableListOf(filesDir)
+        getExternalFilesDir(null)?.let { dirs.add(it) }
         try {
-            val tmpFile = java.io.File(dir, "southfarm_ui.xml.tmp")
-            val finalFile = java.io.File(dir, "southfarm_ui.xml")
-            tmpFile.writeText(xml.toString(), Charsets.UTF_8)
-            if (finalFile.exists()) finalFile.delete()
-            if (!tmpFile.renameTo(finalFile)) {
-                Log.e(TAG, "dumpActiveWindowXml: renameTo failed")
-                return
+            var written = 0L
+            for (dir in dirs) {
+                val tmpFile = java.io.File(dir, "southfarm_ui.xml.tmp")
+                val finalFile = java.io.File(dir, "southfarm_ui.xml")
+                tmpFile.writeText(xml.toString(), Charsets.UTF_8)
+                if (finalFile.exists()) finalFile.delete()
+                if (!tmpFile.renameTo(finalFile)) {
+                    Log.e(TAG, "dumpActiveWindowXml: renameTo failed in $dir")
+                    continue
+                }
+                written = finalFile.length()
             }
             val elapsedMs = System.currentTimeMillis() - startedAt
-            Log.i(TAG, "dumpActiveWindowXml: wrote ${finalFile.length()} bytes in ${elapsedMs}ms (${roots.size} window root(s))")
+            Log.i(TAG, "dumpActiveWindowXml: wrote $written bytes in ${elapsedMs}ms (${roots.size} window root(s))")
         } catch (e: Exception) {
             Log.e(TAG, "dumpActiveWindowXml: write error: ${e.message}")
         }
