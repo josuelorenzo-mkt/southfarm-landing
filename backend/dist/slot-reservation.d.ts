@@ -46,6 +46,27 @@ export declare function nextFreeSlot(opts: {
     durationSec: number | null;
     shiftLimitMs?: number | null;
 }): string | null;
+export type CascadeMove = {
+    task_id: number;
+    task_type?: string;
+    from: string | null;
+    to: string;
+};
+export type CascadePlan = {
+    ok: true;
+    moves: CascadeMove[];
+} | {
+    ok: false;
+    reason: 'primary_not_movable' | 'chain_overflow';
+    detail: string;
+};
+export declare function planCascadeMove(db: any, opts: {
+    deviceId: number;
+    primaryTaskId: number;
+    targetStart: string;
+    now?: Date;
+    bufferSec?: number;
+}): CascadePlan;
 export declare function busyUntilForDevice(db: any, deviceId: number, opts?: {
     now?: Date;
     bufferSec?: number;

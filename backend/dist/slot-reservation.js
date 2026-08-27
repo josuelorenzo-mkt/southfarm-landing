@@ -76,7 +76,9 @@ export function findOverlappingTasks(db, opts) {
     // Upper bound: ninguna tarea que arranque después de nuestro fin puede
     // solaparnos (solape requiere su inicio < nuestro fin). Lower bound: una
     // running puede extenderse más allá de su ventana planeada, así que no
-    // descartamos por fin estimado en SQL cuando está en ejecución.
+    // descartamos por fin estimado en SQL cuando está en ejecución. El fin de
+    // ventana acá incluye el margen, igual que windowFor(): dos tareas pegadas
+    // sin los minutos de aire NO son válidas.
     const rows = db.prepare(`
     SELECT id, task_type, status, scheduled_for, planned_duration_sec, started_at, lease_expires_at
     FROM task_runs
@@ -85,7 +87,7 @@ export function findOverlappingTasks(db, opts) {
       AND scheduled_for IS NOT NULL
       AND datetime(scheduled_for) < datetime(?)
       AND (
-        datetime(scheduled_for, '+' || CAST(COALESCE(planned_duration_sec, ${DEFAULT_PLANNED_DURATION_SEC}) AS TEXT) || ' seconds') > datetime(?)
+        datetime(scheduled_for, '+' || CAST(COALESCE(planned_duration_sec, ${DEFAULT_PLANNED_DURATION_SEC}) + ${bufferSec} AS TEXT) || ' seconds') > datetime(?)
         OR ((status IN ('running', 'paused')) AND started_at IS NOT NULL)
       )
       ${opts.excludeTaskId != null ? 'AND id != ?' : ''}
@@ -174,6 +176,150 @@ export function nextFreeSlot(opts) {
     });
     return result.ok ? result.scheduledFor : null;
 }
+const CASCADE_MANUAL_LIMIT_MS = 24 * 60 * 60 * 1000;
+function esMovableParaCascade(row) {
+    return (String(row.status) === 'pending' || String(row.status) === 'overdue') && !row.started_at;
+}
+// Límite de la cascada para una tarea recorrida: manuales hasta 24 h,
+// automáticas solo dentro de su día local original (decisión del dueño §8).
+function cascadeLimitMs(row) {
+    if (String(row.source) === 'manual' || Number(row.manual_override) === 1) {
+        return CASCADE_MANUAL_LIMIT_MS;
+    }
+    if (!row.scheduled_for)
+        return null;
+    return msUntilEndOfLocalDay(String(row.scheduled_for));
+}
+function simulWindow(startMs, plannedDurationSec, bufferSec) {
+    let durationSec = Number(plannedDurationSec);
+    if (!Number.isFinite(durationSec) || durationSec <= 0)
+        durationSec = DEFAULT_PLANNED_DURATION_SEC;
+    return { startMs, endMs: startMs + (durationSec + bufferSec) * 1000 };
+}
+// Calcula (SIN aplicar) qué tareas habría que recorrer si `primaryTaskId`
+// pasara a ocupar `targetStart`: se ubica la primaria y cada tarea pendiente
+// posterior que quede pisada avanza al próximo hueco continuo libre. Solo
+// intervienen tareas pendientes/overdue no iniciadas del MISMO teléfono;
+// running/completadas son bloqueos inmóviles. Devuelve el plan o el motivo
+// por el que no hay arreglo posible dentro de los límites de corrimiento.
+export function planCascadeMove(db, opts) {
+    const bufferSec = opts.bufferSec ?? slotBufferSec();
+    const nowMs = opts.now?.getTime() ?? Date.now();
+    const targetMs = Date.parse(opts.targetStart);
+    if (!Number.isFinite(targetMs)) {
+        return { ok: false, reason: 'primary_not_movable', detail: 'targetStart inválido' };
+    }
+    const rows = db.prepare(`
+    SELECT id, task_type, status, source, priority, manual_override,
+           scheduled_for, planned_duration_sec, started_at, lease_expires_at
+    FROM task_runs
+    WHERE device_id = ? AND device_id IS NOT NULL
+      AND status NOT IN ('cancelled', 'expired', 'error')
+      AND scheduled_for IS NOT NULL
+  `).all(opts.deviceId);
+    const vivas = rows.filter((row) => isLeaseAlive(row, nowMs));
+    const primary = vivas.find((row) => Number(row.id) === Number(opts.primaryTaskId));
+    if (!primary || !esMovableParaCascade(primary)) {
+        return {
+            ok: false,
+            reason: 'primary_not_movable',
+            detail: 'La tarea debe existir y estar pendiente (no iniciada) para moverse en cascada',
+        };
+    }
+    // Posiciones simuladas: todas las vivas con su horario actual, la primaria
+    // ya colocada en el destino pedido.
+    const positions = new Map();
+    for (const row of vivas)
+        positions.set(Number(row.id), Date.parse(String(row.scheduled_for)));
+    positions.set(Number(primary.id), targetMs);
+    const movables = vivas
+        .filter((row) => Number(row.id) !== Number(primary.id) && esMovableParaCascade(row))
+        .sort((a, b) => Date.parse(String(a.scheduled_for)) - Date.parse(String(b.scheduled_for)));
+    const durationOf = (row) => Number(row.planned_duration_sec) > 0
+        ? Math.round(Number(row.planned_duration_sec))
+        : DEFAULT_PLANNED_DURATION_SEC;
+    for (const task of movables) {
+        let candidate = positions.get(Number(task.id));
+        const originMs = Date.parse(String(task.scheduled_for));
+        const limitMs = cascadeLimitMs(task);
+        for (let iteration = 0; iteration < MAX_SHIFT_ITERATIONS; iteration += 1) {
+            const win = simulWindow(candidate, durationOf(task), bufferSec);
+            let blockedBy = null;
+            for (const other of vivas) {
+                if (Number(other.id) === Number(task.id))
+                    continue;
+                const otherStart = positions.get(Number(other.id));
+                if (otherStart === undefined)
+                    continue;
+                let otherWin;
+                if (esMovableParaCascade(other)) {
+                    otherWin = simulWindow(otherStart, durationOf(other), bufferSec);
+                }
+                else {
+                    // Inmóvil (running/completed/paused): su ventana real incluye lo ya corrido.
+                    const real = windowFor(other, nowMs, bufferSec);
+                    if (!real)
+                        continue;
+                    otherWin = real;
+                }
+                if (win.startMs < otherWin.endMs && otherWin.startMs < win.endMs) {
+                    blockedBy = blockedBy === null ? otherWin.endMs : Math.max(blockedBy, otherWin.endMs);
+                }
+            }
+            if (blockedBy === null)
+                break;
+            candidate = blockedBy;
+            if (limitMs !== null && candidate - originMs > limitMs) {
+                return {
+                    ok: false,
+                    reason: 'chain_overflow',
+                    detail: `La tarea #${task.id} (${String(task.task_type)}) no entra dentro de su `
+                        + `límite de corrimiento${String(task.source) === 'manual' ? '' : ' (mismo día local)'}`,
+                };
+            }
+        }
+        positions.set(Number(task.id), candidate);
+    }
+    // Validación final: las tareas recorridas ya garantizan no pisar a nadie,
+    // pero el DESTINO de la primaria nunca fue verificado contra bloqueos
+    // inmóviles (running/completed/paused). Si el hueco pedido arranca encima de
+    // una tarea congelada, no hay arreglo posible: se rechaza todo el plan.
+    const primaryDur = durationOf(primary);
+    for (const other of vivas) {
+        if (Number(other.id) === Number(primary.id))
+            continue;
+        if (esMovableParaCascade(other))
+            continue; // estos ya resolvieron su posición
+        const real = windowFor(other, nowMs, bufferSec);
+        if (!real)
+            continue;
+        if (targetMs < real.endMs && real.startMs < targetMs + (primaryDur + bufferSec) * 1000) {
+            return {
+                ok: false,
+                reason: 'chain_overflow',
+                detail: `El horario pedido se superpone con ${String(other.task_type)} #${other.id}, `
+                    + `que está ${String(other.status)} y no puede moverse`,
+            };
+        }
+    }
+    const moves = [];
+    for (const row of vivas) {
+        const finalMs = positions.get(Number(row.id));
+        if (finalMs === undefined)
+            continue;
+        const origIso = String(row.scheduled_for);
+        const finalIso = new Date(finalMs).toISOString();
+        if (Date.parse(finalIso) !== Date.parse(origIso)) {
+            moves.push({
+                task_id: Number(row.id),
+                ...(Number(row.id) !== Number(primary.id) ? { task_type: String(row.task_type) } : {}),
+                from: origIso,
+                to: finalIso,
+            });
+        }
+    }
+    return { ok: true, moves };
+}
 // "¿Está ocupado este teléfono ahora?" — fin de la ventana que cubre `now`
 // (la de mayor fin si varias se enciman), o null si está libre. Es el dato que
 // consume el cartel de conflicto de la web y el campo busy_until de deviceView.
@@ -188,7 +334,7 @@ export function busyUntilForDevice(db, deviceId, opts = {}) {
       AND scheduled_for IS NOT NULL
       AND datetime(scheduled_for) < datetime(?, '+2 hours')
       AND (
-        datetime(scheduled_for, '+' || CAST(COALESCE(planned_duration_sec, ${DEFAULT_PLANNED_DURATION_SEC}) AS TEXT) || ' seconds') > datetime(?)
+        datetime(scheduled_for, '+' || CAST(COALESCE(planned_duration_sec, ${DEFAULT_PLANNED_DURATION_SEC}) + ${bufferSec} AS TEXT) || ' seconds') > datetime(?)
         OR ((status IN ('running', 'paused')) AND started_at IS NOT NULL)
       )
   `).all(deviceId, new Date(nowMs).toISOString(), new Date(nowMs - 48 * 3600 * 1000).toISOString());

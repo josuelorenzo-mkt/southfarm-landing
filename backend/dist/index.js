@@ -15,7 +15,7 @@ import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup } from './activity-planner.js';
-import { busyUntilForDevice, nextFreeSlot, reserveSlot } from './slot-reservation.js';
+import { busyUntilForDevice, nextFreeSlot, planCascadeMove, reserveSlot } from './slot-reservation.js';
 import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
 import { BUENOS_AIRES_TIMEZONE, DAILY_MAX_WARMUP_SECONDS, DAILY_MIN_WARMUP_SECONDS, DEFAULT_FIXED_WARMUP_SECONDS, chooseDailyTargetSeconds, chooseSessionCount, expiresAtIso, isTaskExpired, isTaskOverdue, localDateTimeToIso, overdueAtIso, splitWarmupDurationSeconds, } from './scheduler.js';
 const __filename = fileURLToPath(import.meta.url);
@@ -2835,6 +2835,137 @@ app.patch('/api/tasks/runs/:id/schedule', auth, requireRole('owner', 'admin', 'o
     catch (error) {
         res.status(400).json({ error: error.message || 'Unable to reschedule task' });
     }
+});
+// ── Fase 2.5: movimiento individual con corrimiento en cascada ──
+// Preview: calcula el plan sin tocar nada (para el cartel de confirmación).
+app.post('/api/tasks/runs/:id/move/preview', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    try {
+        const { ids, placeholders } = scopedUsers(req.user.userId);
+        const run = db.prepare(`
+      SELECT * FROM task_runs
+      WHERE id = ? AND user_id IN (${placeholders})
+      LIMIT 1
+    `).get(req.params.id, ...ids);
+        if (!run)
+            return res.status(404).json({ error: 'Run not found' });
+        if (!run.device_id)
+            return res.status(409).json({ error: 'La tarea no tiene teléfono asignado' });
+        const scheduledInput = req.body.scheduled_for ?? req.body.schedule_at;
+        const timestamp = Date.parse(String(scheduledInput || ''));
+        if (!Number.isFinite(timestamp)) {
+            return res.status(400).json({ error: 'scheduled_for must be a valid ISO date' });
+        }
+        const targetStart = new Date(timestamp).toISOString();
+        const plan = planCascadeMove(db, {
+            deviceId: Number(run.device_id),
+            primaryTaskId: Number(run.id),
+            targetStart,
+        });
+        const body = plan.ok
+            ? { ok: true, moves: plan.moves }
+            : { ok: false, reason: plan.reason, detail: plan.detail };
+        res.json({ ...body, requested_scheduled_for: targetStart });
+    }
+    catch (error) {
+        res.status(400).json({ error: error.message || 'Unable to plan cascade move' });
+    }
+});
+// Aplicación: recalcula el plan DENTRO de la transacción y mueve todo o nada.
+app.post('/api/tasks/runs/:id/move', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    // Objeto contenedor (no variable simple): el resultado se asigna dentro de un
+    // closure y TypeScript estrecha las variables simples a 'never' acá abajo.
+    const result = {};
+    try {
+        db.transaction(() => {
+            const { ids, placeholders } = scopedUsers(req.user.userId);
+            const run = db.prepare(`
+        SELECT * FROM task_runs
+        WHERE id = ? AND user_id IN (${placeholders})
+        LIMIT 1
+      `).get(req.params.id, ...ids);
+            if (!run) {
+                result.failure = { status: 404, payload: { error: 'Run not found' } };
+                return;
+            }
+            if (!run.device_id) {
+                result.failure = { status: 409, payload: { error: 'La tarea no tiene teléfono asignado' } };
+                return;
+            }
+            const scheduledInput = req.body.scheduled_for ?? req.body.schedule_at;
+            const timestamp = Date.parse(String(scheduledInput || ''));
+            if (!Number.isFinite(timestamp)) {
+                result.failure = { status: 400, payload: { error: 'scheduled_for must be a valid ISO date' } };
+                return;
+            }
+            const targetStart = new Date(timestamp).toISOString();
+            const tick = nowIso();
+            // Recálculo fresco dentro de la transacción: si algo cambió entre el
+            // preview y el confirm, acá se detecta (o ya no existe el conflicto).
+            const plan = planCascadeMove(db, {
+                deviceId: Number(run.device_id),
+                primaryTaskId: Number(run.id),
+                targetStart,
+            });
+            if (!plan.ok) {
+                result.failure = {
+                    status: 409,
+                    payload: {
+                        ok: false,
+                        error: 'El movimiento en cascada no es posible',
+                        reason: plan.reason,
+                        detail: plan.detail,
+                        requested_scheduled_for: targetStart,
+                    },
+                };
+                return;
+            }
+            const cascadeUpdate = db.prepare(`
+        UPDATE task_runs
+        SET status = 'pending', scheduled_for = ?, overdue_at = ?, expires_at = ?,
+            claim_token = NULL, claimed_at = NULL, lease_expires_at = NULL,
+            last_heartbeat_at = NULL, started_at = NULL, completed_at = NULL,
+            cancel_reason = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('pending', 'overdue') AND started_at IS NULL
+      `);
+            const promoteToManual = req.body.promote_primary_to_manual === false ? false : true;
+            const manualUpdate = db.prepare(`
+        UPDATE task_runs
+        SET source = 'manual', manual_override = 1, priority = 1000 WHERE id = ?
+      `);
+            for (const move of plan.moves) {
+                const moveResult = cascadeUpdate.run(move.to, overdueAtIso(move.to), expiresAtIso(move.to), tick, move.task_id);
+                if (moveResult.changes !== 1) {
+                    throw new Error(`La tarea #${move.task_id} cambió de estado durante la operación; operación revertida`);
+                }
+                if (Number(move.task_id) === Number(run.id) && promoteToManual) {
+                    manualUpdate.run(move.task_id);
+                }
+                const updated = db.prepare('SELECT * FROM task_runs WHERE id = ?').get(move.task_id);
+                recordTaskEvent(updated, 'rescheduled_manual', {
+                    previous_status: run.status,
+                    scheduled_for: move.to,
+                    from: move.from,
+                    to: move.to,
+                    by_user_id: req.user.userId,
+                    cascade_root_id: Number(run.id),
+                });
+                if (Number(move.task_id) === Number(run.id))
+                    result.primary = updated;
+            }
+            result.applied = plan.moves;
+        })();
+    }
+    catch (error) {
+        // La excepción hace rollback total de la transacción: o se aplica todo o nada.
+        return res.status(500).json({ error: error.message || 'Unable to apply cascade move' });
+    }
+    if (result.failure)
+        return res.status(result.failure.status).json(result.failure.payload);
+    const primaryFinal = result.primary?.scheduled_for || String(req.body.scheduled_for || '');
+    if (primaryFinal) {
+        recalculatePlannerDay(req.user.userId, plannerDateKey(req.body.date || dateKeyInTimezone(primaryFinal)));
+    }
+    res.json({ ok: true, applied: result.applied ?? [], ...(result.primary ? { task_run: taskView(result.primary) } : {}) });
 });
 app.get('/api/notifications', auth, (req, res) => {
     const limit = Math.min(200, Math.max(1, numberValue(req.query.limit, 50)));

@@ -313,6 +313,74 @@ try {
   db.prepare("UPDATE task_runs SET status = 'pending', started_at = NULL, lease_expires_at = NULL WHERE id = ?")
     .run(Number(nowTask.json.task_run.id));
 
+  // ── 5d. Fase 2.5: movimiento en cascada ──
+  // Escenario del dueño: A(15:00-16:00), B(16:00-16:45), C lejana; meter a C
+  // en el medio empuja a B al próximo hueco continuo. Teléfono limpio nuevo,
+  // sin la cola generada por los clústeres de arriba.
+  db.prepare(`
+    INSERT INTO devices (user_id, device_id, device_name, workspace_id, lifecycle_status, last_seen_at)
+    VALUES (?, 'test-dev-casc', 'Cascade Phone', ?, 'active', ?)
+  `).run(userId, wsId, new Date().toISOString());
+  const cascDev = Number(deviceIdFor(db, 'test-dev-casc'));
+  const CASCAID = 'test-dev-casc';
+  const crearEnCascada = async (body) => {
+    const res = await api('POST', '/api/tasks/run', body, token);
+    if (res.status !== 201) throw new Error('seed cascada falló: ' + JSON.stringify(res.json));
+    return Number(res.json.task_run.id);
+  };
+  const TA = '2026-08-28T18:00:00Z'; // 15:00 BA (A dura 45m → ventana hasta 18:50Z)
+  const idA = await crearEnCascada({ task_type: 'warmup_ig', device_id: CASCAID, params: { duration_minutes: 45 }, scheduled_for: TA });
+  const idB = await crearEnCascada({ task_type: 'warmup_tiktok', device_id: CASCAID, params: { duration_minutes: 45 }, scheduled_for: '2026-08-28T19:00:00Z' });
+  const idC = await crearEnCascada({ task_type: 'scan_instagram', device_id: CASCAID, params: { duration_minutes: 10 }, scheduled_for: '2026-08-28T21:00:00Z' });
+
+  // Preview de inserción de C entre A y B (a las 19:05 BA=pisa la ventana de B).
+  const snapshotCascada = () => JSON.stringify(
+    db.prepare('SELECT id, scheduled_for FROM task_runs WHERE device_id = ? ORDER BY id').all(cascDev),
+  );
+  const antesDelPreview = snapshotCascada();
+  const preview = await api('POST', `/api/tasks/runs/${idC}/move/preview`, { scheduled_for: '2026-08-28T19:05:00Z' }, token);
+  check('preview de cascada devuelve plan con 2 movimientos (C y B)', preview.status === 200 && preview.json?.ok === true && Array.isArray(preview.json?.moves) && preview.json.moves.length === 2,
+    JSON.stringify(preview.json));
+  const moveDeB = (preview.json?.moves || []).find((m) => m.task_id === idB);
+  check('el plan recorre B al fin de ventana de C (19:20:00.000Z)', !!moveDeB && moveDeB.to === '2026-08-28T19:20:00.000Z',
+    JSON.stringify(moveDeB));
+  check('el preview NO mutó la base', snapshotCascada() === antesDelPreview);
+
+  const aplicado = await api('POST', `/api/tasks/runs/${idC}/move`, { scheduled_for: '2026-08-28T19:05:00Z' }, token);
+  check('aplicación en cascada devuelve ok con los mismos movimientos', aplicado.status === 200 && aplicado.json?.ok === true && aplicado.json?.applied?.length === 2,
+    `status=${aplicado.status}`);
+  const bRow = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idB);
+  const cRow = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idC);
+  check('C quedó insertada en el medio y B recorrida al hueco siguiente',
+    cRow.scheduled_for === '2026-08-28T19:05:00.000Z' && bRow.scheduled_for === '2026-08-28T19:20:00.000Z');
+  const evB = db.prepare(
+    "SELECT payload FROM task_events WHERE task_run_id = ? AND event_type = 'rescheduled_manual' ORDER BY id DESC LIMIT 1",
+  ).get(idB);
+  let payloadB = {};
+  try { payloadB = JSON.parse(evB?.payload || '{}'); } catch {}
+  check('la tarea recorrida audita cascade_root_id y from/to', Number(payloadB.cascade_root_id) === idC && !!payloadB.from && payloadB.to === '2026-08-28T19:20:00.000Z',
+    evB?.payload);
+
+  // Límite de día para automáticas: bloqueo INMÓVIL (running con lease vivo,
+  // 10 h planeadas arrancando cerca de medianoche BA). La automática F queda
+  // atrapada dentro de ese bloque; sacarla exige correrla más allá de su fin
+  // de día local → la cascada completa se rechaza sin mover absolutamente nada.
+  const idG = await crearEnCascada({ task_type: 'warmup_youtube', device_id: CASCAID, params: { duration_minutes: 600 }, scheduled_for: '2026-08-29T00:30:00Z' });
+  const idF = await crearEnCascada({ task_type: 'warmup_tiktok', device_id: CASCAID, params: { duration_minutes: 10 }, scheduled_for: '2026-08-28T20:00:00Z', source: 'automatic' });
+  // Fabricar el pisado imposible: G pasa a running-iniciado y F queda adentro.
+  db.prepare("UPDATE task_runs SET status = 'running', started_at = ?, lease_expires_at = ? WHERE id = ?")
+    .run(new Date(Date.now() - 60e3).toISOString(), new Date(Date.now() + 8 * 3600e3).toISOString(), idG);
+  db.prepare("UPDATE task_runs SET scheduled_for = '2026-08-28T23:50:00Z' WHERE id = ?").run(idF); // 20:50 BA, dentro de G
+  const fOriginal = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idF);
+  const estadoAntesDeOverflow = snapshotCascada();
+  const aplicacionOverflow = await api('POST', `/api/tasks/runs/${idF}/move`, { scheduled_for: '2026-08-29T00:50:00Z' }, token);
+  check('cascada que obligaría a la automática a salir de su día local se rechaza (409)',
+    aplicacionOverflow.status === 409 && aplicacionOverflow.json?.reason === 'chain_overflow',
+    JSON.stringify(aplicacionOverflow.json));
+  check('tras el rechazo no se movió NADA (todo o nada)',
+    snapshotCascada() === estadoAntesDeOverflow
+    && db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idF).scheduled_for === fOriginal.scheduled_for);
+
   // ── 6. Auditoría de solapes sobre la DB del test ──
   const { spawnSync } = await import('node:child_process');
   const audit = spawnSync(process.execPath, [path.join(BACKEND_ROOT, 'scripts', 'audit-slot-overlaps.mjs'), DB_PATH], { encoding: 'utf8' });
