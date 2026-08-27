@@ -1083,6 +1083,35 @@ function rotateRefreshSession(rawToken, userAgent) {
         if (current.revoked_at) {
             // A rotated token must never be accepted twice. Reuse revokes the
             // complete family so a stolen token cannot keep a session alive.
+            //
+            // EXCEPCIÓN (carrera de refresh simultáneo): el cliente Flutter no tiene
+            // single-flight en refreshSession; con varios flujos concurrentes el
+            // mismo token vencido puede llegar dos veces: el primero rota, el resto
+            // llega con el ya-revocado y antes se mataba la familia entera =
+            // logout masivo en los teléfonos. Si la rotación es reciente (gracia) y
+            // la familia conserva al menos una sesión activa, se emite una sesión
+            // hermana nueva en vez de revocar todo. Fuera de gracia o sin hermana
+            // activa sigue siendo tratarlo como robo y revocar la familia.
+            const revokedAtMs = Date.parse(current.revoked_at);
+            const graceMs = Number(process.env.SOUTHFARM_REFRESH_REUSE_GRACE_MS || '60000');
+            if (Number.isFinite(revokedAtMs) && Date.now() - revokedAtMs <= graceMs) {
+                const activeSibling = db.prepare(`
+          SELECT id FROM refresh_sessions
+          WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(current.family_id, now);
+                if (activeSibling) {
+                    const graceRawToken = `sfr_${randomBytes(48).toString('base64url')}`;
+                    const graceHash = hashInviteToken(graceRawToken);
+                    const graceExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+                    db.prepare(`
+            INSERT INTO refresh_sessions
+              (user_id, family_id, token_hash, created_at, expires_at, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(current.user_id, current.family_id, graceHash, now, graceExpiresAt, userAgent);
+                    return { userId: Number(current.user_id), refreshToken: graceRawToken };
+                }
+            }
             db.prepare(`
         UPDATE refresh_sessions
         SET revoked_at = COALESCE(revoked_at, ?)
