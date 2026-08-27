@@ -3,7 +3,9 @@ package com.example.southfarm_app
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityManager
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -1174,6 +1176,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error stopping loading overlay: ${e.message}")
                 }
+                // Close the social app so the next launch starts from its home
+                // screen (covers finished, errored, stopped and remote-cancel).
+                closeSocialAppForCleanStart(currentWarmupPlatform)
                 returnToSouthFarm(paused = false)
             }
         }
@@ -1666,7 +1671,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         currentStatus = "finished"
         Log.i(TAG, "Warmup finished: $warmupMetrics")
 
-        // Close Instagram and return to SouthFarm
+        // Close Instagram and return to SouthFarm (clean start next time)
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1807,6 +1813,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         warmupMetrics = buildMetricsJson(totalElapsed, durationSec)
         currentStatus = "finished"
         Log.i(TAG, "TikTok warmup finished: $warmupMetrics")
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1948,6 +1955,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         warmupMetrics = buildMetricsJson(totalElapsed, durationSec)
         currentStatus = "finished"
         Log.i(TAG, "YouTube warmup finished: $warmupMetrics")
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1964,6 +1972,115 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Log.i(TAG, "Returned to SouthFarm (paused=$paused)")
         } catch (e: Exception) {
             Log.e(TAG, "Error returning to SouthFarm: ${e.message}")
+        }
+    }
+
+    // ─── Clean social app exit ───
+
+    // Social apps keep their last screen alive in the activity stack, so the
+    // next launch lands mid-app where task automation can't find its anchors.
+    // Backing out of the stack (until the root activity finishes) is the only
+    // reliable way for a regular app to force a clean cold start next time:
+    // killBackgroundProcesses alone leaves the saved instance state intact.
+    private var lastCleanExitPackage: String? = null
+    private var lastCleanExitAtMs = 0L
+
+    // Sleeps that swallow interrupts: stopWarmup() interrupts the warmup
+    // thread before this cleanup runs, and a second stop signal must not cut
+    // the close sequence short.
+    private fun cleanupSleep(ms: Long) {
+        var remaining = ms
+        while (remaining > 0) {
+            try {
+                Thread.sleep(remaining)
+                remaining = 0
+            } catch (e: InterruptedException) {
+                remaining -= 100
+                if (remaining < 0) remaining = 0
+            }
+        }
+    }
+
+    private fun socialPackageFor(platform: String?): String? {
+        return when (platform?.lowercase()) {
+            "instagram" -> "com.instagram.android"
+            "tiktok" -> "com.zhiliaoapp.musically"
+            "youtube" -> "com.google.android.youtube"
+            else -> null
+        }
+    }
+
+    private fun socialWindowVisible(pkg: String): Boolean {
+        return try {
+            for (window in windows) {
+                val root = window.root ?: continue
+                if (root.packageName?.toString() == pkg) return true
+            }
+            rootInActiveWindow?.packageName?.toString() == pkg
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun closeSocialAppForCleanStart(platform: String?) {
+        val pkg = socialPackageFor(platform) ?: return
+        try {
+            // The warmup loops close on finish and the startWarmup finally
+            // runs right after — don't redo the whole sequence.
+            val now = System.currentTimeMillis()
+            if (pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L) {
+                Log.i(TAG, "Clean exit for $pkg already done recently, skipping")
+                return
+            }
+
+            var relaunched = false
+            if (!socialWindowVisible(pkg)) {
+                // Not on screen (e.g. it went to background after a pause).
+                // Bring it up so its activity stack can be consumed; killing
+                // it in background alone would let Android restore the last
+                // screen from saved state on the next launch.
+                val relaunch = packageManager.getLaunchIntentForPackage(pkg)
+                if (relaunch == null) {
+                    Log.w(TAG, "Clean exit: $pkg not installed, nothing to close")
+                    return
+                }
+                relaunch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                startActivity(relaunch)
+                relaunched = true
+                var waited = 0L
+                while (!socialWindowVisible(pkg) && waited < 4000L) {
+                    cleanupSleep(250)
+                    waited += 250
+                }
+            }
+
+            var backs = 0
+            while (backs < 8 && socialWindowVisible(pkg)) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                backs++
+                cleanupSleep(700)
+            }
+
+            var usedHome = false
+            if (socialWindowVisible(pkg)) {
+                // Stack didn't empty with BACK (e.g. exit-confirmation toasts).
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                usedHome = true
+                cleanupSleep(500)
+            }
+
+            try {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                am.killBackgroundProcesses(pkg)
+            } catch (e: Exception) {
+                Log.w(TAG, "killBackgroundProcesses($pkg) failed: ${e.message}")
+            }
+
+            lastCleanExitPackage = pkg
+            lastCleanExitAtMs = System.currentTimeMillis()
+            Log.i(TAG, "Clean exit for $pkg done (backs=$backs, home=$usedHome, relaunched=$relaunched)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Clean exit for $pkg failed: ${e.message}")
         }
     }
 
@@ -3980,6 +4097,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("TIKTOK SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting TikTok accounts: ${e.message}", e)
         } finally {
+            closeSocialAppForCleanStart("tiktok")
             try { returnToSouthFarm() } catch (e: Exception) { Log.e(TAG, "Error returning after TikTok scan: ${e.message}") }
             Thread.sleep(500)
             try { SouthFarmLoadingService.dismissLoading() } catch (_: Exception) {}
@@ -4064,6 +4182,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("YOUTUBE SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting YouTube channels: ${e.message}", e)
         } finally {
+            closeSocialAppForCleanStart("youtube")
             try { returnToSouthFarm() } catch (e: Exception) { Log.e(TAG, "Error returning after YouTube scan: ${e.message}") }
             Thread.sleep(500)
             try { SouthFarmLoadingService.dismissLoading() } catch (_: Exception) {}
@@ -4193,6 +4312,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Error detecting accounts: ${e.message}", e)
         } finally {
             // Always return to SouthFarm and clean up both layers, including early exits.
+            closeSocialAppForCleanStart("instagram")
             try {
                 returnToSouthFarm()
             } catch (e: Exception) {
