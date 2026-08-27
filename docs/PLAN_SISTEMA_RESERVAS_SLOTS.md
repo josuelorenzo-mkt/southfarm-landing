@@ -5,16 +5,22 @@
 > desarrollador pueda comenzar desde cero: contexto completo, qué existe, qué cambiar,
 > decisiones de diseño ya tomadas, fases con criterios de aceptación y procedimiento de deploy.
 >
-> Última actualización: 2026-08-26. Estado: **Fases 1 y 2 implementadas** (backend en
-> `feature/slot-reservations` de southfarm-landing, 29/29 checks; webapp en
-> `feature/slot-reservations` de southfarm-webapp, lint + build + 38/38 tests). Nota: el
-> endpoint de movimiento individual es el ya existente `PATCH /api/tasks/runs/:id/schedule`
-> (no se creó `/reschedule`): ahora valida con `reserveSlot('reject')`, responde 409 con
-> `conflicts` + `next_free_slot` y audita `rescheduled_manual {from, to, by_user_id}`.
-> Pendiente: deploy al runtime + merge webapp → main, y Fases 3-4. Herramientas:
+> Última actualización: 2026-08-27. Estado: **Fases 1, 2 y 2.5 implementadas** (backend en
+> `feature/slot-reservations` de southfarm-landing, 37/37 checks; webapp en
+> `feature/slot-reservations` de southfarm-webapp, lint + build + 38/38 tests).
+> **Fase 2.5 = recorrido en cascada**: endpoints `POST /api/tasks/runs/:id/move/preview`
+> (plan sin aplicar) y `POST .../move` (revalida dentro de la transacción, todo-o-nada,
+> audita con `cascade_root_id`); la web ofrece "Meterla acá y recorrer las demás" cuando
+> hay choque, mostrando la lista exacta antes de confirmar. Reglas: solo pendientes sin
+> iniciar se recorren; manuales hasta 24 h, automáticas solo su día local; running/
+> completadas son bloqueos inmóviles (si el destino pisa una, el plan se rechaza entero).
+> Fix incluido: el chequeo SQL de creación ahora incluye el margen en el fin de ventana
+> (antes podían crearse tareas pegadas sin los 5 minutos de aire). Pendiente: deploy al
+> runtime + merge webapp → main, y Fases 3-4. Herramientas:
 > `backend/scripts/test-slot-reservation.mjs` (suite) y
 > `backend/scripts/audit-slot-overlaps.mjs` (auditoría post-deploy; correr con el node 22
-> del runtime por el ABI del binario better-sqlite3).
+> del runtime por el ABI del binario better-sqlite3), más `dev-sandbox.mjs` para probar
+> el panel completo contra una copia de la DB productiva.
 
 ---
 
