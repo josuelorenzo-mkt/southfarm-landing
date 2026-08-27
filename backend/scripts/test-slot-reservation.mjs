@@ -263,6 +263,32 @@ try {
   `).get();
   check('el corrimiento entre clústeres queda auditado', Number(shiftedEvents.n) > 0, `eventos=${shiftedEvents.n}`);
 
+  // Vista día scopped a UN clúster (GET /api/planner/day?cluster_id=N).
+  const clustersAb = db.prepare(
+    "SELECT id, name FROM account_clusters WHERE name IN ('Cluster A','Cluster B')",
+  ).all();
+  const aId = Number(clustersAb.find((c) => c.name === 'Cluster A').id);
+  const bId = Number(clustersAb.find((c) => c.name === 'Cluster B').id);
+  const fechaAuto = db.prepare(`
+    SELECT scheduled_for FROM task_runs
+    WHERE cluster_id = ? AND source = 'automatic' AND status = 'pending'
+    ORDER BY scheduled_for LIMIT 1
+  `).get(aId).scheduled_for;
+  const dateKeyBA = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Argentina/Buenos_Aires', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date(fechaAuto));
+  const diaGeneral = await api('GET', `/api/planner/day?date=${dateKeyBA}`, undefined, token);
+  const diaScoped = await api('GET', `/api/planner/day?date=${dateKeyBA}&cluster_id=${aId}`, undefined, token);
+  check('día general devuelve tareas de ambos clústeres', diaGeneral.status === 200
+    && diaGeneral.json.tasks.some((t) => t.clusterId === aId)
+    && diaGeneral.json.tasks.some((t) => t.clusterId === bId));
+  check('día con cluster_id devuelve SOLO ese clúster',
+    diaScoped.status === 200 && diaScoped.json.tasks.length > 0
+    && diaScoped.json.tasks.every((t) => t.clusterId === aId),
+    `total=${diaScoped.json?.tasks?.length} cluster_id=${diaScoped.json?.cluster_id}`);
+  const diaInvalido = await api('GET', '/api/planner/day?cluster_id=999999', undefined, token);
+  check('cluster_id inexistente devuelve 404', diaInvalido.status === 404);
+
   // ── 5c. Movimiento individual (Fase 2): PATCH /api/tasks/runs/:id/schedule ──
   // Mover una tarea a un hueco libre (el sugerido por nextFreeSlot).
   const moveBase = new Date(Date.now() + 26 * 3600e3);

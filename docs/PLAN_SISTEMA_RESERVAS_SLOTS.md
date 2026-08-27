@@ -15,7 +15,12 @@
 > iniciar se recorren; manuales hasta 24 h, automáticas solo su día local; running/
 > completadas son bloqueos inmóviles (si el destino pisa una, el plan se rechaza entero).
 > Fix incluido: el chequeo SQL de creación ahora incluye el margen en el fin de ventana
-> (antes podían crearse tareas pegadas sin los 5 minutos de aire). Pendiente: deploy al
+> (antes podían crearse tareas pegadas sin los 5 minutos de aire). **Vista día dual
+> (decisión del dueño 2026-08-27)**: `GET /api/planner/day` acepta `cluster_id` (filtra
+> tareas y publicaciones al clúster; 404 si no existe); en la web son DOS botones —
+> "Día completo" (todos los clústeres) y "Día clúster" (solo ese clúster); hacer clic en
+> un día dentro del chart de un clúster en la vista semana abre directo la agenda de ESE
+> clúster para ESE día, y navegar días conserva el scope. Pendiente: deploy al
 > runtime + merge webapp → main, y Fases 3-4. Herramientas:
 > `backend/scripts/test-slot-reservation.mjs` (suite) y
 > `backend/scripts/audit-slot-overlaps.mjs` (auditoría post-deploy; correr con el node 22

@@ -1573,17 +1573,32 @@ export function registerActivityPlanner(app, deps) {
     app.get('/api/planner/day', deps.auth, (req, res) => {
         try {
             const date = deps.plannerDateKey(req.query.date);
+            // Fase 2.5: vista día scopped a UN clúster (o completa si no viene).
+            const rawClusterId = req.query.cluster_id;
+            const scopedClusterId = rawClusterId === undefined || rawClusterId === null || String(rawClusterId).trim() === ''
+                ? null
+                : Number(rawClusterId);
+            const validClusterId = scopedClusterId !== null && Number.isInteger(scopedClusterId) && scopedClusterId > 0
+                ? scopedClusterId
+                : null;
             const rows = db.prepare(`
         SELECT tr.*, sa.username AS account_username, d.device_id AS device_key, d.device_alias
         FROM task_runs tr
         LEFT JOIN social_accounts sa ON sa.id = tr.social_account_id
         LEFT JOIN devices d ON d.id = tr.device_id
         WHERE tr.workspace_id = ? AND tr.scheduled_for IS NOT NULL
+          ${validClusterId !== null ? 'AND tr.cluster_id = ?' : ''}
         ORDER BY COALESCE(tr.scheduled_for, tr.created_at) ASC, tr.id ASC
-      `).all(req.user.workspaceId);
+      `).all(...(validClusterId !== null ? [req.user.workspaceId, validClusterId] : [req.user.workspaceId]));
             const clusterNames = new Map();
             for (const cluster of db.prepare('SELECT id, name FROM account_clusters WHERE workspace_id = ?').all(req.user.workspaceId)) {
                 clusterNames.set(Number(cluster.id), String(cluster.name));
+            }
+            if (validClusterId !== null) {
+                const clusterExists = db.prepare('SELECT id FROM account_clusters WHERE id = ? AND workspace_id = ?').get(validClusterId, req.user.workspaceId);
+                if (!clusterExists) {
+                    return res.status(404).json({ error: 'Cluster not found' });
+                }
             }
             const tasks = rows
                 .filter((row) => {
@@ -1604,13 +1619,23 @@ export function registerActivityPlanner(app, deps) {
             }
             // Single queue: the workspace's publication_jobs whose date key
             // (COALESCE(scheduled_for, created_at) in BA) matches the requested day.
-            const publicationRows = db.prepare(`
-        SELECT j.*, sa.username AS account_username
-        FROM publication_jobs j
-        LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
-        WHERE j.workspace_id = ?
-        ORDER BY COALESCE(j.scheduled_for, j.created_at) ASC, j.id ASC
-      `).all(req.user.workspaceId);
+            // Scopped a clúster → solo jobs de cuentas que son miembros de ese clúster.
+            const publicationRows = (validClusterId !== null
+                ? db.prepare(`
+              SELECT j.*, sa.username AS account_username
+              FROM publication_jobs j
+              LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+              JOIN account_cluster_members m ON m.social_account_id = j.social_account_id AND m.cluster_id = ?
+              WHERE j.workspace_id = ?
+              ORDER BY COALESCE(j.scheduled_for, j.created_at) ASC, j.id ASC
+            `).all(validClusterId, req.user.workspaceId)
+                : db.prepare(`
+              SELECT j.*, sa.username AS account_username
+              FROM publication_jobs j
+              LEFT JOIN social_accounts sa ON sa.id = j.social_account_id
+              WHERE j.workspace_id = ?
+              ORDER BY COALESCE(j.scheduled_for, j.created_at) ASC, j.id ASC
+            `).all(req.user.workspaceId));
             const publications = publicationRows
                 .filter((row) => deps.dateKeyInTimezone(row.scheduled_for || row.created_at) === date)
                 .map((row) => {
@@ -1620,7 +1645,7 @@ export function registerActivityPlanner(app, deps) {
                 }
                 return view;
             });
-            res.json({ date, tasks, hourly, publications });
+            res.json({ date, cluster_id: validClusterId, tasks, hourly, publications });
         }
         catch (error) {
             res.status(400).json({ error: error.message || 'Unable to load planner day' });
