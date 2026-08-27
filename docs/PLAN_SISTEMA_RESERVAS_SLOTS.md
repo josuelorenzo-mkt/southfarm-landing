@@ -286,6 +286,14 @@ rafaga de tareas atrasadas ejecutándose encimadas cuando el teléfono se libera
    dispara regeneración. Todo cambio al generador debe ser idempotente.
 6. **PowerShell 5.1**: en el supervisor, stderr del hijo + `$ErrorActionPreference='Stop'` +
    redirección `*>>` = muerte del supervisor (ya mitigado; no revertir).
+8. **Teléfonos "desconectados" sin estarlo (modo tcpip residual)**: si la web dice
+   "No encontramos «XX» entre los dispositivos del bridge" pero los cables están puestos y
+   Windows ve los cuatro POCO en `Get-PnpDevice`, el transporte ADB-over-USB del teléfono
+   quedó apagado (quedó en modo TCP-IP de una sesión anterior). Diagnóstico por WiFi:
+   `adb connect <ip>:5555` + `getprop ro.serialno` para mapear alias, y restaurar con
+   **`adb -s <ip>:5555 usb`** (reinicia adbd al modo USB sin tocar cables). Sin WiFi
+   alcanzable: desenchufar/reconectar el cable también restaura. El keepalive de Windows
+   (`adb-wifi-keepalive.ps1`) solo hace `connect`, no es el causante.
 7. **Timezone**: todo se guarda UTC ISO; la agenda del usuario es America/Argentina/Buenos_Aires
    (`BUENOS_AIRES_TIMEZONE`, helpers `dateKeyInTimezone`/`localDateTimeToIso`). Los límites
    "mismo día" para corrimientos deben calcularse con esos helpers, nunca con `substr`.
