@@ -56,6 +56,10 @@ try {
   $env:JWT_SECRET = [string]$runtimeConfig.jwt_secret
   $env:SOUTHFARM_JWT_LEGACY_SECRETS = [string]$runtimeConfig.legacy_jwt_secrets
   $env:NODE_ENV = "production"
+  # Access JWT de larga vida: la flota llama refresh en carreras concurrentes
+  # (register antes de cada tarea + pollers); con 15m el churn generaba
+  # reutilización de refresh tokens y logouts por reuse-detection.
+  $env:SOUTHFARM_ACCESS_TOKEN_TTL = "12h"
   # The workspace is intentionally manual_only for the current MVP phase.
   $env:SOUTHFARM_AUTO_PLANNER_ENABLED = "false"
   $env:SOUTHFARM_SCHEDULER_MODE = "fixed"
