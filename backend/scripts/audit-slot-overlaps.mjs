@@ -44,7 +44,8 @@ function windowFor(row) {
   return { startMs, endMs: startMs + (durationSec + bufferSec) * 1000 };
 }
 
-let overlaps = 0;
+let overlapsActivos = 0;
+let overlapsHistoricos = 0;
 let lastByDevice = new Map();
 for (const row of rows) {
   const win = windowFor(row);
@@ -56,17 +57,28 @@ for (const row of rows) {
   }
   const prev = lastByDevice.get(Number(row.device_id));
   if (prev && prev.win.endMs > win.startMs) {
-    overlaps += 1;
-    console.log(
-      `SOLAPE device=${row.device_id}\n`
-      + `  A: #${prev.row.id} ${prev.row.task_type} ${prev.row.status} `
-      + `${prev.row.scheduled_for} -> ${new Date(prev.win.endMs).toISOString()}\n`
-      + `  B: #${row.id} ${row.task_type} ${row.status} `
-      + `${row.scheduled_for} -> ${new Date(win.endMs).toISOString()}`,
-    );
+    // Histórico = ambas completed y la ventana terminó en el pasado: lo creó
+    // el sistema viejo; el deploy no lo arregla ni lo empeora. Los ACTIVOS
+    // (pendientes/overdue/running/futuros) definen el veredicto del deploy.
+    const esHistorico = row.status === 'completed'
+      && prev.row.status === 'completed'
+      && prev.win.endMs < nowMs;
+    if (esHistorico) {
+      overlapsHistoricos += 1;
+    } else {
+      overlapsActivos += 1;
+      console.log(
+        `SOLAPE ACTIVO device=${row.device_id}\n`
+        + `  A: #${prev.row.id} ${prev.row.task_type} ${prev.row.status} `
+        + `${prev.row.scheduled_for} -> ${new Date(prev.win.endMs).toISOString()}\n`
+        + `  B: #${row.id} ${row.task_type} ${row.status} `
+        + `${row.scheduled_for} -> ${new Date(win.endMs).toISOString()}`,
+      );
+    }
   }
   if (!prev || win.endMs > prev.win.endMs) lastByDevice.set(Number(row.device_id), { row, win });
 }
 
-console.log(`\nRevisadas ${rows.length} tareas vivas (margen ${bufferSec}s). Solapes: ${overlaps}`);
-process.exit(overlaps === 0 ? 0 : 1);
+console.log(`\nRevisadas ${rows.length} tareas vivas (margen ${bufferSec}s). `
+  + `ACTIVOS: ${overlapsActivos} · históricos (completed, pre-sistema): ${overlapsHistoricos}`);
+process.exit(overlapsActivos === 0 ? 0 : 1);
