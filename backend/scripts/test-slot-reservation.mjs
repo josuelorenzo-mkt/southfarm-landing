@@ -359,33 +359,67 @@ try {
   const idB = await crearEnCascada({ task_type: 'warmup_tiktok', device_id: CASCAID, params: { duration_minutes: 45 }, scheduled_for: '2026-08-28T19:00:00Z' });
   const idC = await crearEnCascada({ task_type: 'scan_instagram', device_id: CASCAID, params: { duration_minutes: 10 }, scheduled_for: '2026-08-28T21:00:00Z' });
 
-  // Preview de inserción de C entre A y B (a las 19:05 BA=pisa la ventana de B).
+  // Preview de inserción de C a las 19:05 — B(19:00) está ANTES del punto:
+  // con la semántica "insertar en el medio" B queda CONGELADA y C se desliza
+  // sola al primer hueco válido (fin de ventana de B = 19:50Z).
   const snapshotCascada = () => JSON.stringify(
     db.prepare('SELECT id, scheduled_for FROM task_runs WHERE device_id = ? ORDER BY id').all(cascDev),
   );
   const antesDelPreview = snapshotCascada();
   const preview = await api('POST', `/api/tasks/runs/${idC}/move/preview`, { scheduled_for: '2026-08-28T19:05:00Z' }, token);
-  check('preview de cascada devuelve plan con 2 movimientos (C y B)', preview.status === 200 && preview.json?.ok === true && Array.isArray(preview.json?.moves) && preview.json.moves.length === 2,
+  check('preview: solo se mueve C — la anterior (B) NO participa', preview.status === 200 && preview.json?.ok === true && Array.isArray(preview.json?.moves) && preview.json.moves.length === 1
+    && preview.json.moves[0].task_id === idC,
     JSON.stringify(preview.json));
-  const moveDeB = (preview.json?.moves || []).find((m) => m.task_id === idB);
-  check('el plan recorre B al fin de ventana de C (19:20:00.000Z)', !!moveDeB && moveDeB.to === '2026-08-28T19:20:00.000Z',
-    JSON.stringify(moveDeB));
+  check('C se desliza al primer hueco tras la anterior (19:50:00.000Z)',
+    preview.json?.moves?.[0]?.to === '2026-08-28T19:50:00.000Z',
+    JSON.stringify(preview.json?.moves?.[0]));
   check('el preview NO mutó la base', snapshotCascada() === antesDelPreview);
 
   const aplicado = await api('POST', `/api/tasks/runs/${idC}/move`, { scheduled_for: '2026-08-28T19:05:00Z' }, token);
-  check('aplicación en cascada devuelve ok con los mismos movimientos', aplicado.status === 200 && aplicado.json?.ok === true && aplicado.json?.applied?.length === 2,
+  check('aplicación devuelve ok con el movimiento deslizado', aplicado.status === 200 && aplicado.json?.ok === true && aplicado.json?.applied?.length === 1,
     `status=${aplicado.status}`);
   const bRow = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idB);
   const cRow = db.prepare('SELECT scheduled_for FROM task_runs WHERE id = ?').get(idC);
-  check('C quedó insertada en el medio y B recorrida al hueco siguiente',
-    cRow.scheduled_for === '2026-08-28T19:05:00.000Z' && bRow.scheduled_for === '2026-08-28T19:20:00.000Z');
-  const evB = db.prepare(
+  check('C entró a las 19:50 y B quedó exactamente donde estaba',
+    cRow.scheduled_for === '2026-08-28T19:50:00.000Z' && bRow.scheduled_for === '2026-08-28T19:00:00.000Z');
+  const evC = db.prepare(
     "SELECT payload FROM task_events WHERE task_run_id = ? AND event_type = 'rescheduled_manual' ORDER BY id DESC LIMIT 1",
-  ).get(idB);
-  let payloadB = {};
-  try { payloadB = JSON.parse(evB?.payload || '{}'); } catch {}
-  check('la tarea recorrida audita cascade_root_id y from/to', Number(payloadB.cascade_root_id) === idC && !!payloadB.from && payloadB.to === '2026-08-28T19:20:00.000Z',
-    evB?.payload);
+  ).get(idC);
+  let payloadC = {};
+  try { payloadC = JSON.parse(evC?.payload || '{}'); } catch {}
+  check('la primaria audita cascade_root_id y from/to', Number(payloadC.cascade_root_id) === idC
+    && payloadC.from === '2026-08-28T21:00:00.000Z' && payloadC.to === '2026-08-28T19:50:00.000Z',
+    evC?.payload);
+
+  // ESCENARIO EXACTO del video del dueño (2026-08-27): 4 tareas de 35 min;
+  // meter IG (18:25) en el hueco entre YT(19:10) y TT(19:50) soltando en 19:45.
+  // Esperado: IG desliza a 19:50 (tras el margen de YT), TT salta a 21:10
+  // (después de YT2 20:30-21:05), YT y YT2 quedan INTACTOS.
+  db.prepare(`
+    INSERT INTO devices (user_id, device_id, device_name, workspace_id, lifecycle_status, last_seen_at)
+    VALUES (?, 'test-dev-casc2', 'Cascade Phone 2', ?, 'active', ?)
+  `).run(userId, wsId, new Date().toISOString());
+  const CASCA2 = 'test-dev-casc2';
+  const idV1 = await crearEnCascada({ task_type: 'warmup_ig', device_id: CASCA2, params: { duration_minutes: 35 }, scheduled_for: '2026-08-28T21:25:00Z' });
+  const idV2 = await crearEnCascada({ task_type: 'warmup_youtube', device_id: CASCA2, params: { duration_minutes: 35 }, scheduled_for: '2026-08-28T22:10:00Z' });
+  const idV3 = await crearEnCascada({ task_type: 'warmup_tiktok', device_id: CASCA2, params: { duration_minutes: 35 }, scheduled_for: '2026-08-28T22:50:00Z' });
+  const idV4 = await crearEnCascada({ task_type: 'warmup_youtube', device_id: CASCA2, params: { duration_minutes: 35 }, scheduled_for: '2026-08-28T23:30:00Z' });
+  const previewVideo = await api('POST', `/api/tasks/runs/${idV1}/move/preview`, { scheduled_for: '2026-08-28T22:45:00Z' }, token);
+  const movesVideo = previewVideo.json?.moves || [];
+  check('video: solo se mueven IG y TT (YT anterior e YT2 posterior quedan)', previewVideo.status === 200 && previewVideo.json?.ok === true
+    && movesVideo.length === 2
+    && movesVideo.some((m) => m.task_id === idV1 && m.to === '2026-08-28T22:50:00.000Z')
+    && movesVideo.some((m) => m.task_id === idV3 && m.to === '2026-08-29T00:10:00.000Z'),
+    JSON.stringify(movesVideo));
+  const aplicadoVideo = await api('POST', `/api/tasks/runs/${idV1}/move`, { scheduled_for: '2026-08-28T22:45:00Z' }, token);
+  check('video aplicado: ok', aplicadoVideo.status === 200 && aplicadoVideo.json?.ok === true, `status=${aplicadoVideo.status}`);
+  const horaDe = (id) => db.prepare('SELECT scheduled_for h FROM task_runs WHERE id = ?').get(id).h;
+  check('video: horas finales exactas (YT 19:10 y YT2 20:30 intactos)',
+    horaDe(idV1) === '2026-08-28T22:50:00.000Z'
+    && horaDe(idV2) === '2026-08-28T22:10:00.000Z'
+    && horaDe(idV4) === '2026-08-28T23:30:00.000Z'
+    && horaDe(idV3) === '2026-08-29T00:10:00.000Z',
+    JSON.stringify({ v1: horaDe(idV1), v2: horaDe(idV2), v3: horaDe(idV3), v4: horaDe(idV4) }));
 
   // Límite de día para automáticas: bloqueo INMÓVIL (running con lease vivo,
   // 10 h planeadas arrancando cerca de medianoche BA). La automática F queda

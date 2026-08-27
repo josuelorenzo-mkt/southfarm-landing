@@ -197,11 +197,13 @@ function simulWindow(startMs, plannedDurationSec, bufferSec) {
     return { startMs, endMs: startMs + (durationSec + bufferSec) * 1000 };
 }
 // Calcula (SIN aplicar) qué tareas habría que recorrer si `primaryTaskId`
-// pasara a ocupar `targetStart`: se ubica la primaria y cada tarea pendiente
-// posterior que quede pisada avanza al próximo hueco continuo libre. Solo
-// intervienen tareas pendientes/overdue no iniciadas del MISMO teléfono;
-// running/completadas son bloqueos inmóviles. Devuelve el plan o el motivo
-// por el que no hay arreglo posible dentro de los límites de corrimiento.
+// pasara a insertarse en `targetStart`. Semántica de inserción: las tareas
+// ANTERIORES al punto pedido quedan quietas; el destino se desliza al primer
+// minuto válido tras ellas (sin saltar ninguna), y cada tarea POSTERIOR
+// pisada avanza al próximo hueco continuo libre. Solo intervienen tareas
+// pendientes/overdue no iniciadas del MISMO teléfono; running/completadas
+// son bloqueos inmóviles. Devuelve el plan o el motivo por el que no hay
+// arreglo posible dentro de los límites de corrimiento.
 export function planCascadeMove(db, opts) {
     const bufferSec = opts.bufferSec ?? slotBufferSec();
     const nowMs = opts.now?.getTime() ?? Date.now();
@@ -226,18 +228,59 @@ export function planCascadeMove(db, opts) {
             detail: 'La tarea debe existir y estar pendiente (no iniciada) para moverse en cascada',
         };
     }
-    // Posiciones simuladas: todas las vivas con su horario actual, la primaria
-    // ya colocada en el destino pedido.
-    const positions = new Map();
-    for (const row of vivas)
-        positions.set(Number(row.id), Date.parse(String(row.scheduled_for)));
-    positions.set(Number(primary.id), targetMs);
+    // Semántica "INSERTAR EN EL MEDIO" (fix 2026-08-27): las tareas con hora
+    // original ANTERIOR al destino quedan CONGELADAS — jamás se recorren, aunque
+    // el margen de la tarea insertada roce su ventana. Solo las POSTERIORES
+    // (>= destino) participan de la cascada. Inmóviles (running/completed/
+    // paused) siguen siendo bloqueos duros de cualquier hora.
+    const frozen = vivas.filter((row) => Number(row.id) !== Number(primary.id)
+        && (!esMovableParaCascade(row) || Date.parse(String(row.scheduled_for)) < targetMs));
     const movables = vivas
-        .filter((row) => Number(row.id) !== Number(primary.id) && esMovableParaCascade(row))
+        .filter((row) => Number(row.id) !== Number(primary.id)
+        && esMovableParaCascade(row)
+        && Date.parse(String(row.scheduled_for)) >= targetMs)
         .sort((a, b) => Date.parse(String(a.scheduled_for)) - Date.parse(String(b.scheduled_for)));
     const durationOf = (row) => Number(row.planned_duration_sec) > 0
         ? Math.round(Number(row.planned_duration_sec))
         : DEFAULT_PLANNED_DURATION_SEC;
+    // PASO A — el destino se desliza SOLO contra las congeladas: si el horario
+    // pedido roza el margen de una tarea anterior (o de una inmóvil), la tarea
+    // insertada avanza al primer minuto válido después de ese bloqueo. Así la
+    // tarea entra lo más cerca posible del punto pedido SIN mover las previas.
+    let effTargetMs = targetMs;
+    for (let iteration = 0; iteration < MAX_SHIFT_ITERATIONS; iteration += 1) {
+        const win = simulWindow(effTargetMs, durationOf(primary), bufferSec);
+        let blockedBy = null;
+        for (const other of frozen) {
+            const otherWin = esMovableParaCascade(other)
+                ? simulWindow(Date.parse(String(other.scheduled_for)), durationOf(other), bufferSec)
+                : (windowFor(other, nowMs, bufferSec) ?? { startMs: 0, endMs: 0 });
+            if (otherWin.endMs <= otherWin.startMs)
+                continue;
+            if (win.startMs < otherWin.endMs && otherWin.startMs < win.endMs) {
+                blockedBy = blockedBy === null ? otherWin.endMs : Math.max(blockedBy, otherWin.endMs);
+            }
+        }
+        if (blockedBy === null)
+            break;
+        effTargetMs = blockedBy;
+    }
+    const primaryOriginMs = Date.parse(String(primary.scheduled_for));
+    const primaryLimitMs = cascadeLimitMs(primary);
+    if (primaryLimitMs !== null && effTargetMs - primaryOriginMs > primaryLimitMs) {
+        return {
+            ok: false,
+            reason: 'chain_overflow',
+            detail: `El horario pedido queda tapado por tareas anteriores del teléfono y el `
+                + `próximo hueco libre excede el límite de corrimiento de la tarea`,
+        };
+    }
+    // Posiciones simuladas: congeladas en su horario actual, primaria en el
+    // destino ya deslizado, posteriores por resolver.
+    const positions = new Map();
+    for (const row of vivas)
+        positions.set(Number(row.id), Date.parse(String(row.scheduled_for)));
+    positions.set(Number(primary.id), effTargetMs);
     for (const task of movables) {
         let candidate = positions.get(Number(task.id));
         const originMs = Date.parse(String(task.scheduled_for));
@@ -279,28 +322,6 @@ export function planCascadeMove(db, opts) {
             }
         }
         positions.set(Number(task.id), candidate);
-    }
-    // Validación final: las tareas recorridas ya garantizan no pisar a nadie,
-    // pero el DESTINO de la primaria nunca fue verificado contra bloqueos
-    // inmóviles (running/completed/paused). Si el hueco pedido arranca encima de
-    // una tarea congelada, no hay arreglo posible: se rechaza todo el plan.
-    const primaryDur = durationOf(primary);
-    for (const other of vivas) {
-        if (Number(other.id) === Number(primary.id))
-            continue;
-        if (esMovableParaCascade(other))
-            continue; // estos ya resolvieron su posición
-        const real = windowFor(other, nowMs, bufferSec);
-        if (!real)
-            continue;
-        if (targetMs < real.endMs && real.startMs < targetMs + (primaryDur + bufferSec) * 1000) {
-            return {
-                ok: false,
-                reason: 'chain_overflow',
-                detail: `El horario pedido se superpone con ${String(other.task_type)} #${other.id}, `
-                    + `que está ${String(other.status)} y no puede moverse`,
-            };
-        }
     }
     const moves = [];
     for (const row of vivas) {
