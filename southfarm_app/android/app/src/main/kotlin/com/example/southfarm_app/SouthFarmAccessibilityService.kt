@@ -27,6 +27,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Random
 
+// TEST MODE: overlays (loading + warmup control panel) stay disabled so the
+// phone screen remains visible during manual device QA. Must be false in
+// production builds.
+private const val TEST_NO_OVERLAYS = true
+
 class SouthFarmAccessibilityService : AccessibilityService() {
 
     companion object {
@@ -620,7 +625,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
                 overlayIntent.putExtra("username", account)
                 overlayIntent.putExtra("duration", duration)
-                startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) startService(overlayIntent)
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting overlay: ${e.message}")
             }
@@ -1141,7 +1146,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // Start loading overlay (Service-based — can draw over other apps)
         try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            startForegroundService(loadingIntent)
+            if (!TEST_NO_OVERLAYS) startForegroundService(loadingIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Could not start loading overlay: ${e.message}")
         }
@@ -1429,7 +1434,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     private fun resumeSocialSession(): Boolean {
         return try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            startForegroundService(loadingIntent)
+            if (!TEST_NO_OVERLAYS) startForegroundService(loadingIntent)
             val ready = when (currentWarmupPlatform) {
                 "tiktok" -> {
                     updateLoadingText("Resuming TikTok warmup...")
@@ -1977,11 +1982,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
     // ─── Clean social app exit ───
 
-    // Social apps keep their last screen alive in the activity stack, so the
-    // next launch lands mid-app where task automation can't find its anchors.
-    // Backing out of the stack (until the root activity finishes) is the only
-    // reliable way for a regular app to force a clean cold start next time:
-    // killBackgroundProcesses alone leaves the saved instance state intact.
+    // Social apps keep their last screen alive, so the next launch lands
+    // mid-app where task automation can't find its anchors. Closing them
+    // through the recents switcher wipes them from the switcher entirely,
+    // so the next launch is a clean cold start. Sequence per owner spec:
+    // task finishes or stop is received → recents (right nav button) →
+    // wait 2s → swipe up from the center of the screen once → home (center
+    // nav button) → back to SouthFarm (caller's returnToSouthFarm).
     private var lastCleanExitPackage: String? = null
     private var lastCleanExitAtMs = 0L
 
@@ -2010,18 +2017,6 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun socialWindowVisible(pkg: String): Boolean {
-        return try {
-            for (window in windows) {
-                val root = window.root ?: continue
-                if (root.packageName?.toString() == pkg) return true
-            }
-            rootInActiveWindow?.packageName?.toString() == pkg
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     private fun closeSocialAppForCleanStart(platform: String?) {
         Log.e(TAG, "SF-CLEAN: called for platform=$platform")
         val pkg = socialPackageFor(platform)
@@ -2038,41 +2033,35 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 return
             }
 
-            var relaunched = false
-            if (!socialWindowVisible(pkg)) {
-                // Not on screen (e.g. it went to background after a pause).
-                // Bring it up so its activity stack can be consumed; killing
-                // it in background alone would let Android restore the last
-                // screen from saved state on the next launch.
-                val relaunch = packageManager.getLaunchIntentForPackage(pkg)
-                if (relaunch == null) {
-                    Log.w(TAG, "Clean exit: $pkg not installed, nothing to close")
-                    return
-                }
-                relaunch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                startActivity(relaunch)
-                relaunched = true
-                var waited = 0L
-                while (!socialWindowVisible(pkg) && waited < 4000L) {
-                    cleanupSleep(250)
-                    waited += 250
-                }
-            }
+            // 1) Right nav button: open the app switcher (recents)
+            performGlobalAction(GLOBAL_ACTION_RECENTS)
+            cleanupSleep(2000)
 
-            var backs = 0
-            while (backs < 8 && socialWindowVisible(pkg)) {
-                performGlobalAction(GLOBAL_ACTION_BACK)
-                backs++
-                cleanupSleep(700)
+            // 2) One fling up over the centered app card: dismisses it from
+            //    the switcher, closing the app completely. The touch must
+            //    start INSIDE the card (its lower edge sits near mid-screen
+            //    in the launcher overview) and be straight and fast — a slow
+            //    or curved drag reads as scrolling the switcher.
+            val dismissed = try {
+                val path = Path().apply {
+                    moveTo(screenWidth / 2f, screenHeight * 0.45f)
+                    lineTo(screenWidth / 2f, screenHeight * 0.08f)
+                }
+                dispatchGesture(
+                    GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(path, 0, 250L))
+                        .build(),
+                    null, null,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "dismiss swipe failed: ${e.message}")
+                false
             }
+            cleanupSleep(1000)
 
-            var usedHome = false
-            if (socialWindowVisible(pkg)) {
-                // Stack didn't empty with BACK (e.g. exit-confirmation toasts).
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                usedHome = true
-                cleanupSleep(500)
-            }
+            // 3) Center nav button: go to the phone home screen
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            cleanupSleep(500)
 
             try {
                 val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -2083,8 +2072,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             lastCleanExitPackage = pkg
             lastCleanExitAtMs = System.currentTimeMillis()
-            Log.i(TAG, "Clean exit for $pkg done (backs=$backs, home=$usedHome, relaunched=$relaunched)")
-            Log.e(TAG, "SF-CLEAN: done pkg=$pkg backs=$backs home=$usedHome relaunched=$relaunched")
+            Log.i(TAG, "Clean exit for $pkg done (recents+fling+home, dismissed=$dismissed)")
+            Log.e(TAG, "SF-CLEAN: done pkg=$pkg recents_fling_home dismissed=$dismissed")
         } catch (e: Exception) {
             Log.e(TAG, "Clean exit for $pkg failed: ${e.message}")
             Log.e(TAG, "SF-CLEAN: FAILED pkg=$pkg err=${e.message}")
@@ -4068,10 +4057,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("=== TIKTOK ACCOUNT SCAN ===")
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning TikTok...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting TikTok scan overlays: ${e.message}")
             }
@@ -4147,10 +4136,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("=== YOUTUBE CHANNEL SCAN ===")
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning YouTube channels...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting YouTube scan overlays: ${e.message}")
             }
@@ -4201,15 +4190,18 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     fun detectInstagramAccounts(): List<String> {
         val accounts = mutableListOf<String>()
         try {
+            Log.e(TAG, "SF-NOOVERLAY: overlay-free TEST build, scan starting")
             debugLog("=== ACCOUNT SCAN v5 (loading overlay) ===")
 
             // [Loading Overlay] Keep Instagram interaction protected while scanning.
             try {
-                val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(overlayIntent)
-                } else {
-                    startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) {
+                    val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(overlayIntent)
+                    } else {
+                        startService(overlayIntent)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting overlay for scan: ${e.message}")
@@ -4217,18 +4209,20 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Thread.sleep(500)
 
             try {
-                SouthFarmLoadingService.setInitialText("Scanning app...")
-                val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(loadingIntent)
-                } else {
-                    startService(loadingIntent)
+                if (!TEST_NO_OVERLAYS) {
+                    SouthFarmLoadingService.setInitialText("Scanning app...")
+                    val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(loadingIntent)
+                    } else {
+                        startService(loadingIntent)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting loading for scan: ${e.message}")
             }
             for (i in 0..20) {
-                if (SouthFarmLoadingService.isRunning) break
+                if (TEST_NO_OVERLAYS || SouthFarmLoadingService.isRunning) break
                 Thread.sleep(100)
             }
             Thread.sleep(400)
