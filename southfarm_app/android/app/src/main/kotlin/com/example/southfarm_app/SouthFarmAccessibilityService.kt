@@ -2023,7 +2023,12 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     }
 
     private fun closeSocialAppForCleanStart(platform: String?) {
-        val pkg = socialPackageFor(platform) ?: return
+        Log.e(TAG, "SF-CLEAN: called for platform=$platform")
+        val pkg = socialPackageFor(platform)
+        if (pkg == null) {
+            Log.e(TAG, "SF-CLEAN: no package for platform=$platform, returning")
+            return
+        }
         try {
             // The warmup loops close on finish and the startWarmup finally
             // runs right after — don't redo the whole sequence.
@@ -2079,8 +2084,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             lastCleanExitPackage = pkg
             lastCleanExitAtMs = System.currentTimeMillis()
             Log.i(TAG, "Clean exit for $pkg done (backs=$backs, home=$usedHome, relaunched=$relaunched)")
+            Log.e(TAG, "SF-CLEAN: done pkg=$pkg backs=$backs home=$usedHome relaunched=$relaunched")
         } catch (e: Exception) {
             Log.e(TAG, "Clean exit for $pkg failed: ${e.message}")
+            Log.e(TAG, "SF-CLEAN: FAILED pkg=$pkg err=${e.message}")
         }
     }
 
