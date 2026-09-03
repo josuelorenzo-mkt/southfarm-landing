@@ -97,6 +97,24 @@ String resolveAvatarUrl(String? picUrl, String apiBase) {
   return url;
 }
 
+// Returns a copy of [list] sorted alphabetically by username
+// (case-insensitive), so every account listing renders in a stable,
+// predictable order regardless of the order in which the backend or a
+// local scan returned the records. 'username' is the identity key for
+// every account flow (Instagram, TikTok and YouTube included).
+List<Map<String, dynamic>> sortAccountsByUsername(
+  List<Map<String, dynamic>> list,
+) {
+  final sorted = List<Map<String, dynamic>>.from(list);
+  sorted.sort(
+    (a, b) => (a['username'] ?? '')
+        .toString()
+        .toLowerCase()
+        .compareTo((b['username'] ?? '').toString().toLowerCase()),
+  );
+  return sorted;
+}
+
 // ─── Platform Logo Widget ───
 class PlatformLogo extends StatelessWidget {
   final String platform;
@@ -2039,7 +2057,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
     }
     final saved = prefs.getString(_lastAccountKey(requestedPlatform)) ?? '';
     if (requestedPlatform != 'instagram') {
-      final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      final localAccounts = sortAccountsByUsername(
+        await WarmupApi.getLocalAccounts(requestedPlatform),
+      );
       if (mounted && _selectedPlatform == requestedPlatform) {
         final savedAccount = saved.replaceFirst(RegExp(r'^@'), '');
         final selected =
@@ -2057,8 +2077,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
     }
     // Try backend first
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: requestedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: requestedPlatform),
       );
       if (backendAccounts.isNotEmpty &&
           mounted &&
@@ -2084,7 +2104,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
       }
     } catch (_) {}
     // Fallback to local
-    final accounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+    final accounts = sortAccountsByUsername(
+      await WarmupApi.getLocalAccounts(requestedPlatform),
+    );
     if (mounted && _selectedPlatform == requestedPlatform) {
       setState(() {
         _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
@@ -2096,7 +2118,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Future<void> _loadSavedAccounts() async {
     final requestedPlatform = _selectedPlatform;
     if (requestedPlatform != 'instagram') {
-      final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      final localAccounts = sortAccountsByUsername(
+        await WarmupApi.getLocalAccounts(requestedPlatform),
+      );
       if (mounted && _selectedPlatform == requestedPlatform) {
         setState(() => _savedAccounts = localAccounts);
       }
@@ -2104,8 +2128,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
     }
     // Try backend first
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: requestedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: requestedPlatform),
       );
       if (backendAccounts.isNotEmpty &&
           mounted &&
@@ -2115,7 +2139,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
       }
     } catch (_) {}
     // Fallback to local
-    final accounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+    final accounts = sortAccountsByUsername(
+      await WarmupApi.getLocalAccounts(requestedPlatform),
+    );
     if (mounted && _selectedPlatform == requestedPlatform) {
       setState(() => _savedAccounts = accounts);
     }
@@ -2541,11 +2567,14 @@ class _WarmupScreenState extends State<WarmupScreen> {
           : backendAccounts.isNotEmpty
           ? backendAccounts
           : localAccounts;
-      if (accounts.isNotEmpty && mounted) {
-        setState(() => _savedAccounts = accounts);
+      final sortedAccounts = sortAccountsByUsername(accounts);
+      if (sortedAccounts.isNotEmpty && mounted) {
+        setState(() => _savedAccounts = sortedAccounts);
         // If selected account no longer exists, deselect
         if (_selectedAccount.isNotEmpty &&
-            !accounts.any((a) => (a['username'] ?? '') == _selectedAccount)) {
+            !sortedAccounts.any(
+              (a) => (a['username'] ?? '') == _selectedAccount,
+            )) {
           setState(() => _selectedAccount = '');
         }
       }
@@ -2960,8 +2989,8 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Future<void> _loadSavedAccounts() async {
     // Try backend first, fallback to local
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: _selectedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: _selectedPlatform),
       );
       if (backendAccounts.isNotEmpty && mounted) {
         if (_accountsChanged(backendAccounts)) {
@@ -2971,7 +3000,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
       }
     } catch (_) {}
     try {
-      final localAccounts = await WarmupApi.getLocalAccounts(_selectedPlatform);
+      final localAccounts = sortAccountsByUsername(
+        await WarmupApi.getLocalAccounts(_selectedPlatform),
+      );
       if (mounted && _accountsChanged(localAccounts)) {
         setState(() => _accounts = localAccounts);
       }
@@ -3042,6 +3073,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
           : backendAccounts.isNotEmpty
           ? backendAccounts
           : detectedAccounts;
+      accounts = sortAccountsByUsername(accounts);
       if (mounted) setState(() => _accounts = accounts);
 
       // Also save locally as backup, namespaced by platform.
@@ -3061,7 +3093,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
           debugLog(
             'SCAN ERROR: loaded ${backendAccounts.length} accounts from backend as fallback',
           );
-          setState(() => _accounts = backendAccounts);
+          setState(
+            () => _accounts = sortAccountsByUsername(backendAccounts),
+          );
         } else {
           final prefs = await SharedPreferences.getInstance();
           final cached = prefs.getString(
@@ -3071,10 +3105,11 @@ class _AccountsScreenState extends State<AccountsScreen> {
             debugLog(
               'SCAN ERROR: loaded accounts from local cache as fallback',
             );
-            setState(
-              () => _accounts = (jsonDecode(cached) as List)
-                  .cast<Map<String, dynamic>>(),
-            );
+            setState(() {
+              _accounts = sortAccountsByUsername(
+                (jsonDecode(cached) as List).cast<Map<String, dynamic>>(),
+              );
+            });
           }
         }
       } catch (e2) {
