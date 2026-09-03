@@ -2898,11 +2898,48 @@ class _AccountsScreenState extends State<AccountsScreen> {
   List<Map<String, dynamic>> _accounts = [];
   bool _loading = false;
   bool _cleaning = false;
+  Timer? _avatarRefreshTimer;
+  bool _avatarRefreshInFlight = false;
 
   @override
   void initState() {
     super.initState();
     _loadInitialPlatform();
+    // The backend fills profile pictures asynchronously after a scan
+    // finishes, so poll while any visible account is still missing its
+    // avatar; ticks stop doing work once every avatar has resolved.
+    _avatarRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _refreshIfAvatarsMissing();
+    });
+  }
+
+  @override
+  void dispose() {
+    _avatarRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  // Re-fetches the accounts (same path as a platform switch) only when at
+  // least one visible account has no profile picture yet.
+  Future<void> _refreshIfAvatarsMissing() async {
+    if (!mounted ||
+        _loading ||
+        _cleaning ||
+        _avatarRefreshInFlight ||
+        _accounts.isEmpty) {
+      return;
+    }
+    final missingAvatar = _accounts.any(
+      (acc) =>
+          resolveAvatarUrl(acc['profile_pic_url'] as String?, API_BASE).isEmpty,
+    );
+    if (!missingAvatar) return;
+    _avatarRefreshInFlight = true;
+    try {
+      await _loadSavedAccounts();
+    } finally {
+      _avatarRefreshInFlight = false;
+    }
   }
 
   Future<void> _loadInitialPlatform() async {
@@ -2927,15 +2964,31 @@ class _AccountsScreenState extends State<AccountsScreen> {
         platform: _selectedPlatform,
       );
       if (backendAccounts.isNotEmpty && mounted) {
-        setState(() => _accounts = backendAccounts);
+        if (_accountsChanged(backendAccounts)) {
+          setState(() => _accounts = backendAccounts);
+        }
         return;
       }
     } catch (_) {}
     try {
       final localAccounts = await WarmupApi.getLocalAccounts(_selectedPlatform);
-      if (mounted) setState(() => _accounts = localAccounts);
+      if (mounted && _accountsChanged(localAccounts)) {
+        setState(() => _accounts = localAccounts);
+      }
     } catch (e) {
       debugLog('Error loading saved accounts: $e');
+    }
+  }
+
+  // True when [next] differs from the accounts currently rendered, so the
+  // periodic avatar refresh only rebuilds when the backend actually
+  // changed something.
+  bool _accountsChanged(List<Map<String, dynamic>> next) {
+    if (next.length != _accounts.length) return true;
+    try {
+      return jsonEncode(next) != jsonEncode(_accounts);
+    } catch (_) {
+      return true;
     }
   }
 
@@ -3140,227 +3193,232 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: sfBg,
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 16),
-            Text(
-              'Accounts',
-              style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: sfTextPrimary,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _selectedPlatform == 'tiktok'
-                  ? 'Detected TikTok accounts'
-                  : _selectedPlatform == 'youtube'
-                  ? 'Detected YouTube channels'
-                  : 'Detected Instagram accounts',
-              style: const TextStyle(fontSize: 14, color: sfTextSecondary),
-            ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('Instagram'),
-                    selected: _selectedPlatform == 'instagram',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'instagram'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'instagram',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'instagram';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('YouTube'),
-                    selected: _selectedPlatform == 'youtube',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'youtube'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'youtube',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'youtube';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('TikTok'),
-                    selected: _selectedPlatform == 'tiktok',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'tiktok',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'tiktok';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            // Always-visible scan button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _loading || _cleaning ? null : _loadAccounts,
-                icon: const Icon(Icons.search),
-                label: const Text('Scan accounts'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: sfGreen,
-                  foregroundColor: Colors.black,
+      body: RefreshIndicator(
+        color: sfGreen,
+        backgroundColor: sfCard,
+        onRefresh: _loadSavedAccounts,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 16),
+              Text(
+                'Accounts',
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: sfTextPrimary,
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _loading || _cleaning
-                    ? null
-                    : _showCleanAccountsDialog,
-                icon: const Icon(Icons.delete_sweep_outlined),
-                label: Text(
-                  _cleaning ? 'Cleaning accounts…' : 'Clean accounts',
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.redAccent,
-                  side: const BorderSide(color: Colors.redAccent),
-                ),
+              const SizedBox(height: 4),
+              Text(
+                _selectedPlatform == 'tiktok'
+                    ? 'Detected TikTok accounts'
+                    : _selectedPlatform == 'youtube'
+                    ? 'Detected YouTube channels'
+                    : 'Detected Instagram accounts',
+                style: const TextStyle(fontSize: 14, color: sfTextSecondary),
               ),
-            ),
-            const SizedBox(height: 16),
-            if (_loading)
-              const Center(child: CircularProgressIndicator(color: sfGreen))
-            else if (_accounts.isEmpty)
-              Center(
-                child: Column(
-                  children: [
-                    Icon(
-                      Icons.person_outline,
-                      size: 48,
-                      color: sfTextSecondary,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'No accounts found',
-                      style: TextStyle(color: sfTextSecondary, fontSize: 16),
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      onPressed: _loadAccounts,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Scan'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: sfGreen,
-                        foregroundColor: Colors.black,
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('Instagram'),
+                      selected: _selectedPlatform == 'instagram',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
+                        color: _selectedPlatform == 'instagram'
+                            ? Colors.black
+                            : sfTextSecondary,
                       ),
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'instagram',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'instagram';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
                     ),
-                  ],
-                ),
-              )
-            else
-              ..._accounts.map((acc) {
-                final username = acc['username'] ?? acc.toString();
-                final picUrl = acc['profile_pic_url'] ?? '';
-                final avatarUrl = resolveAvatarUrl(
-                  picUrl as String?,
-                  API_BASE,
-                );
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: sfCard,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: sfBorder),
                   ),
-                  child: Row(
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('YouTube'),
+                      selected: _selectedPlatform == 'youtube',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
+                        color: _selectedPlatform == 'youtube'
+                            ? Colors.black
+                            : sfTextSecondary,
+                      ),
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'youtube',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'youtube';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('TikTok'),
+                      selected: _selectedPlatform == 'tiktok',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
+                        color: _selectedPlatform == 'tiktok'
+                            ? Colors.black
+                            : sfTextSecondary,
+                      ),
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'tiktok',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'tiktok';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              // Always-visible scan button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _loading || _cleaning ? null : _loadAccounts,
+                  icon: const Icon(Icons.search),
+                  label: const Text('Scan accounts'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: sfGreen,
+                    foregroundColor: Colors.black,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _loading || _cleaning
+                      ? null
+                      : _showCleanAccountsDialog,
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  label: Text(
+                    _cleaning ? 'Cleaning accounts…' : 'Clean accounts',
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(color: Colors.redAccent),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              if (_loading)
+                const Center(child: CircularProgressIndicator(color: sfGreen))
+              else if (_accounts.isEmpty)
+                Center(
+                  child: Column(
                     children: [
-                      avatarUrl.isNotEmpty
-                          ? CircleAvatar(
-                              radius: 20,
-                              backgroundColor: sfGreen.withValues(alpha: 0.2),
-                              backgroundImage: NetworkImage(avatarUrl),
-                            )
-                          : CircleAvatar(
-                              radius: 20,
-                              backgroundColor: sfGreen.withValues(alpha: 0.2),
-                              child: Icon(Icons.person, color: sfGreen),
-                            ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          '@$username',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: sfTextPrimary,
-                          ),
+                      Icon(
+                        Icons.person_outline,
+                        size: 48,
+                        color: sfTextSecondary,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'No accounts found',
+                        style: TextStyle(color: sfTextSecondary, fontSize: 16),
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton.icon(
+                        onPressed: _loadAccounts,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Scan'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: sfGreen,
+                          foregroundColor: Colors.black,
                         ),
                       ),
-                      PlatformLogo(platform: _selectedPlatform, size: 24),
                     ],
                   ),
-                );
-              }),
-          ],
+                )
+              else
+                ..._accounts.map((acc) {
+                  final username = acc['username'] ?? acc.toString();
+                  final picUrl = acc['profile_pic_url'] ?? '';
+                  final avatarUrl = resolveAvatarUrl(
+                    picUrl as String?,
+                    API_BASE,
+                  );
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: sfCard,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: sfBorder),
+                    ),
+                    child: Row(
+                      children: [
+                        avatarUrl.isNotEmpty
+                            ? CircleAvatar(
+                                radius: 20,
+                                backgroundColor: sfGreen.withValues(alpha: 0.2),
+                                backgroundImage: NetworkImage(avatarUrl),
+                              )
+                            : CircleAvatar(
+                                radius: 20,
+                                backgroundColor: sfGreen.withValues(alpha: 0.2),
+                                child: Icon(Icons.person, color: sfGreen),
+                              ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            '@$username',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: sfTextPrimary,
+                            ),
+                          ),
+                        ),
+                        PlatformLogo(platform: _selectedPlatform, size: 24),
+                      ],
+                    ),
+                  );
+                }),
+            ],
+          ),
         ),
       ),
     );

@@ -4310,11 +4310,12 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             //   - Children include a View with text=username
             debugLog("Step 5: Extracting accounts from switcher...")
             var passesWithoutNew = 0
-            for (pass in 1..8) {
-                if (pass > 1) Thread.sleep(600)
+            val consolidationStartMs = System.currentTimeMillis()
+            for (pass in 1..14) {
+                if (pass > 1) Thread.sleep(700)
                 val switcherRoot = getInstagramRoot()
                 if (switcherRoot == null) {
-                    debugLog("Switcher pass $pass: root null")
+                    debugLog("Switcher pass $pass (${System.currentTimeMillis() - consolidationStartMs}ms): root null")
                     continue
                 }
                 if (pass == 1) debugLog("Switcher pkg=${switcherRoot.packageName}")
@@ -4328,15 +4329,20 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                         added++
                     }
                 }
+                val elapsedMs = System.currentTimeMillis() - consolidationStartMs
                 if (added > 0) {
                     passesWithoutNew = 0
-                    debugLog("Switcher pass $pass: +$added new account(s), total=${accounts.size}")
+                    debugLog("Switcher pass $pass (${elapsedMs}ms): +$added new, total=${accounts.size}")
                 } else {
                     passesWithoutNew++
-                    debugLog("Switcher pass $pass: no new accounts (total=${accounts.size})")
+                    debugLog("Switcher pass $pass (${elapsedMs}ms): +0 new, total=${accounts.size}")
                 }
-                if (accounts.isNotEmpty() && passesWithoutNew >= 2) {
-                    debugLog("Switcher list stabilized after $pass passes")
+                // Early exit requires BOTH: 3 consecutive passes with no new
+                // accounts AND at least 5s elapsed, so late-rendering rows
+                // (e.g. a 4th account whose notification badge loads slowly
+                // after a cold start) still make it into the final list.
+                if (passesWithoutNew >= 3 && elapsedMs >= 5000L) {
+                    debugLog("Switcher list stabilized after $pass passes (${elapsedMs}ms)")
                     break
                 }
             }
@@ -4487,51 +4493,93 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         accounts: MutableList<String>,
         verbose: Boolean = false
     ) {
-        val desc = node.contentDescription?.toString()?.trim() ?: ""
-        // Instagram changes the metadata suffix depending on the account:
-        // "username", "username, 14 chats", "username, 1 chat and 3 more"
-        // and even "username, 1 follow and 5 more" have all appeared. The
-        // stable signal is the account row itself: a clickable ViewGroup with
-        // either selected=true (the active account) or row metadata after the
-        // username. Do not accept arbitrary clickable labels from the profile
-        // screen, such as follower/following counts.
-        val className = node.className?.toString().orEmpty()
-        val hasRowMetadata = desc.contains(",")
-        val isAccountRow = node.isClickable &&
-            className.endsWith("ViewGroup") &&
-            desc.isNotEmpty() &&
-            (node.isSelected || hasRowMetadata)
-        if (isAccountRow) {
-            // Extract the username from the part before optional row metadata.
-            val username = desc.substringBefore(",").trim()
-            if (username.length in 3..30 &&
-                username.matches(Regex("[a-z0-9._]+")) &&
-                username.any { it.isLetter() } &&
-                !ignoreTexts.any { it.equals(username, ignoreCase = true) }) {
-                if (!accounts.any { it.equals(username, ignoreCase = true) }) {
-                    accounts.add(username)
-                    debugLog("  Found REAL account: $username selected=${node.isSelected} desc=\"$desc\"")
-                } else if (verbose) {
-                    debugLog("  Switcher row duplicate: username=\"$username\" desc=\"$desc\"")
-                }
-                return // Don't recurse into this node's children
-            }
-            if (verbose) {
-                debugLog(
-                    "  Switcher row rejected: desc=\"$desc\" clickable=${node.isClickable} " +
-                        "selected=${node.isSelected} class=$className pattern=no-match"
-                )
-            }
-        } else if (verbose && desc.isNotEmpty()) {
-            debugLog(
-                "  Switcher row rejected: desc=\"$desc\" clickable=${node.isClickable} " +
-                    "selected=${node.isSelected} class=$className pattern=no-row"
-            )
+        // Username validation shared by both tiers (same rules as before):
+        // length, lowercase charset, at least one letter, and not one of the
+        // known non-account labels.
+        fun isValidSwitcherUsername(raw: String): Boolean {
+            return raw.length in 3..30 &&
+                raw.matches(Regex("[a-z0-9._]+")) &&
+                raw.any { it.isLetter() } &&
+                ignoreTexts.none { it.equals(raw, ignoreCase = true) }
         }
 
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            findSwitcherAccountsStrict(child, accounts, verbose)
+        // One tree walk per tier. The row shape is the same for both (a
+        // clickable ViewGroup with a content-desc); what differs is which
+        // content-descs count as an account.
+        fun walk(n: AccessibilityNodeInfo, tier: Int) {
+            val desc = n.contentDescription?.toString()?.trim() ?: ""
+            // Instagram changes the metadata suffix depending on the account:
+            // "username", "username, 14 chats", "username, 1 chat and 3 more"
+            // and even "username, 1 follow and 5 more" have all appeared. An
+            // account without pending chats/notifications carries a bare
+            // username with no suffix at all. Do not accept arbitrary
+            // clickable labels from the profile screen, such as
+            // follower/following counts.
+            val className = n.className?.toString().orEmpty()
+            val hasRowMetadata = desc.contains(",")
+            val isAccountRow = n.isClickable &&
+                className.endsWith("ViewGroup") &&
+                desc.isNotEmpty() &&
+                when (tier) {
+                    // TIER 1: the active account (selected=true) or rows that
+                    // carry metadata after the username ("username, N chats",
+                    // "username, N likes and X more", "username, N
+                    // notifications"). The active account is ALWAYS selected,
+                    // so a real switcher always yields at least one Tier 1 row.
+                    1 -> n.isSelected || hasRowMetadata
+                    // TIER 2: a bare desc that is EXACTLY a valid username
+                    // (e.g. "growtech.news" with no pending chats or
+                    // notifications). On its own it is indistinguishable from
+                    // profile-screen labels, so this tier is only walked once
+                    // Tier 1 proved we are really on the switcher.
+                    else -> !n.isSelected && !hasRowMetadata &&
+                        isValidSwitcherUsername(desc)
+                }
+            if (isAccountRow) {
+                // Extract the username from the part before optional row metadata.
+                val username = desc.substringBefore(",").trim()
+                if (isValidSwitcherUsername(username)) {
+                    if (!accounts.any { it.equals(username, ignoreCase = true) }) {
+                        accounts.add(username)
+                        if (tier == 1) {
+                            debugLog("  Found REAL account: $username selected=${n.isSelected} desc=\"$desc\"")
+                        } else {
+                            debugLog("Found account (bare desc): $username")
+                        }
+                    } else if (verbose) {
+                        debugLog("  Switcher row duplicate: username=\"$username\" desc=\"$desc\"")
+                    }
+                    return // Don't recurse into this node's children
+                }
+                if (verbose && tier == 1) {
+                    debugLog(
+                        "  Switcher row rejected: desc=\"$desc\" clickable=${n.isClickable} " +
+                            "selected=${n.isSelected} class=$className pattern=no-match"
+                    )
+                }
+            } else if (verbose && tier == 1 && desc.isNotEmpty()) {
+                // Rejections are only traced during the Tier 1 pass so the
+                // second (bare-username) pass does not duplicate them.
+                debugLog(
+                    "  Switcher row rejected: desc=\"$desc\" clickable=${n.isClickable} " +
+                        "selected=${n.isSelected} class=$className pattern=no-row"
+                )
+            }
+
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                walk(child, tier)
+            }
+        }
+
+        // Pass 1: rows that self-identify as accounts (selected or with
+        // metadata in the desc).
+        walk(node, tier = 1)
+        // Pass 2: bare username rows, accepted only if Tier 1 already found
+        // at least one row. Zero Tier 1 rows means we are probably NOT on the
+        // switcher, so nothing bare gets accepted.
+        if (accounts.isNotEmpty()) {
+            walk(node, tier = 2)
         }
     }
 
