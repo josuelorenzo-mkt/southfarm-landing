@@ -2358,16 +2358,17 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                     }
                 }
                 val profile = findNodeByDesc(root, "Profile", minY = screenHeight - 220)
+                    ?: findNodeByDesc(root, "Perfil", minY = screenHeight - 220)
                     ?: findNodeByText(root, "Profile")
                 if (profile != null && clickNode(profile)) {
                     root.recycle()
                     Log.e(TAG, "TikTok Profile opened on semantic attempt ${attempt + 1}")
-                    Thread.sleep(1800)
+                    Thread.sleep(1200)
                     return true
                 }
                 root.recycle()
             }
-            Thread.sleep(1000)
+            Thread.sleep(600)
         }
         Log.e(TAG, "TikTok Profile semantic control unavailable after retries")
         return false
@@ -3975,28 +3976,6 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         return openYouTubeAccounts()
     }
 
-    private fun scanInactiveYouTubeAccounts(
-        channels: MutableList<YouTubeChannelRecord>,
-        candidates: List<YouTubeAccountCandidate>,
-    ) {
-        for (candidate in candidates) {
-            if (!switchYouTubeAccountForScan(candidate)) continue
-
-            SouthFarmLoadingService.showLoading("Checking ${candidate.name}...")
-            if (!openYouTubeAccountsForScan()) {
-                Log.e(TAG, "YouTube account scan: could not reopen Accounts for ${candidate.name}")
-                continue
-            }
-
-            val accountRoot = getYouTubeRoot()
-            if (accountRoot != null) {
-                extractYouTubeChannels(accountRoot, channels)
-                accountRoot.recycle()
-            }
-            closeYouTubeAccounts()
-        }
-    }
-
     private fun restoreYouTubeSelectionAfterScan(
         selection: YouTubeSelectedChannel?
     ) {
@@ -4068,7 +4047,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             debugLog("TikTok scan: opening app")
             if (!openTikTok()) return accounts
-            Thread.sleep(3500)
+            // Wait bounded for TikTok to reach the foreground instead of
+            // paying a fixed 3.5s sleep; navigateTikTokToProfile's retry
+            // loop absorbs any remaining wait if the app is slow to start.
+            for (i in 0 until 12) {
+                if (getTikTokRoot() != null) break
+                Thread.sleep(500)
+            }
 
             debugLog("TikTok scan: opening Profile semantically")
             if (!navigateTikTokToProfile()) return accounts
@@ -4155,21 +4140,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             SouthFarmLoadingService.showLoading("Detecting YouTube channels...")
 
             val popupRoot = getYouTubeRoot() ?: return channels
-            val originalSelection = findYouTubeSelectedChannelInfo(popupRoot)
-            val inactiveAccounts = findYouTubeInactiveAccountCandidates(popupRoot)
             extractYouTubeChannels(popupRoot, channels)
             popupRoot.recycle()
-            debugLog(
-                "YouTube scan: active channels=${channels.size}, " +
-                    "inactive Google accounts=${inactiveAccounts.map { it.name }}"
-            )
-
-            // YouTube only exposes @handles for the currently selected
-            // Google account. Visit each inactive account that advertises a
-            // subscriber line so channels such as @MarczellWisdom are also
-            // materialized in the accessibility tree.
-            scanInactiveYouTubeAccounts(channels, inactiveAccounts)
-            restoreYouTubeSelectionAfterScan(originalSelection)
+            debugLog("YouTube scan: channels=${channels.size}")
             debugLog(
                 "YOUTUBE CHANNEL SCAN RESULT: ${channels.size} channels -> " +
                     channels.map { "@${it.handle}(${it.sourceAccountName})" },
