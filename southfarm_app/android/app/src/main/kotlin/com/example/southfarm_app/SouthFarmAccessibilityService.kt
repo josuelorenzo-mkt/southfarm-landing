@@ -3976,6 +3976,28 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         return openYouTubeAccounts()
     }
 
+    private fun scanInactiveYouTubeAccounts(
+        channels: MutableList<YouTubeChannelRecord>,
+        candidates: List<YouTubeAccountCandidate>,
+    ) {
+        for (candidate in candidates) {
+            if (!switchYouTubeAccountForScan(candidate)) continue
+
+            SouthFarmLoadingService.showLoading("Checking ${candidate.name}...")
+            if (!openYouTubeAccountsForScan()) {
+                Log.e(TAG, "YouTube account scan: could not reopen Accounts for ${candidate.name}")
+                continue
+            }
+
+            val accountRoot = getYouTubeRoot()
+            if (accountRoot != null) {
+                extractYouTubeChannels(accountRoot, channels)
+                accountRoot.recycle()
+            }
+            closeYouTubeAccounts()
+        }
+    }
+
     private fun restoreYouTubeSelectionAfterScan(
         selection: YouTubeSelectedChannel?
     ) {
@@ -4140,9 +4162,21 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             SouthFarmLoadingService.showLoading("Detecting YouTube channels...")
 
             val popupRoot = getYouTubeRoot() ?: return channels
+            val originalSelection = findYouTubeSelectedChannelInfo(popupRoot)
+            val inactiveAccounts = findYouTubeInactiveAccountCandidates(popupRoot)
             extractYouTubeChannels(popupRoot, channels)
             popupRoot.recycle()
-            debugLog("YouTube scan: channels=${channels.size}")
+            debugLog(
+                "YouTube scan: active channels=${channels.size}, " +
+                    "inactive Google accounts=${inactiveAccounts.map { it.name }}"
+            )
+
+            // YouTube only exposes @handles for the currently selected
+            // Google account. Visit each inactive account that advertises a
+            // subscriber line so channels such as @MarczellWisdom are also
+            // materialized in the accessibility tree.
+            scanInactiveYouTubeAccounts(channels, inactiveAccounts)
+            restoreYouTubeSelectionAfterScan(originalSelection)
             debugLog(
                 "YOUTUBE CHANNEL SCAN RESULT: ${channels.size} channels -> " +
                     channels.map { "@${it.handle}(${it.sourceAccountName})" },

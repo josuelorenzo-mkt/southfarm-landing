@@ -14,6 +14,7 @@ import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
+import { ensureAvatarStored, fetchInstagramProfilePicUrl, registerAvatarRoutes } from './avatars.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup, type PlannerDeps } from './activity-planner.js';
 import { signSouthFarmJwt, verifySouthFarmJwt, JWT_SECRET } from './jwt-config.js';
@@ -3951,22 +3952,19 @@ app.patch('/api/tasks/runs/:id', auth, requireRole('owner', 'admin', 'operator')
 });
 
 // ─── IG Accounts (per device) ───
-// ─── Scrape IG profile pic ───
+// ─── Avatar serving + profile-photo pipeline ───
+// Local mirror of the scanned profile photos lives in backend/src/avatars.ts:
+// GET /api/avatars/:filename serves data/avatars/ with a long cache, and
+// ensureAvatarStored() scrapes + downloads a photo for any platform. Registered
+// without auth because clients render these paths directly in <img> tags.
+registerAvatarRoutes(app);
+
+// Legacy Instagram-only scrape kept for the /api/ig-accounts endpoints, which
+// continue to store the CDN URL exactly as before; the implementation now
+// delegates to the shared avatar module so the og:image handling lives in one
+// place.
 function fetchProfilePicUrl(username: string): Promise<string> {
-  return new Promise((resolve) => {
-    const url = `https://www.instagram.com/${username}/`;
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
-      let html = '';
-      res.on('data', (chunk: Buffer) => { html += chunk.toString(); });
-      res.on('end', () => {
-        const match = html.match(/og:image[^>]*content="([^"]+)"/);
-        const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
-        resolve(picUrl);
-      });
-    });
-    req.setTimeout(8000, () => { req.destroy(); resolve(''); });
-    req.on('error', () => resolve(''));
-  });
+  return fetchInstagramProfilePicUrl(username);
 }
 
 app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), async (req: any, res) => {
@@ -4050,6 +4048,16 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
 
+  // Snapshot the photo pointers of the rows about to be wiped by the DELETE
+  // below, so a rescan never loses them. Values may be local /api/avatars/...
+  // paths or absolute CDN URLs stored by older builds — both are used verbatim.
+  const previousPicUrls = new Map<string, string>();
+  for (const row of db.prepare(
+    'SELECT username, profile_pic_url FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?'
+  ).all(dataUserId, numericDeviceId, platform) as Array<{ username: string; profile_pic_url: string }>) {
+    if (row.profile_pic_url) previousPicUrls.set(String(row.username), row.profile_pic_url);
+  }
+
   db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
     .run(dataUserId, numericDeviceId, platform);
   const insert = db.prepare(
@@ -4058,7 +4066,11 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
        display_name, source_account_name, source_account_email, byline)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
+  const updatePicUrl = db.prepare(
+    'UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?'
+  );
   let insertedCount = 0;
+  const accountsWithoutPic = new Set<string>();
   for (const rawAccount of rawAccounts) {
     const account = rawAccount && typeof rawAccount === 'object'
       ? rawAccount
@@ -4077,14 +4089,33 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
       String(account.source_account_email || ''),
       String(account.byline || ''),
     ).changes || 0);
-    if (platform === 'instagram' && !picUrl) {
-      void fetchProfilePicUrl(username).then((profilePicUrl) => {
-        if (!profilePicUrl) return;
-        db.prepare('UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?')
-          .run(profilePicUrl, dataUserId, numericDeviceId, platform, username);
-      }).catch(() => {});
-    }
+    if (!picUrl) accountsWithoutPic.add(username);
   }
+  // Re-attach photos that survived a previous scan (local data only, no
+  // network, so it happens before the response is sent); the accounts still
+  // left without a photo go through the async avatar pipeline below.
+  const accountsStillWithoutPic = [...accountsWithoutPic].filter((username) => {
+    const previous = previousPicUrls.get(username);
+    if (!previous) return true;
+    updatePicUrl.run(previous, dataUserId, numericDeviceId, platform, username);
+    return false;
+  });
+  // Best-effort avatar pipeline for everything still without a photo, now for
+  // all platforms (Instagram, TikTok, YouTube) and not just Instagram: fetch
+  // the profile page, download the image once into data/avatars/ and store the
+  // local /api/avatars/... path. Runs after the inserts without blocking the
+  // response, and skips the external scrape when the file already exists.
+  void (async () => {
+    for (const username of accountsStillWithoutPic) {
+      try {
+        const storedUrl = await ensureAvatarStored(platform, username);
+        if (!storedUrl) continue;
+        updatePicUrl.run(storedUrl, dataUserId, numericDeviceId, platform, username);
+      } catch {
+        // Best-effort: leave profile_pic_url empty and move on.
+      }
+    }
+  })();
   const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), platform, {
     accountsFound: insertedCount,
     status: req.body.scan_status,

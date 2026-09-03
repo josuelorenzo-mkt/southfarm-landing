@@ -82,6 +82,117 @@ class InstagramLogo extends StatelessWidget {
   }
 }
 
+// Resolves an avatar URL coming from the backend: absolute CDN URLs are
+// kept as-is, while new relative paths like /api/avatars/x.jpg are
+// resolved against the API base.
+String resolveAvatarUrl(String? picUrl, String apiBase) {
+  final url = (picUrl ?? '').trim();
+  if (url.isEmpty) return '';
+  if (url.startsWith('http')) return url;
+  if (url.startsWith('/')) return '$apiBase$url';
+  return url;
+}
+
+// ─── Platform Logo Widget ───
+class PlatformLogo extends StatelessWidget {
+  final String platform;
+  final double size;
+  const PlatformLogo({super.key, required this.platform, this.size = 24});
+
+  @override
+  Widget build(BuildContext context) {
+    switch (platform) {
+      case 'youtube':
+        return CustomPaint(
+          size: Size.square(size),
+          painter: _YouTubeLogoPainter(),
+        );
+      case 'instagram':
+        return CustomPaint(
+          size: Size.square(size),
+          painter: _InstagramLogoPainter(),
+        );
+      case 'tiktok':
+        // Keep the exact look the owner already recognizes as the TikTok
+        // logo (white music note).
+        return Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          child: Icon(Icons.music_note, color: Colors.white, size: size),
+        );
+      default:
+        return Icon(Icons.camera_alt, size: size);
+    }
+  }
+}
+
+// Paints the Instagram camera glyph — rounded square outline with the
+// brand gradient, concentric lens circle and top-right dot — without
+// image assets.
+class _InstagramLogoPainter extends CustomPainter {
+  static const List<Color> _brand = [
+    Color(0xFFF58529),
+    Color(0xFFDD2A7B),
+    Color(0xFF8134AF),
+    Color(0xFFF7B500),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final stroke = (w * 0.09).clamp(1.5, 3.0).toDouble();
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..shader = SweepGradient(
+        colors: [..._brand, _brand.first],
+      ).createShader(Rect.fromLTWH(0, 0, w, w));
+    final rect = Rect.fromLTWH(stroke / 2, stroke / 2, w - stroke, w - stroke);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(w * 0.26)),
+      paint,
+    );
+    canvas.drawCircle(rect.center, w * 0.20, paint);
+    canvas.drawCircle(
+      Offset(w * 0.77, w * 0.23),
+      w * 0.06,
+      Paint()..color = const Color(0xFFDD2A7B),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _InstagramLogoPainter oldDelegate) => false;
+}
+
+// Paints the YouTube play-button mark — red rounded rectangle with a
+// centered white triangle — without image assets.
+class _YouTubeLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final rect = Rect.fromLTWH(0, h * 0.16, w, h * 0.68);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(w * 0.24)),
+      Paint()..color = const Color(0xFFFF0000),
+    );
+    final center = rect.center;
+    final t = w * 0.16;
+    final path =
+        Path()
+          ..moveTo(center.dx - t * 0.7, center.dy - t)
+          ..lineTo(center.dx + t, center.dy)
+          ..lineTo(center.dx - t * 0.7, center.dy + t)
+          ..close();
+    canvas.drawPath(path, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant _YouTubeLogoPainter oldDelegate) => false;
+}
+
 // ─── SouthFarm Logo Widget ───
 class SouthFarmLogo extends StatelessWidget {
   final double fontSize;
@@ -248,12 +359,13 @@ class WarmupApi {
               account['username'] = (account['username'] ?? '')
                   .toString()
                   .replaceFirst(RegExp(r'^@'), '');
-              account['profile_pic_url'] = account['profile_pic_url'] ?? '';
+              // Do NOT inject a default profile_pic_url here: an empty value
+              // must not clobber the backend's URL during merge (backend is
+              // the source of truth for avatars).
               return account;
             }
             return <String, dynamic>{
               'username': item.toString().replaceFirst(RegExp(r'^@'), ''),
-              'profile_pic_url': '',
             };
           })
           .where((item) => (item['username'] as String).isNotEmpty)
@@ -293,6 +405,18 @@ class WarmupApi {
         ...(byUsername[username] ?? <String, dynamic>{}),
         ...account,
       };
+      // Profile pictures are the exception: the backend is the source of
+      // truth, and a locally cached entry may carry an empty value that
+      // must not clobber a valid backend URL.
+      if ((value['profile_pic_url'] ?? '').toString().trim().isEmpty) {
+        final backendPic =
+            (byUsername[username]?['profile_pic_url'] ?? '')
+                .toString()
+                .trim();
+        if (backendPic.isNotEmpty) {
+          value['profile_pic_url'] = backendPic;
+        }
+      }
       value['username'] = (value['username'] ?? username)
           .toString()
           .replaceFirst(RegExp(r'^@'), '');
@@ -2446,12 +2570,13 @@ class _WarmupScreenState extends State<WarmupScreen> {
             ..._savedAccounts.map((acc) {
               final username = (acc['username'] ?? '') as String;
               final picUrl = (acc['profile_pic_url'] ?? '') as String;
+              final avatarUrl = resolveAvatarUrl(picUrl, API_BASE);
               final selected = username == _selectedAccount;
               return ListTile(
-                leading: picUrl.isNotEmpty
+                leading: avatarUrl.isNotEmpty
                     ? CircleAvatar(
                         radius: 18,
-                        backgroundImage: NetworkImage(picUrl),
+                        backgroundImage: NetworkImage(avatarUrl),
                         backgroundColor: sfGreen.withValues(alpha: 0.2),
                       )
                     : CircleAvatar(
@@ -2466,17 +2591,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     fontWeight: selected ? FontWeight.bold : FontWeight.normal,
                   ),
                 ),
-                trailing: Icon(
-                  _selectedPlatform == 'tiktok'
-                      ? Icons.music_note
-                      : _selectedPlatform == 'youtube'
-                      ? Icons.smart_display
-                      : Icons.camera_alt,
-                  color: _selectedPlatform == 'tiktok'
-                      ? Colors.white
-                      : _selectedPlatform == 'youtube'
-                      ? Colors.redAccent
-                      : null,
+                trailing: PlatformLogo(
+                  platform: _selectedPlatform,
+                  size: 24,
                 ),
                 onTap: () {
                   setState(() => _selectedAccount = username);
@@ -2602,10 +2719,14 @@ class _WarmupScreenState extends State<WarmupScreen> {
                                   );
                               final picUrl =
                                   (acc['profile_pic_url'] ?? '') as String;
-                              return picUrl.isNotEmpty
+                              final avatarUrl = resolveAvatarUrl(
+                                picUrl,
+                                API_BASE,
+                              );
+                              return avatarUrl.isNotEmpty
                                   ? CircleAvatar(
                                       radius: 14,
-                                      backgroundImage: NetworkImage(picUrl),
+                                      backgroundImage: NetworkImage(avatarUrl),
                                     )
                                   : const Icon(
                                       Icons.person,
@@ -2628,18 +2749,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                       ),
                     ),
                     const Spacer(),
-                    Icon(
-                      _selectedPlatform == 'tiktok'
-                          ? Icons.music_note
-                          : _selectedPlatform == 'youtube'
-                          ? Icons.smart_display
-                          : Icons.camera_alt,
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.white
-                          : _selectedPlatform == 'youtube'
-                          ? Colors.redAccent
-                          : null,
-                    ),
+                    PlatformLogo(platform: _selectedPlatform, size: 24),
                     const SizedBox(width: 8),
                     const Icon(Icons.chevron_right, color: sfTextSecondary),
                   ],
@@ -3205,6 +3315,10 @@ class _AccountsScreenState extends State<AccountsScreen> {
               ..._accounts.map((acc) {
                 final username = acc['username'] ?? acc.toString();
                 final picUrl = acc['profile_pic_url'] ?? '';
+                final avatarUrl = resolveAvatarUrl(
+                  picUrl as String?,
+                  API_BASE,
+                );
                 return Container(
                   margin: const EdgeInsets.only(bottom: 12),
                   padding: const EdgeInsets.all(16),
@@ -3215,11 +3329,11 @@ class _AccountsScreenState extends State<AccountsScreen> {
                   ),
                   child: Row(
                     children: [
-                      picUrl.isNotEmpty
+                      avatarUrl.isNotEmpty
                           ? CircleAvatar(
                               radius: 20,
                               backgroundColor: sfGreen.withValues(alpha: 0.2),
-                              backgroundImage: NetworkImage(picUrl),
+                              backgroundImage: NetworkImage(avatarUrl),
                             )
                           : CircleAvatar(
                               radius: 20,
@@ -3237,18 +3351,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
                           ),
                         ),
                       ),
-                      Icon(
-                        _selectedPlatform == 'tiktok'
-                            ? Icons.music_note
-                            : _selectedPlatform == 'youtube'
-                            ? Icons.smart_display
-                            : Icons.camera_alt,
-                        color: _selectedPlatform == 'tiktok'
-                            ? Colors.white
-                            : _selectedPlatform == 'youtube'
-                            ? Colors.redAccent
-                            : null,
-                      ),
+                      PlatformLogo(platform: _selectedPlatform, size: 24),
                     ],
                   ),
                 );
