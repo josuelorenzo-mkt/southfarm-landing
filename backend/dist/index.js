@@ -2509,7 +2509,7 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
         || accountKeyFor(device.user_id, Number(device.id), socialAccount?.platform || platform, account);
     const source = req.body.source === 'automatic' ? 'automatic' : 'manual';
     const durationFromBody = req.body.duration_seconds ?? paramsObject.duration_seconds;
-    const durationFromMinutes = paramsObject.duration_minutes;
+    const durationFromMinutes = paramsObject.duration_minutes ?? req.body.duration_minutes;
     const plannedDurationSeconds = durationFromBody !== undefined
         ? numberValue(durationFromBody)
         : durationFromMinutes !== undefined
