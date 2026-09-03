@@ -2766,24 +2766,6 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: ChoiceChip(
-                    label: const Text('TikTok'),
-                    selected: _selectedPlatform == 'tiktok',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _isRunning
-                        ? null
-                        : (_) => _selectPlatform('tiktok'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
                     label: const Text('YouTube'),
                     selected: _selectedPlatform == 'youtube',
                     selectedColor: sfGreen,
@@ -2797,6 +2779,24 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     onSelected: _isRunning
                         ? null
                         : (_) => _selectPlatform('youtube'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Text('TikTok'),
+                    selected: _selectedPlatform == 'tiktok',
+                    selectedColor: sfGreen,
+                    backgroundColor: sfCard,
+                    side: const BorderSide(color: sfBorder),
+                    labelStyle: TextStyle(
+                      color: _selectedPlatform == 'tiktok'
+                          ? Colors.black
+                          : sfTextSecondary,
+                    ),
+                    onSelected: _isRunning
+                        ? null
+                        : (_) => _selectPlatform('tiktok'),
                   ),
                 ),
               ],
@@ -3210,8 +3210,8 @@ class _AccountsScreenState extends State<AccountsScreen> {
     final selected = <String>{_selectedPlatform};
     final platforms = const [
       ('instagram', 'Instagram'),
-      ('tiktok', 'TikTok'),
       ('youtube', 'YouTube'),
+      ('tiktok', 'TikTok'),
     ];
     final confirmed = await showDialog<List<String>>(
       context: context,
