@@ -1946,8 +1946,9 @@ export function registerActivityPlanner(app: Express, deps: PlannerDeps): void {
             ? null
             : clusterNames.get(Number(row.cluster_id)) || null,
         ));
+      // Día completo: 0..23 (la web muestra las 24 hs con scroll).
       const hourly: Array<{ hour: number; count: number }> = [];
-      for (let hour = 12; hour <= 22; hour += 1) {
+      for (let hour = 0; hour <= 23; hour += 1) {
         hourly.push({ hour, count: tasks.filter((task) => baHourOfDay(task.scheduledFor) === hour).length });
       }
       // Single queue: the workspace's publication_jobs whose date key
