@@ -606,6 +606,24 @@ class WarmupApi {
             : 'Could not clean scanned accounts',
       );
     }
+    // The backend wiped these accounts: also drop the local cache and the
+    // last-account preference per platform, otherwise the warmup screen keeps
+    // showing a deleted account in the collapsed row. Key mapping mirrors
+    // _lastAccountKey in the warmup screen state.
+    final prefs = await SharedPreferences.getInstance();
+    for (final platform in platforms) {
+      await prefs.remove(_accountCacheKey(platform));
+      switch (platform) {
+        case 'tiktok':
+          await prefs.remove('last_tiktok_account');
+          break;
+        case 'youtube':
+          await prefs.remove('last_youtube_channel');
+          break;
+        default:
+          await prefs.remove('last_account');
+      }
+    }
     return data is Map<String, dynamic>
         ? data
         : Map<String, dynamic>.from(data as Map);
@@ -2057,20 +2075,38 @@ class _WarmupScreenState extends State<WarmupScreen> {
     }
     final saved = prefs.getString(_lastAccountKey(requestedPlatform)) ?? '';
     if (requestedPlatform != 'instagram') {
-      final localAccounts = sortAccountsByUsername(
-        await WarmupApi.getLocalAccounts(requestedPlatform),
-      );
+      // Same data strategy as _showAccountPicker: merge the local cache with
+      // the backend so the collapsed row also gets profile pictures and does
+      // not show stale entries that no longer exist remotely.
+      final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      var accounts = localAccounts;
+      try {
+        final backendAccounts = await WarmupApi.getAccountsFromBackend(
+          platform: requestedPlatform,
+        );
+        if (requestedPlatform == 'youtube') {
+          accounts = WarmupApi.mergeAccountMetadata(
+            localAccounts,
+            backendAccounts,
+          );
+        } else if (backendAccounts.isNotEmpty) {
+          accounts = backendAccounts;
+        }
+      } catch (_) {
+        // Backend unreachable: keep the local cache only.
+      }
+      final sortedAccounts = sortAccountsByUsername(accounts);
       if (mounted && _selectedPlatform == requestedPlatform) {
         final savedAccount = saved.replaceFirst(RegExp(r'^@'), '');
         final selected =
-            localAccounts.any((a) => (a['username'] ?? '') == savedAccount)
+            sortedAccounts.any((a) => (a['username'] ?? '') == savedAccount)
             ? savedAccount
-            : (localAccounts.isNotEmpty
-                  ? (localAccounts.first['username'] ?? '').toString()
+            : (sortedAccounts.isNotEmpty
+                  ? (sortedAccounts.first['username'] ?? '').toString()
                   : '');
         setState(() {
           _selectedAccount = selected;
-          _savedAccounts = localAccounts;
+          _savedAccounts = sortedAccounts;
         });
       }
       return;
@@ -2108,8 +2144,17 @@ class _WarmupScreenState extends State<WarmupScreen> {
       await WarmupApi.getLocalAccounts(requestedPlatform),
     );
     if (mounted && _selectedPlatform == requestedPlatform) {
+      // Same selection rule as the non-Instagram branch: only keep the saved
+      // account if it still exists, never revive a deleted one.
+      final savedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+      final selected =
+          accounts.any((a) => (a['username'] ?? '') == savedAccount)
+          ? savedAccount
+          : (accounts.isNotEmpty
+                ? (accounts.first['username'] ?? '').toString()
+                : '');
       setState(() {
-        _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+        _selectedAccount = selected;
         _savedAccounts = accounts;
       });
     }
@@ -2118,11 +2163,28 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Future<void> _loadSavedAccounts() async {
     final requestedPlatform = _selectedPlatform;
     if (requestedPlatform != 'instagram') {
-      final localAccounts = sortAccountsByUsername(
-        await WarmupApi.getLocalAccounts(requestedPlatform),
-      );
+      // Same data strategy as _showAccountPicker: backend-first with a local
+      // merge for YouTube, so the collapsed row matches the expanded picker.
+      final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      var accounts = localAccounts;
+      try {
+        final backendAccounts = await WarmupApi.getAccountsFromBackend(
+          platform: requestedPlatform,
+        );
+        if (requestedPlatform == 'youtube') {
+          accounts = WarmupApi.mergeAccountMetadata(
+            localAccounts,
+            backendAccounts,
+          );
+        } else if (backendAccounts.isNotEmpty) {
+          accounts = backendAccounts;
+        }
+      } catch (_) {
+        // Backend unreachable: keep the local cache only.
+      }
+      final sortedAccounts = sortAccountsByUsername(accounts);
       if (mounted && _selectedPlatform == requestedPlatform) {
-        setState(() => _savedAccounts = localAccounts);
+        setState(() => _savedAccounts = sortedAccounts);
       }
       return;
     }
