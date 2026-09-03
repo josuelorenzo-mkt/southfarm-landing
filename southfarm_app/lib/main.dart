@@ -115,6 +115,16 @@ List<Map<String, dynamic>> sortAccountsByUsername(
   return sorted;
 }
 
+/// Accounts and Warm Up live in the same IndexedStack, so no lifecycle
+/// event tells Warm Up that the account list changed while it was hidden.
+/// AccountsScreen fires this after cleaning or scanning; WarmupScreen
+/// listens and reloads its platform's accounts.
+class AccountsChangeNotifier extends ChangeNotifier {
+  AccountsChangeNotifier._();
+  static final AccountsChangeNotifier instance = AccountsChangeNotifier._();
+  void notifyChanged() => notifyListeners();
+}
+
 // ─── Platform Logo Widget ───
 class PlatformLogo extends StatelessWidget {
   final String platform;
@@ -2052,8 +2062,18 @@ class _WarmupScreenState extends State<WarmupScreen> {
   @override
   void initState() {
     super.initState();
+    AccountsChangeNotifier.instance.addListener(_onExternalAccountsChanged);
     _loadSavedAccount();
     _startRemotePolling();
+  }
+
+  /// Fired by AccountsScreen after a clean or a scan. Both screens live in
+  /// the same IndexedStack, so Warm Up never gets an unmount/remount cycle
+  /// and would otherwise keep showing ghost accounts until the platform
+  /// changes. While a warmup is running we leave the selection untouched.
+  void _onExternalAccountsChanged() {
+    if (!mounted || _isRunning) return;
+    _loadSavedAccount();
   }
 
   @override
@@ -2214,6 +2234,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
     _pollTimer?.cancel();
     _backendPollTimer?.cancel();
     _remotePollTimer?.cancel();
+    AccountsChangeNotifier.instance.removeListener(_onExternalAccountsChanged);
     super.dispose();
   }
 
@@ -3144,6 +3165,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
         WarmupApi._accountCacheKey(_selectedPlatform),
         jsonEncode(accounts),
       );
+      // Scan succeeded: tell Warm Up to reload so newly scanned accounts
+      // show up there without waiting for a platform switch.
+      AccountsChangeNotifier.instance.notifyChanged();
     } catch (e) {
       debugLog('SCAN ERROR: $e');
       // On error, try loading from local cache or backend
@@ -3268,6 +3292,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
       } else {
         await _loadSavedAccounts();
       }
+      // Let Warm Up (mounted beside us in the IndexedStack) reload its
+      // platform's accounts so it does not show freshly deleted ones.
+      AccountsChangeNotifier.instance.notifyChanged();
       final total = result['total'] ?? 0;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Cleaned $total scanned account records')),
