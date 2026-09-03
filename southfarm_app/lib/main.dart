@@ -84,12 +84,16 @@ class InstagramLogo extends StatelessWidget {
 
 // Resolves an avatar URL coming from the backend: absolute CDN URLs are
 // kept as-is, while new relative paths like /api/avatars/x.jpg are
-// resolved against the API base.
+// resolved against the API origin. API_BASE already ends in "/api", so a
+// naive concatenation would produce ".../api/api/avatars/...".
 String resolveAvatarUrl(String? picUrl, String apiBase) {
   final url = (picUrl ?? '').trim();
   if (url.isEmpty) return '';
   if (url.startsWith('http')) return url;
-  if (url.startsWith('/')) return '$apiBase$url';
+  if (url.startsWith('/')) {
+    final origin = apiBase.replaceAll(RegExp(r'/api/?$'), '');
+    return '$origin$url';
+  }
   return url;
 }
 

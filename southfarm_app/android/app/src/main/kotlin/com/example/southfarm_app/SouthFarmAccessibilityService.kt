@@ -4273,43 +4273,75 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Thread.sleep(3000)
             root.recycle()
 
-            // Step 3: Find and tap the username in profile header to open switcher
+            // Step 3: Find and tap the username in profile header to open switcher.
+            // On cold start the profile header can take several seconds to render,
+            // so retry with a fresh root on every attempt until the switcher opens.
             debugLog("Step 3: Finding username header to open switcher...")
-            val profileRoot = getInstagramRoot() ?: run {
-                debugLog("Profile root null")
-                returnToSouthFarm()
-                return accounts
-            }
-
-            if (!openInstagramAccountSwitcher(profileRoot)) {
-                debugLog("Instagram account switcher could not be opened")
+            var switcherOpened = false
+            for (attempt in 1..10) {
+                val profileRoot = getInstagramRoot()
+                if (profileRoot == null) {
+                    debugLog("Switcher open attempt $attempt failed: profile root null")
+                    if (attempt < 10) Thread.sleep(700)
+                    continue
+                }
+                switcherOpened = openInstagramAccountSwitcher(profileRoot)
                 profileRoot.recycle()
+                if (switcherOpened) break
+                debugLog("Switcher open attempt $attempt failed")
+                if (attempt < 10) Thread.sleep(700)
+            }
+            if (!switcherOpened) {
+                debugLog("Instagram account switcher could not be opened")
                 returnToSouthFarm()
                 return accounts
             }
-            profileRoot.recycle()
 
             // Step 4: Read the account switcher popup
             debugLog("Step 4: Reading switcher popup...")
             SouthFarmLoadingService.showLoading("Detecting profiles...")
-            val switcherRoot = getInstagramRoot() ?: run {
-                debugLog("Switcher root null")
-                returnToSouthFarm()
-                return accounts
-            }
-            debugLog("Switcher pkg=${switcherRoot.packageName}")
 
-            // Step 5: Extract accounts from switcher
+            // Step 5: Extract accounts from switcher, consolidating several passes
+            // so rows that render late still make it into the final list.
             // Pattern from UI dump:
             //   - Each account is a ViewGroup with clickable=true
             //   - content-desc = "username" for active, "username, N chats" for others
             //   - The active account has selected=true
             //   - Children include a View with text=username
             debugLog("Step 5: Extracting accounts from switcher...")
-            extractAccountsFromSwitcher(switcherRoot, accounts)
+            var passesWithoutNew = 0
+            for (pass in 1..8) {
+                if (pass > 1) Thread.sleep(600)
+                val switcherRoot = getInstagramRoot()
+                if (switcherRoot == null) {
+                    debugLog("Switcher pass $pass: root null")
+                    continue
+                }
+                if (pass == 1) debugLog("Switcher pkg=${switcherRoot.packageName}")
+                val passAccounts = mutableListOf<String>()
+                extractAccountsFromSwitcher(switcherRoot, passAccounts)
+                switcherRoot.recycle()
+                var added = 0
+                for (user in passAccounts) {
+                    if (!accounts.any { it.equals(user, ignoreCase = true) }) {
+                        accounts.add(user)
+                        added++
+                    }
+                }
+                if (added > 0) {
+                    passesWithoutNew = 0
+                    debugLog("Switcher pass $pass: +$added new account(s), total=${accounts.size}")
+                } else {
+                    passesWithoutNew++
+                    debugLog("Switcher pass $pass: no new accounts (total=${accounts.size})")
+                }
+                if (accounts.isNotEmpty() && passesWithoutNew >= 2) {
+                    debugLog("Switcher list stabilized after $pass passes")
+                    break
+                }
+            }
 
             debugLog("ACCOUNT SCAN RESULT: ${accounts.size} accounts -> $accounts")
-            switcherRoot.recycle()
 
             // Step 6: Show the final loading state before returning to SouthFarm.
             SouthFarmLoadingService.showLoading("Saving info...")
@@ -4445,12 +4477,15 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // - content-desc = "username" (active, selected=true) OR "username, N chats" (others)
         // - Children: ImageView + View(text=username) + ImageView/View(text="N chats")
         // Non-account items are Buttons: "Add Instagram account", "Go to Accounts Center"
-        findSwitcherAccountsStrict(root, accounts)
+        // verbose = true so every switcher row (accepted or rejected) is
+        // traced in logcat; the wait-loop keeps using the quiet default.
+        findSwitcherAccountsStrict(root, accounts, verbose = true)
     }
 
     private fun findSwitcherAccountsStrict(
         node: AccessibilityNodeInfo,
-        accounts: MutableList<String>
+        accounts: MutableList<String>,
+        verbose: Boolean = false
     ) {
         val desc = node.contentDescription?.toString()?.trim() ?: ""
         // Instagram changes the metadata suffix depending on the account:
@@ -4476,14 +4511,27 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 if (!accounts.any { it.equals(username, ignoreCase = true) }) {
                     accounts.add(username)
                     debugLog("  Found REAL account: $username selected=${node.isSelected} desc=\"$desc\"")
+                } else if (verbose) {
+                    debugLog("  Switcher row duplicate: username=\"$username\" desc=\"$desc\"")
                 }
                 return // Don't recurse into this node's children
             }
+            if (verbose) {
+                debugLog(
+                    "  Switcher row rejected: desc=\"$desc\" clickable=${node.isClickable} " +
+                        "selected=${node.isSelected} class=$className pattern=no-match"
+                )
+            }
+        } else if (verbose && desc.isNotEmpty()) {
+            debugLog(
+                "  Switcher row rejected: desc=\"$desc\" clickable=${node.isClickable} " +
+                    "selected=${node.isSelected} class=$className pattern=no-row"
+            )
         }
 
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            findSwitcherAccountsStrict(child, accounts)
+            findSwitcherAccountsStrict(child, accounts, verbose)
         }
     }
 

@@ -29,6 +29,14 @@ const AVATAR_TIMEOUT_MS = 8000; // short, best-effort budget per request
 const MAX_REDIRECTS = 4;
 const BROWSER_UA =
   'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+// TikTok serves complete HTML (og:image included) to crawler user agents.
+const GOOGLEBOT_UA =
+  'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+// Instagram serves og:image to social-crawler UAs but a login wall to
+// browser UAs.
+const SOCIAL_CRAWLER_UA = 'facebookexternalhit/1.1';
+// Public web App-ID Instagram expects on its i.instagram.com JSON endpoint.
+const INSTAGRAM_WEB_APP_ID = '936619743392459';
 
 const AVATAR_PLATFORMS = ['instagram', 'tiktok', 'youtube'] as const;
 export type AvatarPlatform = typeof AVATAR_PLATFORMS[number];
@@ -65,8 +73,14 @@ type HttpGetResult = { status: number; contentType: string; body: Buffer };
 
 // Minimal https.get wrapper (no fetch in this codebase): follows up to
 // maxRedirects, enforces a byte cap and a short timeout, and resolves null on
-// any failure so callers can stay best-effort.
-function httpsGet(url: string, maxBytes: number): Promise<HttpGetResult | null> {
+// any failure so callers can stay best-effort. extraHeaders (optional) merges
+// over the defaults per call, e.g. the App-ID header the Instagram web API
+// requires; the redirect chain reuses the same merged set.
+function httpsGet(
+  url: string,
+  maxBytes: number,
+  extraHeaders?: Record<string, string>,
+): Promise<HttpGetResult | null> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (result: HttpGetResult | null) => {
@@ -74,10 +88,15 @@ function httpsGet(url: string, maxBytes: number): Promise<HttpGetResult | null> 
       settled = true;
       resolve(result);
     };
+    const headers: Record<string, string> = {
+      'User-Agent': BROWSER_UA,
+      Accept: '*/*',
+      ...(extraHeaders || {}),
+    };
     const request = (target: string, redirectsLeft: number) => {
       const req = https.get(
         target,
-        { headers: { 'User-Agent': BROWSER_UA, Accept: '*/*' } },
+        { headers },
         (res) => {
           const status = Number(res.statusCode || 0);
           const location = res.headers.location;
@@ -143,7 +162,119 @@ function extractYouTubeAvatarUrl(html: string): string {
   return match[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
 }
 
+// Same unescapes extractYouTubeAvatarUrl applies, for URLs pulled out of the
+// JSON state Instagram/TikTok embed in their responses ("https:\/\/...\u0026...").
+function unescapeEmbeddedUrl(url: string): string {
+  return url.replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+}
+
+// Avatar URL out of the web_profile_info response: prefer the documented
+// JSON shape (data.user.profile_pic_url, HD variant first). JSON.parse can
+// legitimately fail on a byte-capped body, so fall back to scraping the same
+// fields straight out of the raw text.
+function extractInstagramAvatarFromBody(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody) as any;
+    const user = parsed?.data?.user;
+    if (user && typeof user === 'object') {
+      const hd = typeof user.profile_pic_url_hd === 'string' ? user.profile_pic_url_hd : '';
+      if (hd && /^https?:\/\//i.test(hd)) return hd;
+      const sd = typeof user.profile_pic_url === 'string' ? user.profile_pic_url : '';
+      if (sd && /^https?:\/\//i.test(sd)) return sd;
+    }
+  } catch {
+    // Malformed/truncated JSON: the regex pass below still applies.
+  }
+  for (const pattern of [
+    /"profile_pic_url_hd"\s*:\s*"(https:\\?\/\\?\/[^"]+)"/,
+    /"profile_pic_url"\s*:\s*"(https:\\?\/\\?\/[^"]+)"/,
+  ]) {
+    const match = rawBody.match(pattern);
+    if (match?.[1]) return unescapeEmbeddedUrl(match[1]);
+  }
+  return '';
+}
+
+// www.instagram.com/{user}/ is a login wall for our mobile-browser UA, but
+// the private web API still answers with the profile JSON when called with
+// the public web App-ID header.
+async function fetchInstagramWebProfileUrl(username: string): Promise<string> {
+  const endpoint =
+    `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`;
+  const response = await httpsGet(endpoint, PROFILE_PAGE_MAX_BYTES, {
+    'X-IG-App-ID': INSTAGRAM_WEB_APP_ID,
+    Accept: 'application/json',
+  });
+  if (!response || response.status !== 200 || !response.body.length) return '';
+  return extractInstagramAvatarFromBody(response.body.toString('utf8'));
+}
+
+// First avatar URL embedded in TikTok's page state: an "avatar*" key from the
+// user object, then any p16-sign CDN URL (TikTok's avatar bucket).
+function extractTikTokAvatarUrl(html: string): string {
+  for (const pattern of [
+    /"avatar[^"]*"\s*:\s*"(https:\\?\/\\?\/[^"]+)"/,
+    /"(https:\\?\/\\?\/p16-sign[^"]+)"/,
+  ]) {
+    const match = html.match(pattern);
+    if (match?.[1]) return unescapeEmbeddedUrl(match[1]);
+  }
+  return '';
+}
+
+// TikTok hides og:image from our browser UA, so: profile page as-is, then the
+// same page as Googlebot (it serves crawlers the complete HTML), then the
+// avatar URL embedded in either response's JSON state.
+async function fetchTikTokProfilePicUrl(username: string): Promise<string> {
+  const pageUrl = profilePageUrl('tiktok', username);
+  let browserHtml = '';
+  const browserResponse = await httpsGet(pageUrl, PROFILE_PAGE_MAX_BYTES);
+  if (browserResponse && browserResponse.status === 200 && browserResponse.body.length) {
+    browserHtml = browserResponse.body.toString('utf8');
+    const ogImageUrl = extractOgImageUrl(browserHtml);
+    if (ogImageUrl && /^https?:\/\//i.test(ogImageUrl)) return ogImageUrl;
+  }
+  const botResponse = await httpsGet(pageUrl, PROFILE_PAGE_MAX_BYTES, { 'User-Agent': GOOGLEBOT_UA });
+  if (botResponse && botResponse.status === 200 && botResponse.body.length) {
+    const botHtml = botResponse.body.toString('utf8');
+    const botOgImageUrl = extractOgImageUrl(botHtml);
+    if (botOgImageUrl && /^https?:\/\//i.test(botOgImageUrl)) return botOgImageUrl;
+    const embeddedUrl = extractTikTokAvatarUrl(botHtml);
+    if (embeddedUrl && /^https?:\/\//i.test(embeddedUrl)) return embeddedUrl;
+  }
+  if (browserHtml) {
+    const embeddedUrl = extractTikTokAvatarUrl(browserHtml);
+    if (embeddedUrl && /^https?:\/\//i.test(embeddedUrl)) return embeddedUrl;
+  }
+  return '';
+}
+
 async function fetchSourceProfilePicUrl(platform: AvatarPlatform, username: string): Promise<string> {
+  if (platform === 'instagram') {
+    // Instagram serves og:image to crawler UAs but a login wall to browser
+    // UAs, so scrape as facebookexternalhit first; the private web API and
+    // the browser-UA scrape stay as fallbacks.
+    const botResponse = await httpsGet(profilePageUrl('instagram', username), PROFILE_PAGE_MAX_BYTES, {
+      'User-Agent': SOCIAL_CRAWLER_UA,
+    });
+    if (botResponse && botResponse.status === 200 && botResponse.body.length) {
+      const botOgImageUrl = extractOgImageUrl(botResponse.body.toString('utf8'));
+      if (botOgImageUrl && /^https?:\/\//i.test(botOgImageUrl)) return botOgImageUrl;
+    }
+    const apiUrl = await fetchInstagramWebProfileUrl(username);
+    if (apiUrl) return apiUrl;
+    // API failed: fall through to the profile-page og:image scrape.
+  }
+  if (platform === 'tiktok') {
+    const scraped = await fetchTikTokProfilePicUrl(username);
+    if (scraped) return scraped;
+    // Last resort: unavatar.io resolves TikTok avatars reliably from IPs
+    // that TikTok blocks outright. Returns the image bytes itself, so
+    // downloadImage() on this URL validates the content type; fallback=false
+    // makes unavatars 404 (instead of serving a generic placeholder) when it
+    // cannot resolve the user.
+    return `https://unavatar.io/tiktok/${encodeURIComponent(username)}?fallback=false`;
+  }
   const response = await httpsGet(profilePageUrl(platform, username), PROFILE_PAGE_MAX_BYTES);
   if (!response || response.status !== 200 || !response.body.length) return '';
   const html = response.body.toString('utf8');
