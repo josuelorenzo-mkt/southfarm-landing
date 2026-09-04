@@ -23,8 +23,12 @@ solo hay que ejecutar cosas y verificar. Tiempo total estimado: ~2 horas.
 | Archivo | Para qué |
 |---|---|
 | `install-southfarm-us-office.ps1` | Instalador one-shot (toolchain + bridge + túnel + Windows) |
+| `install-southfarm-us-publisher.ps1` | Publisher worker: UNA corrida por celular que publique |
 | `southfarm-screen-bridge-supervisor.ps1` | Supervisor inmortal del bridge |
+| `southfarm-publisher-supervisor.ps1` | Supervisor inmortal del publisher |
 | `screen-bridge/` | Código del bridge con su dependencia `ws` incluida |
+| `publisher_worker/` | Código Python del publisher (sin dependencias externas) |
+| `southfarm.apk` | App estable 1.1.8 para los celulares |
 
 Lo único que descarga el instalador solo, de URLs oficiales: adb, Node 22,
 scrcpy-server v4.1 y cloudflared.
@@ -108,7 +112,14 @@ curl.exe "https://screen-us.southfarm.tech/api/health?token=<EL_TOKEN>"
 
 ## Después (no urgente)
 
-- Publisher worker si esos celulares van a publicar contenido.
+- **Publisher worker (publicar videos)**: por cada celular que vaya a publicar,
+  con ese teléfono conectado y autorizado:
+  ```powershell
+  .\install-southfarm-us-publisher.ps1 -DeviceId <ID_DEL_DISPOSITIVO> -DeviceSerial <SERIAL> -WorkerToken "<mismo_worker_token_que_AR>"
+  ```
+  El `-DeviceId` es el ID numérico del dispositivo en Southfarm (lo da el dueño
+  una vez emparejado el teléfono). Descarga solo Python portátil + ffmpeg,
+  registra la tarea "SouthFarm Publisher Worker <ID>" y arranca.
 - ADB WiFi como backup: activar "Depuración por WiFi" en cada teléfono y
   conectarlos desde la oficina AR vía Tailscale (`adb connect <ip-tailscale>:5555`).
 - Subir bitrate a 4M/1024 (`-Bitrate 4000000 -MaxSize 1024`) si el USB va fluido.
