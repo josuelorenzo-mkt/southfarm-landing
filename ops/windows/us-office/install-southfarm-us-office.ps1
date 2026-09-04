@@ -19,7 +19,10 @@ param(
   [int]$Bitrate = 2000000,
   [int]$MaxSize = 720,
   [switch]$EnableSsh,
-  [switch]$SkipDownloads
+  [switch]$SkipDownloads,
+  # Auto-login sin GUI: si se pasan, se configura por registro (alternativa a netplwiz).
+  [string]$AutoLoginUser = "",
+  [string]$AutoLoginPassword = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -143,11 +146,20 @@ Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name 
 Enable-NetFirewallRule -DisplayGroup "Escritorio remoto", "Remote Desktop" -ErrorAction SilentlyContinue
 Write-Output "Suspensión deshabilitada (AC) y RDP habilitado."
 
-# Auto-login: requiere contraseña interactiva, NO automatizable acá.
-Write-Output ""
-Write-Output "PENDIENTE MANUAL: ejecutar 'netplwiz', elegir el usuario y destildar"
-Write-Output "'Los usuarios deben escribir su nombre y contrasena' (ingresar la contrasena)."
-Write-Output "Sin esto, tras un reinicio nadie abre sesion y el bridge queda caido."
+# Auto-login: por registro si se pasaron credenciales; si no, queda pendiente netplwiz.
+if (![string]::IsNullOrWhiteSpace($AutoLoginUser) -and ![string]::IsNullOrWhiteSpace($AutoLoginPassword)) {
+  $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+  Set-ItemProperty $winlogon -Name AutoAdminLogon -Value "1"
+  Set-ItemProperty $winlogon -Name DefaultUserName -Value $AutoLoginUser
+  Set-ItemProperty $winlogon -Name DefaultPassword -Value $AutoLoginPassword
+  Set-ItemProperty $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME
+  Write-Output "Auto-login configurado por registro para el usuario '$AutoLoginUser'."
+} else {
+  Write-Output ""
+  Write-Output "PENDIENTE MANUAL: ejecutar 'netplwiz', elegir el usuario y destildar"
+  Write-Output "'Los usuarios deben escribir su nombre y contrasena' (ingresar la contrasena)."
+  Write-Output "Sin esto, tras un reinicio nadie abre sesion y el bridge queda caido."
+}
 
 if ($EnableSsh) {
   Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0

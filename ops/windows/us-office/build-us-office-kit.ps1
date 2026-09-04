@@ -15,8 +15,8 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 try {
   Copy-Item (Join-Path $kitSource "install-southfarm-us-office.ps1") $stage
   Copy-Item (Join-Path $kitSource "install-southfarm-us-publisher.ps1") $stage
-  Copy-Item (Join-Path $kitSource "southfarm-screen-bridge-supervisor.ps1") $stage
-  Copy-Item (Join-Path $kitSource "southfarm-publisher-supervisor.ps1") $stage
+  Copy-Item (Join-Path $kitSource "verify-us-office.ps1") $stage
+  Copy-Item (Join-Path $kitSource "AGENT-SETUP.md") $stage
   Copy-Item (Join-Path $kitSource "README-US-OFFICE.md") $stage
   Copy-Item $ScreenBridgePath (Join-Path $stage "screen-bridge") -Recurse -Force
   Copy-Item $PublisherWorkerPath (Join-Path $stage "publisher_worker\southfarm_publisher") -Recurse -Force
