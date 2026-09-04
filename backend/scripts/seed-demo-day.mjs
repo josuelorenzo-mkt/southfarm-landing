@@ -48,27 +48,49 @@ const login = await fetch(`${BASE}/api/auth/login`, {
 const token = login.token;
 if (!token) throw new Error('login falló');
 
-const toIso = (hhmm) => new Date(`${DATE}T${hhmm}:00-03:00`).toISOString();
+const nowParts = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Argentina/Buenos_Aires', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+}).formatToParts(new Date());
+const nowHH = String(Number(nowParts.find((p) => p.type === 'hour').value)).padStart(2, '0');
+const nowMM = String(Math.floor(Number(nowParts.find((p) => p.type === 'minute').value) / 5) * 5).padStart(2, '0');
+const NOW_BA = `${nowHH}:${nowMM}`;
+const nowBAIso = (offsetMin) => {
+  const total = Math.max(0, Math.min(1435, Number(nowHH) * 60 + Number(nowMM) + offsetMin));
+  return toIso(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
+};
+const toIso = (hhmm) => hhmm === 'now' ? nowBAIso(-4) : new Date(`${DATE}T${hhmm}:00-03:00`).toISOString();
+
+// Reset: cancela las demos manuales pendientes/running de HOY antes de sembrar fresco.
+const cancelledBefore = db.prepare("UPDATE task_runs SET status = 'cancelled', cancel_reason = 'demo_reset', lease_expires_at = NULL WHERE source = 'manual' AND status IN ('pending', 'running') AND scheduled_for LIKE ?").run(`${DATE}%`).changes;
 
 // [hora BA, tipo, teléfono, duración min, ¿estado especial?]
 const plan = [
+  ['00:30', 'scan', '02', 10, 'done'],
   ['07:30', 'scan', '02', 10, 'done'],
   ['08:05', 'warmup', '02', 40, 'done'],
   ['08:30', 'warmup', '07', 40, 'late'],
   ['09:40', 'scan', '08', 10, 'done'],
-  ['10:15', 'warmup', '02', 40],
-  ['11:25', 'scan', '07', 10, 'done'],
-  ['12:05', 'warmup', '07', 40, 'running'],
-  ['11:40', 'warmup', '08', 40],
-  ['12:10', 'warmup', '09', 40],
+  ['09:40', 'warmup', '09', 40],
+  ['10:15', 'warmup', '02', 40, 'done'],
+  ['10:50', 'scan', '07', 10, 'done'],
+  ['now', 'warmup', '02', 40, 'running'],
+  ['now', 'scan', '07', 10, 'running'],
+  ['now', 'warmup', '08', 40, 'running'],
+  ['13:15', 'scan', '09', 10],
+  ['14:00', 'warmup', '02', 40],
+  ['14:05', 'scan', '08', 10],
   ['15:00', 'warmup', '02', 40],
   ['15:00', 'warmup', '07', 40],
   ['15:00', 'scan', '08', 10],
   ['15:00', 'warmup', '09', 40],
   ['16:20', 'scan', '02', 10],
+  ['16:35', 'warmup', '09', 40],
   ['17:45', 'warmup', '08', 40],
-  ['19:30', 'warmup', '02', 40],
+  ['19:00', 'warmup', '02', 40],
+  ['19:05', 'scan', '08', 10],
+  ['19:30', 'warmup', '07', 40],
   ['21:00', 'scan', '09', 10],
+  ['22:15', 'warmup', '02', 40],
 ];
 
 const CLUSTER_FOR_DEVICE = { '02': clusterByName.get('Klein Thinking'), '07': clusterByName.get('Marczell Wisdom'), '08': clusterByName.get('Marczell Wisdom'), '09': clusterByName.get('ema nuevo') ?? 1 };
@@ -106,7 +128,7 @@ for (const { id, state, effective } of idsBySlot) {
   }
 }
 
-console.log(`\nDemo listo: ${created} tareas para el ${DATE} (BA).`);
+console.log(`Demo listo: ${created} tareas para el ${DATE} (BA). Reset previo: ${cancelledBefore} canceladas. Hora BA: ${NOW_BA}`);
 console.log(`- Running ahora: ${idsBySlot.filter((x) => x.state === 'running').length}`);
 console.log(`- Hora con 4 teléfonos apilados: 15:00`);
 console.log(`- Completadas: ${idsBySlot.filter((x) => x.state === 'done').length} · Atrasada: ${idsBySlot.filter((x) => x.state === 'late').length}`);
