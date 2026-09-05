@@ -27,10 +27,14 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Random
 
-// TEST MODE: overlays (loading + warmup control panel) stay disabled so the
-// phone screen remains visible during manual device QA. Must be false in
-// production builds.
-const val TEST_NO_OVERLAYS = true
+// TEST_NO_OVERLAYS controls ONLY the warmup control bubble
+// (SouthFarmOverlayService): false = bubble visible. Stays false in QA so
+// warmups can be paused; also false in production.
+const val TEST_NO_OVERLAYS = false
+// TEST_NO_LOADING_OVERLAY controls ONLY the fullscreen loading overlay
+// (SouthFarmLoadingService): true = hidden in QA so the live phone screen
+// stays visible during scans/warmups. MUST be false in production.
+const val TEST_NO_LOADING_OVERLAY = true
 
 class SouthFarmAccessibilityService : AccessibilityService() {
 
@@ -1146,7 +1150,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // Start loading overlay (Service-based — can draw over other apps)
         try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            if (!TEST_NO_OVERLAYS) startForegroundService(loadingIntent)
+            if (!TEST_NO_LOADING_OVERLAY) startForegroundService(loadingIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Could not start loading overlay: ${e.message}")
         }
@@ -1434,7 +1438,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     private fun resumeSocialSession(): Boolean {
         return try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            if (!TEST_NO_OVERLAYS) startForegroundService(loadingIntent)
+            if (!TEST_NO_LOADING_OVERLAY) startForegroundService(loadingIntent)
             val ready = when (currentWarmupPlatform) {
                 "tiktok" -> {
                     updateLoadingText("Resuming TikTok warmup...")
@@ -4061,7 +4065,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning TikTok...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
+                if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting TikTok scan overlays: ${e.message}")
             }
@@ -4146,7 +4150,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning YouTube channels...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
+                if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting YouTube scan overlays: ${e.message}")
             }
@@ -4216,7 +4220,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Thread.sleep(500)
 
             try {
-                if (!TEST_NO_OVERLAYS) {
+                if (!TEST_NO_LOADING_OVERLAY) {
                     SouthFarmLoadingService.setInitialText("Scanning app...")
                     val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -4229,7 +4233,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Error starting loading for scan: ${e.message}")
             }
             for (i in 0..20) {
-                if (TEST_NO_OVERLAYS || SouthFarmLoadingService.isRunning) break
+                if (TEST_NO_LOADING_OVERLAY || SouthFarmLoadingService.isRunning) break
                 Thread.sleep(100)
             }
             Thread.sleep(400)

@@ -171,8 +171,6 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startOverlay() {
-        // QA mode: keep overlays off while testing (see TEST_NO_OVERLAYS in the a11y service)
-        if (TEST_NO_OVERLAYS) return
         val intent = Intent(this, SouthFarmOverlayService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
