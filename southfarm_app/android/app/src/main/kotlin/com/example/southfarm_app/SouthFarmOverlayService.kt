@@ -118,77 +118,80 @@ class SouthFarmOverlayService : Service() {
         // waveView = wave
         // windowManager?.addView(wave, waveParams)
 
-        // Black overlay — covers entire screen, NOT touchable
-        val blackParams = WindowManager.LayoutParams(
-            screenWidth, screenHeight,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
-        blackParams.gravity = Gravity.TOP or Gravity.START
+        // QA: skip fullscreen layers, bubble only (ver TEST_NO_LOADING_OVERLAY).
+        if (!TEST_NO_LOADING_OVERLAY) {
+            // Black overlay — covers entire screen, NOT touchable
+            val blackParams = WindowManager.LayoutParams(
+                screenWidth, screenHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            blackParams.gravity = Gravity.TOP or Gravity.START
 
-        val black = View(this)
-        black.setBackgroundColor(Color.BLACK)
-        black.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        blackOverlay = black
-        windowManager?.addView(black, blackParams)
+            val black = View(this)
+            black.setBackgroundColor(Color.BLACK)
+            black.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            blackOverlay = black
+            windowManager?.addView(black, blackParams)
 
-        // Green overlay — above black, below white
-        val greenParams = WindowManager.LayoutParams(
-            screenWidth, screenHeight,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
-        greenParams.gravity = Gravity.TOP or Gravity.START
+            // Green overlay — above black, below white
+            val greenParams = WindowManager.LayoutParams(
+                screenWidth, screenHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            greenParams.gravity = Gravity.TOP or Gravity.START
 
-        val green = View(this)
-        green.setBackgroundColor(0xFF34d399.toInt())
-        green.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        greenOverlay = green
-        windowManager?.addView(green, greenParams)
+            val green = View(this)
+            green.setBackgroundColor(0xFF34d399.toInt())
+            green.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            greenOverlay = green
+            windowManager?.addView(green, greenParams)
 
-        // White overlay — above green, below bubble, fully opaque
-        val whiteParams = WindowManager.LayoutParams(
-            screenWidth, screenHeight,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.OPAQUE
-        )
-        whiteParams.gravity = Gravity.TOP or Gravity.START
+            // White overlay — above green, below bubble, fully opaque
+            val whiteParams = WindowManager.LayoutParams(
+                screenWidth, screenHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.OPAQUE
+            )
+            whiteParams.gravity = Gravity.TOP or Gravity.START
 
-        val white = View(this)
-        white.setBackgroundColor(Color.WHITE)
-        white.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        whiteOverlay = white
-        windowManager?.addView(white, whiteParams)
+            val white = View(this)
+            white.setBackgroundColor(Color.WHITE)
+            white.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            whiteOverlay = white
+            windowManager?.addView(white, whiteParams)
 
-        // Second black overlay — above white, below bubble
-        val black2Params = WindowManager.LayoutParams(
-            screenWidth, screenHeight,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.OPAQUE
-        )
-        black2Params.gravity = Gravity.TOP or Gravity.START
+            // Second black overlay — above white, below bubble
+            val black2Params = WindowManager.LayoutParams(
+                screenWidth, screenHeight,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.OPAQUE
+            )
+            black2Params.gravity = Gravity.TOP or Gravity.START
 
-        val black2 = View(this)
-        black2.setBackgroundColor(Color.BLACK)
-        black2.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        blackOverlay2 = black2
-        windowManager?.addView(black2, black2Params)
+            val black2 = View(this)
+            black2.setBackgroundColor(Color.BLACK)
+            black2.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            blackOverlay2 = black2
+            windowManager?.addView(black2, black2Params)
+        }
 
         // Small floating control button — IS touchable
         val btnSize = 120
@@ -221,6 +224,13 @@ class SouthFarmOverlayService : Service() {
     }
 
     private fun showControlPopup() {
+        // Opening the interaction bubble is an explicit user intervention.
+        // Pause before adding the popup so the warmup thread cannot continue
+        // scrolling while this surface is open.
+        if (!isPaused && SouthFarmAccessibilityService.pauseWarmupStatic()) {
+            isPaused = true
+        }
+
         if (popupView?.isAttachedToWindow == true) {
             windowManager?.removeView(popupView)
             popupView = null
@@ -380,26 +390,29 @@ class SouthFarmOverlayService : Service() {
             whiteOverlay = null
             blackOverlay2 = null
 
-            // Activate wave borders
-            val screenWidth = resources.displayMetrics.widthPixels
-            val screenHeight = resources.displayMetrics.heightPixels
-            val borderWidth = 20
+            // QA: skip fullscreen layers, bubble only (ver TEST_NO_LOADING_OVERLAY).
+            if (!TEST_NO_LOADING_OVERLAY) {
+                // Activate wave borders
+                val screenWidth = resources.displayMetrics.widthPixels
+                val screenHeight = resources.displayMetrics.heightPixels
+                val borderWidth = 20
 
-            val waveParams = WindowManager.LayoutParams(
-                screenWidth, screenHeight,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                PixelFormat.TRANSLUCENT
-            )
-            waveParams.gravity = Gravity.TOP or Gravity.START
+                val waveParams = WindowManager.LayoutParams(
+                    screenWidth, screenHeight,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT
+                )
+                waveParams.gravity = Gravity.TOP or Gravity.START
 
-            val wave = WaveBorderView(this, screenWidth, screenHeight, borderWidth)
-            waveView = wave
-            windowManager?.addView(wave, waveParams)
-            startAnimation(wave)
+                val wave = WaveBorderView(this, screenWidth, screenHeight, borderWidth)
+                waveView = wave
+                windowManager?.addView(wave, waveParams)
+                startAnimation(wave)
+            }
 
             // Re-add control button on top of waves
             controlButton?.let { btn ->
