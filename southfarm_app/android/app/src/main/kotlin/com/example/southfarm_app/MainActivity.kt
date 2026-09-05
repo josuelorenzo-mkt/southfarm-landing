@@ -21,7 +21,18 @@ class MainActivity : FlutterActivity() {
                 "startWarmup" -> {
                     val username = call.argument<String>("username") ?: ""
                     val duration = call.argument<Int>("duration") ?: 5
-                    startWarmup(username, duration)
+                    val platform = call.argument<String>("platform") ?: "instagram"
+                    val sourceAccountName = call.argument<String>("source_account_name") ?: ""
+                    val sourceAccountEmail = call.argument<String>("source_account_email") ?: ""
+                    val channelDisplayName = call.argument<String>("channel_display_name") ?: ""
+                    startWarmup(
+                        username,
+                        duration,
+                        platform,
+                        sourceAccountName,
+                        sourceAccountEmail,
+                        channelDisplayName,
+                    )
                     result.success(true)
                 }
                 "stopWarmup" -> {
@@ -31,6 +42,9 @@ class MainActivity : FlutterActivity() {
                 "pauseWarmup" -> {
                     SouthFarmAccessibilityService.pauseWarmupStatic()
                     result.success(true)
+                }
+                "pauseWarmupAndReturn" -> {
+                    result.success(SouthFarmAccessibilityService.pauseWarmupAndReturnStatic())
                 }
                 "resumeWarmup" -> {
                     SouthFarmAccessibilityService.resumeWarmupStatic()
@@ -55,7 +69,8 @@ class MainActivity : FlutterActivity() {
                     val info = hashMapOf<String, String>(
                         "device_id" to android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID),
                         "device_name" to "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}",
-                        "android_version" to android.os.Build.VERSION.RELEASE
+                        "android_version" to android.os.Build.VERSION.RELEASE,
+                        "app_version" to packageManager.getPackageInfo(packageName, 0).versionName.orEmpty(),
                     )
                     result.success(info)
                 }
@@ -82,8 +97,9 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "detectAccounts" -> {
+                    val platform = call.argument<String>("platform") ?: "instagram"
                     Log.e("MainActivity", "detectAccounts called, instance=${SouthFarmAccessibilityService.instance != null}")
-                    SouthFarmAccessibilityService.detectAccountsStatic { accountsJson ->
+                    SouthFarmAccessibilityService.detectAccountsStatic(platform) { accountsJson ->
                         Log.e("MainActivity", "detectAccounts result: $accountsJson")
                         handler.post {
                             result.success(accountsJson)
@@ -95,8 +111,22 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun startWarmup(username: String, durationMinutes: Int) {
-        val success = SouthFarmAccessibilityService.startWarmupStatic(username, durationMinutes)
+    private fun startWarmup(
+        username: String,
+        durationMinutes: Int,
+        platform: String,
+        sourceAccountName: String = "",
+        sourceAccountEmail: String = "",
+        channelDisplayName: String = "",
+    ) {
+        val success = SouthFarmAccessibilityService.startWarmupStatic(
+            username,
+            durationMinutes,
+            platform,
+            sourceAccountName,
+            sourceAccountEmail,
+            channelDisplayName,
+        )
         if (!success) {
             Log.w("MainActivity", "Accessibility service not running, cannot start warmup")
         }
@@ -108,11 +138,17 @@ class MainActivity : FlutterActivity() {
 
     private fun isAccessibilityEnabled(): Boolean {
         val service = packageName + "/" + SouthFarmAccessibilityService::class.java.canonicalName
+        val globallyEnabled = Settings.Secure.getInt(
+            contentResolver,
+            Settings.Secure.ACCESSIBILITY_ENABLED,
+            0,
+        ) == 1
+        if (!globallyEnabled) return false
         val enabledServices = Settings.Secure.getString(
             contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return enabledServices.contains(service)
+        return enabledServices.split(':').any { it.equals(service, ignoreCase = true) }
     }
 
     private fun openAccessibilitySettings() {
@@ -135,6 +171,8 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun startOverlay() {
+        // QA mode: keep overlays off while testing (see TEST_NO_OVERLAYS in the a11y service)
+        if (TEST_NO_OVERLAYS) return
         val intent = Intent(this, SouthFarmOverlayService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)

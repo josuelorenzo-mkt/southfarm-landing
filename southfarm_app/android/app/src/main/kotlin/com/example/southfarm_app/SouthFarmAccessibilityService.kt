@@ -30,7 +30,7 @@ import java.util.Random
 // TEST MODE: overlays (loading + warmup control panel) stay disabled so the
 // phone screen remains visible during manual device QA. Must be false in
 // production builds.
-private const val TEST_NO_OVERLAYS = true
+const val TEST_NO_OVERLAYS = true
 
 class SouthFarmAccessibilityService : AccessibilityService() {
 
