@@ -2818,7 +2818,65 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             findNodeByTextContains(root, "Guardado en Ver más tarde") != null
     }
 
+    /**
+     * Newer YouTube Shorts builds expose a direct "Save" (or "Guardar")
+     * action on the right-hand action rail next to like/comment/share, so a
+     * short can be saved with a single tap instead of the More menu flow.
+     * Only nodes in the right third of the screen count, so unrelated "Save"
+     * texts in titles, chips or overlays are ignored. The node is tappable
+     * itself or through a clickable ancestor within the depth clickNode()
+     * walks (same resolution the other node searches in this file rely on).
+     * Returns null when no direct rail button is exposed; the caller then
+     * falls back to the legacy More -> Save to playlist flow.
+     */
+    private fun findYouTubeSaveButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun hasClickableSelfOrAncestor(node: AccessibilityNodeInfo): Boolean {
+            if (node.isClickable) return true
+            var parent = node.parent
+            var depth = 0
+            while (parent != null && depth < 4) {
+                if (parent.isClickable) return true
+                parent = parent.parent
+                depth++
+            }
+            return false
+        }
+
+        return findNodeByPredicate(root) { node ->
+            if (!node.isVisibleToUser) return@findNodeByPredicate false
+            val description = node.contentDescription?.toString() ?: ""
+            val text = node.text?.toString() ?: ""
+            val matchesLabel = description.contains("Save", ignoreCase = true) ||
+                description.contains("Guardar", ignoreCase = true) ||
+                text.contains("Save", ignoreCase = true) ||
+                text.contains("Guardar", ignoreCase = true)
+            if (!matchesLabel) return@findNodeByPredicate false
+            val bounds = android.graphics.Rect()
+            node.getBoundsInScreen(bounds)
+            bounds.left >= (screenWidth * 0.6f).toInt() &&
+                hasClickableSelfOrAncestor(node)
+        }
+    }
+
     private fun saveYouTubeShort(root: AccessibilityNodeInfo): Boolean {
+        // Fast path: YouTube Shorts now render a direct rail "Save" button.
+        // One tap on it completes the save; the full More -> Save to playlist
+        // flow below stays untouched and is used only when the rail button is
+        // not exposed on screen.
+        val freshRoot = getYouTubeRoot() ?: root
+        val saveButton = findYouTubeSaveButton(freshRoot)
+        if (saveButton != null) {
+            val tapped = clickNode(saveButton)
+            if (freshRoot !== root) freshRoot.recycle()
+            if (tapped) {
+                Log.e(TAG, "YouTube save via direct Save button")
+                return true
+            }
+            Log.e(TAG, "YouTube direct Save button tap failed; falling back to More menu flow")
+        } else if (freshRoot !== root) {
+            freshRoot.recycle()
+        }
+
         val currentRoot = getYouTubeRoot() ?: root
         val more = findYouTubeMoreNode(currentRoot)
         if (more == null) {
