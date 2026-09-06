@@ -1441,14 +1441,14 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             if (!TEST_NO_LOADING_OVERLAY) startForegroundService(loadingIntent)
             val ready = when (currentWarmupPlatform) {
                 "tiktok" -> {
-                    updateLoadingText("Resuming TikTok warmup...")
+                    updateLoadingText(SfStrings.s(this, "Resuming TikTok warmup..."))
                     openTikTok() && run {
                         Thread.sleep(2500)
                         ensureCorrectTikTokAccount(currentWarmupAccount) && navigateToTikTokForYou()
                     }
                 }
                 "youtube" -> {
-                    updateLoadingText("Resuming YouTube warmup...")
+                    updateLoadingText(SfStrings.s(this, "Resuming YouTube warmup..."))
                     openYouTube() && run {
                         Thread.sleep(2500)
                         ensureCorrectYouTubeChannel(
@@ -1460,7 +1460,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                     }
                 }
                 else -> {
-                    updateLoadingText("Resuming Instagram warmup...")
+                    updateLoadingText(SfStrings.s(this, "Resuming Instagram warmup..."))
                     openInstagram() && run {
                         Thread.sleep(2000)
                         ensureCorrectAccount(currentWarmupAccount) && run {
@@ -1495,11 +1495,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 1: Open Instagram
         currentStatus = "opening_instagram"
-        updateLoadingText("Preparing warmup...")
+        updateLoadingText(SfStrings.s(this, "Preparing warmup..."))
         if (!openInstagram()) {
             Log.e(TAG, "ERROR: could not open Instagram")
             currentStatus = "error: could_not_open_instagram"
-            updateLoadingText("Error al abrir Instagram")
+            updateLoadingText(SfStrings.s(this, "Could not open Instagram"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1509,11 +1509,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 2: Verify and switch to correct account
         currentStatus = "switching_account"
-        updateLoadingText("Setting up account...")
+        updateLoadingText(SfStrings.s(this, "Setting up account..."))
         if (!ensureCorrectAccount(username)) {
             Log.e(TAG, "ERROR: could not switch to account $username")
             currentStatus = "error: could_not_switch_to_$username"
-            updateLoadingText("Error al cambiar cuenta")
+            updateLoadingText(SfStrings.s(this, "Could not switch account"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1523,7 +1523,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         // Step 3: Navigate to Reels
         currentStatus = "navigating_to_reels"
-        updateLoadingText("Lanzando warmup...")
+        updateLoadingText(SfStrings.s(this, "Launching warmup..."))
         navigateToReels()
         Thread.sleep(1000)
         Log.e(TAG, "Navigated to reels, starting main loop...")
@@ -1696,10 +1696,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Log.e(TAG, "Starting TikTok warmup: username=$username, duration=${durationMinutes}min")
 
         currentStatus = "opening_tiktok"
-        updateLoadingText("Preparing TikTok warmup...")
+        updateLoadingText(SfStrings.s(this, "Preparing TikTok warmup..."))
         if (!openTikTok()) {
             currentStatus = "error: could_not_open_tiktok"
-            updateLoadingText("Error al abrir TikTok")
+            updateLoadingText(SfStrings.s(this, "Could not open TikTok"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1709,11 +1709,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Thread.sleep(4000)
 
         currentStatus = "switching_account"
-        updateLoadingText("Setting up TikTok account...")
+        updateLoadingText(SfStrings.s(this, "Setting up TikTok account..."))
         if (!ensureCorrectTikTokAccount(username)) {
             Log.e(TAG, "ERROR: could not switch TikTok account $username")
             currentStatus = "error: could_not_switch_to_$username"
-            updateLoadingText("Error al cambiar cuenta de TikTok")
+            updateLoadingText(SfStrings.s(this, "Could not switch TikTok account"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1721,10 +1721,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Thread.sleep(1000)
 
         currentStatus = "navigating_to_for_you"
-        updateLoadingText("Launching TikTok warmup...")
+        updateLoadingText(SfStrings.s(this, "Launching TikTok warmup..."))
         if (!navigateToTikTokForYou()) {
             currentStatus = "error: could_not_open_for_you"
-            updateLoadingText("No se pudo abrir For You")
+            updateLoadingText(SfStrings.s(this, "Could not open For You"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1837,10 +1837,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Log.e(TAG, "Starting YouTube warmup: channel=$username, duration=${durationMinutes}min")
 
         currentStatus = "opening_youtube"
-        updateLoadingText("Preparing YouTube warmup...")
+        updateLoadingText(SfStrings.s(this, "Preparing YouTube warmup..."))
         if (!openYouTube()) {
             currentStatus = "error: could_not_open_youtube"
-            updateLoadingText("Error al abrir YouTube")
+            updateLoadingText(SfStrings.s(this, "Could not open YouTube"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1848,7 +1848,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Thread.sleep(4000)
 
         currentStatus = "switching_account"
-        updateLoadingText("Setting up YouTube channel...")
+        updateLoadingText(SfStrings.s(this, "Setting up YouTube channel..."))
         if (!ensureCorrectYouTubeChannel(
                 username,
                 currentWarmupSourceAccountName,
@@ -1857,7 +1857,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             )) {
             Log.e(TAG, "ERROR: could not switch YouTube channel $username")
             currentStatus = "error: could_not_switch_to_$username"
-            updateLoadingText("Error al cambiar canal de YouTube")
+            updateLoadingText(SfStrings.s(this, "Could not switch YouTube channel"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -1865,10 +1865,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         Thread.sleep(1000)
 
         currentStatus = "navigating_to_shorts"
-        updateLoadingText("Launching YouTube Shorts warmup...")
+        updateLoadingText(SfStrings.s(this, "Launching YouTube Shorts warmup..."))
         if (!navigateToYouTubeShorts()) {
             currentStatus = "error: could_not_open_shorts"
-            updateLoadingText("No se pudo abrir Shorts")
+            updateLoadingText(SfStrings.s(this, "Could not open Shorts"))
             Thread.sleep(2000)
             SouthFarmLoadingService.dismissLoading()
             return
@@ -4053,7 +4053,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         for (candidate in candidates) {
             if (!switchYouTubeAccountForScan(candidate)) continue
 
-            SouthFarmLoadingService.showLoading("Checking ${candidate.name}...")
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Checking {n}...", candidate.name))
             if (!openYouTubeAccountsForScan()) {
                 Log.e(TAG, "YouTube account scan: could not reopen Accounts for ${candidate.name}")
                 continue
@@ -4129,7 +4129,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
                 if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
-                SouthFarmLoadingService.setInitialText("Scanning TikTok...")
+                SouthFarmLoadingService.setInitialText(SfStrings.s(this, "Scanning TikTok..."))
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
                 if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
@@ -4159,7 +4159,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             }
             Thread.sleep(1500)
 
-            SouthFarmLoadingService.showLoading("Detecting TikTok profiles...")
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Detecting TikTok profiles..."))
             val switcherRoot = getTikTokRoot() ?: return accounts
             extractTikTokAccounts(switcherRoot, accounts)
             val close = findNodeByDesc(switcherRoot, "Close") ?: findNodeByText(switcherRoot, "Close")
@@ -4214,7 +4214,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
                 if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
-                SouthFarmLoadingService.setInitialText("Scanning YouTube channels...")
+                SouthFarmLoadingService.setInitialText(SfStrings.s(this, "Scanning YouTube channels..."))
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
                 if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
@@ -4229,7 +4229,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("YouTube scan: opening You → Accounts")
             if (!openYouTubeAccounts()) return channels
             Thread.sleep(700)
-            SouthFarmLoadingService.showLoading("Detecting YouTube channels...")
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Detecting YouTube channels..."))
 
             val popupRoot = getYouTubeRoot() ?: return channels
             val originalSelection = findYouTubeSelectedChannelInfo(popupRoot)
@@ -4287,7 +4287,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             try {
                 if (!TEST_NO_LOADING_OVERLAY) {
-                    SouthFarmLoadingService.setInitialText("Scanning app...")
+                    SouthFarmLoadingService.setInitialText(SfStrings.s(this, "Scanning app..."))
                     val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(loadingIntent)
@@ -4369,7 +4369,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             // Step 4: Read the account switcher popup
             debugLog("Step 4: Reading switcher popup...")
-            SouthFarmLoadingService.showLoading("Detecting profiles...")
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Detecting profiles..."))
 
             // Step 5: Extract accounts from switcher, consolidating several passes
             // so rows that render late still make it into the final list.
@@ -4420,7 +4420,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("ACCOUNT SCAN RESULT: ${accounts.size} accounts -> $accounts")
 
             // Step 6: Show the final loading state before returning to SouthFarm.
-            SouthFarmLoadingService.showLoading("Saving info...")
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Saving info..."))
             Thread.sleep(800)
 
         } catch (e: Exception) {

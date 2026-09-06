@@ -83,7 +83,7 @@ class SouthFarmOverlayService : Service() {
         createNotificationChannel()
         val notification = Notification.Builder(this, "southfarm_overlay")
             .setContentTitle("SouthFarm")
-            .setContentText("Warmup en progreso...")
+            .setContentText(SfStrings.s(this, "Warmup in progress..."))
             .setSmallIcon(android.R.drawable.ic_media_play)
             .build()
         startForeground(1001, notification)
@@ -275,7 +275,7 @@ class SouthFarmOverlayService : Service() {
 
         // Status text
         val statusText = TextView(this)
-        statusText.text = if (isPaused) "⏸ Pausado" else "▶️ En progreso"
+        statusText.text = if (isPaused) SfStrings.s(this, "⏸ Paused") else SfStrings.s(this, "▶️ In progress")
         statusText.setTextColor(Color.WHITE)
         statusText.textSize = 14f
         statusText.gravity = Gravity.CENTER
@@ -290,13 +290,13 @@ class SouthFarmOverlayService : Service() {
 
         // Pause/Resume button (left)
         val pauseBtn = if (isPaused) {
-            createButton("▶ Reanudar", 0xFF3b82f6.toInt(), Color.WHITE) {
+            createButton(SfStrings.s(this, "▶ Resume"), 0xFF3b82f6.toInt(), Color.WHITE) {
                 isPaused = false
                 SouthFarmAccessibilityService.resumeWarmupStatic()
                 hideControlPopup()
             }
         } else {
-            createButton("⏸ Pausar", 0xFFf97316.toInt(), Color.WHITE) {
+            createButton(SfStrings.s(this, "⏸ Pause"), 0xFFf97316.toInt(), Color.WHITE) {
                 isPaused = true
                 SouthFarmAccessibilityService.pauseWarmupStatic()
                 hideControlPopup()
@@ -306,7 +306,7 @@ class SouthFarmOverlayService : Service() {
         btnRow.addView(pauseBtn)
 
         // Stop button (right)
-        val stopBtn = createButton("⏹ Detener", 0xFFef4444.toInt(), Color.WHITE) {
+        val stopBtn = createButton(SfStrings.s(this, "⏹ Stop"), 0xFFef4444.toInt(), Color.WHITE) {
             SouthFarmAccessibilityService.stopWarmupStatic()
             hideControlPopup()
             stopSelf()
