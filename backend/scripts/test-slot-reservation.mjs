@@ -310,11 +310,14 @@ try {
   // ── 5c. Movimiento individual (Fase 2): PATCH /api/tasks/runs/:id/schedule ──
   // Mover una tarea a un hueco libre (el sugerido por nextFreeSlot).
   const moveBase = new Date(Date.now() + 26 * 3600e3);
+  // Mismo criterio de duración que la tarea firstId (60'): si pedimos un hueco
+  // más chico el /schedule valida con la duración real y el test se vuelve
+  // dependiente de la hora de ejecución (flaky).
   const freeTarget = reservationModule.nextFreeSlot({
     db,
     deviceId: devId,
     from: moveBase.toISOString(),
-    durationSec: 20 * 60,
+    durationSec: 60 * 60,
     shiftLimitMs: 72 * 3600e3,
   });
   const batchSnapshot = db.prepare(
