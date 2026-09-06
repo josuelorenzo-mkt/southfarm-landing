@@ -3,11 +3,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'i18n.dart';
 
 const String defaultApiBase = 'https://api.southfarm.tech/api';
 String apiUrl = defaultApiBase;
@@ -22,6 +22,7 @@ const Color sfAmber = Color(0xFFf59e0b);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await loadAppLanguage();
   // Debug builds may override the API base at runtime (set via the
   // SET_API_BASE broadcast → SharedPreferences key 'api_base').
   if (kDebugMode) {
@@ -37,14 +38,47 @@ Future<void> main() async {
   runApp(const SouthFarmApp());
 }
 
-class SouthFarmApp extends StatelessWidget {
+class SouthFarmApp extends StatefulWidget {
   const SouthFarmApp({super.key});
+
+  @override
+  State<SouthFarmApp> createState() => _SouthFarmAppState();
+}
+
+class _SouthFarmAppState extends State<SouthFarmApp> {
+  // t() reads a global, so switching languages requires rebuilding the
+  // whole tree: the ValueKey below remounts MaterialApp whenever the
+  // language preference changes.
+  void _onLanguageChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    appLanguageNotifier.addListener(_onLanguageChanged);
+  }
+
+  @override
+  void dispose() {
+    appLanguageNotifier.removeListener(_onLanguageChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      key: ValueKey('app-language-${appLanguageNotifier.value}'),
       title: 'SouthFarm',
       debugShowCheckedModeBanner: false,
+      supportedLocales: const [
+        Locale('en'),
+        Locale('es'),
+        Locale('pt'),
+      ],
+      locale: followingSystem
+          ? null
+          : Locale(appLanguageNotifier.value),
       theme: ThemeData(
         colorSchemeSeed: sfGreen,
         brightness: Brightness.dark,
@@ -684,7 +718,7 @@ class WarmupApi {
       throw Exception(
         data is Map && data['error'] != null
             ? data['error'].toString()
-            : 'Could not clean scanned accounts',
+            : t('Could not clean scanned accounts'),
       );
     }
     // The backend wiped these accounts: also drop the local cache and the
@@ -781,9 +815,9 @@ class _SplashScreenState extends State<SplashScreen>
             children: [
               const SouthFarmLogo(fontSize: 40, leafIcon: Icons.local_florist),
               const SizedBox(height: 12),
-              const Text(
-                'Mobile automation',
-                style: TextStyle(color: sfTextSecondary, fontSize: 16),
+              Text(
+                t('Mobile automation'),
+                style: const TextStyle(color: sfTextSecondary, fontSize: 16),
               ),
             ],
           ),
@@ -806,23 +840,23 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final List<_OBStep> _steps = [
     _OBStep(
       Icons.local_florist,
-      'Welcome to SouthFarm',
-      'Automate tasks on your phone.\nWarmups, posts, and more.',
+      t('Welcome to SouthFarm'),
+      t('Automate tasks on your phone.\nWarmups, posts, and more.'),
     ),
     _OBStep(
       Icons.security,
-      'Enable Accessibility',
-      'SouthFarm needs accessibility permission\nto simulate screen taps.',
+      t('Enable Accessibility'),
+      t('SouthFarm needs accessibility permission\nto simulate screen taps.'),
     ),
     _OBStep(
       Icons.layers,
-      'Enable Overlay',
-      'You will see a protective layer when\nSouthFarm is working.',
+      t('Enable Overlay'),
+      t('You will see a protective layer when\nSouthFarm is working.'),
     ),
     _OBStep(
       Icons.check_circle,
-      'All set!',
-      'Set up your tasks and get started.\nsouthfarm.tech',
+      t('All set!'),
+      t('Set up your tasks and get started.\nsouthfarm.tech'),
     ),
   ];
 
@@ -898,8 +932,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 const SizedBox(height: 24),
                 Text(
                   _step == 1
-                      ? 'Tap the button and enable SouthFarm in Accessibility'
-                      : 'Tap the button and allow SouthFarm over other apps',
+                      ? t('Tap the button and enable SouthFarm in Accessibility')
+                      : t('Tap the button and allow SouthFarm over other apps'),
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: sfAmber, fontSize: 14),
                 ),
@@ -938,7 +972,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ),
                   ),
                   child: Text(
-                    _step < _steps.length - 1 ? 'Enable' : 'Get Started',
+                    _step < _steps.length - 1 ? t('Enable') : t('Get Started'),
                   ),
                 ),
               ),
@@ -1473,7 +1507,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
     if (email.isEmpty || pass.isEmpty || (!_isLogin && name.isEmpty)) {
       setState(() {
-        _error = 'Please fill in all fields';
+        _error = t('Please fill in all fields');
         _loading = false;
       });
       return;
@@ -1502,8 +1536,8 @@ class _AuthScreenState extends State<AuthScreen> {
     } else {
       setState(() {
         _error = _isLogin
-            ? 'Incorrect email or password'
-            : 'Error creating account. Already exists?';
+            ? t('Incorrect email or password')
+            : t('Error creating account. Already exists?');
         _loading = false;
       });
     }
@@ -1532,14 +1566,14 @@ class _AuthScreenState extends State<AuthScreen> {
                   children: [
                     Expanded(
                       child: _tabBtn(
-                        'Log In',
+                        t('Log In'),
                         _isLogin,
                         () => setState(() => _isLogin = true),
                       ),
                     ),
                     Expanded(
                       child: _tabBtn(
-                        'Sign Up',
+                        t('Sign Up'),
                         !_isLogin,
                         () => setState(() => _isLogin = false),
                       ),
@@ -1553,9 +1587,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 TextField(
                   controller: _nameCtrl,
                   style: const TextStyle(color: sfTextPrimary),
-                  decoration: const InputDecoration(
-                    hintText: 'Name',
-                    hintStyle: TextStyle(color: sfTextSecondary),
+                  decoration: InputDecoration(
+                    hintText: t('Name'),
+                    hintStyle: const TextStyle(color: sfTextSecondary),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -1565,9 +1599,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 controller: _emailCtrl,
                 keyboardType: TextInputType.emailAddress,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  hintText: 'Email',
-                  hintStyle: TextStyle(color: sfTextSecondary),
+                decoration: InputDecoration(
+                  hintText: t('Email'),
+                  hintStyle: const TextStyle(color: sfTextSecondary),
                 ),
               ),
               const SizedBox(height: 12),
@@ -1576,9 +1610,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 controller: _passCtrl,
                 obscureText: true,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  hintText: 'Password',
-                  hintStyle: TextStyle(color: sfTextSecondary),
+                decoration: InputDecoration(
+                  hintText: t('Password'),
+                  hintStyle: const TextStyle(color: sfTextSecondary),
                 ),
               ),
               const SizedBox(height: 24),
@@ -1613,7 +1647,7 @@ class _AuthScreenState extends State<AuthScreen> {
                           ),
                         )
                       : Text(
-                          _isLogin ? 'Log In' : 'Sign Up',
+                          _isLogin ? t('Log In') : t('Sign Up'),
                           style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -1691,13 +1725,13 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       final code = payload?['code'] ?? payload?['pairing_code'];
       final accessKey = payload?['access_key'] ?? payload?['key'];
       if (code == null || accessKey == null) {
-        throw const FormatException('QR does not contain a SouthFarm pairing');
+        throw FormatException(t('QR does not contain a SouthFarm pairing'));
       }
       _codeCtrl.text = code.toString().toUpperCase();
       _keyCtrl.text = accessKey.toString();
       setState(() => _error = null);
     } catch (e) {
-      setState(() => _error = 'QR inválido o vencido');
+      setState(() => _error = t('Invalid or expired QR'));
     }
   }
 
@@ -1713,7 +1747,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     final code = _codeCtrl.text.trim();
     final accessKey = _keyCtrl.text.trim();
     if (code.isEmpty || accessKey.isEmpty) {
-      setState(() => _error = 'Ingresá el código y la llave temporal');
+      setState(() => _error = t('Enter the code and the temporary key'));
       return;
     }
     setState(() {
@@ -1730,7 +1764,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     } else {
       setState(() {
         _loading = false;
-        _error = 'El código no es válido, venció o ya fue utilizado';
+        _error = t('The code is invalid, expired or already used');
       });
     }
   }
@@ -1750,12 +1784,12 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       backgroundColor: sfBg,
       appBar: AppBar(
         backgroundColor: sfBg,
-        title: const Text('Vincular celular'),
+        title: Text(t('Pair phone')),
         actions: [
           IconButton(
             onPressed: _loading ? null : _logout,
             icon: const Icon(Icons.logout),
-            tooltip: 'Cerrar sesión',
+            tooltip: t('Log out'),
           ),
         ],
       ),
@@ -1767,45 +1801,45 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
             children: [
               const Icon(Icons.phonelink_setup, size: 72, color: sfGreen),
               const SizedBox(height: 20),
-              const Text(
-                'Este celular todavía no está vinculado a tu workspace.',
+              Text(
+                t('This phone is not paired to your workspace yet.'),
                 textAlign: TextAlign.center,
-                style: TextStyle(
+                style: const TextStyle(
                   color: sfTextPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                 ),
               ),
               const SizedBox(height: 10),
-              const Text(
-                'Generá un código desde Device fleet en la web. Podés ingresar la llave manualmente o escanear el QR temporal.',
+              Text(
+                t('Generate a code from Device fleet on the web. You can enter the key manually or scan the temporary QR.'),
                 textAlign: TextAlign.center,
-                style: TextStyle(color: sfTextSecondary, height: 1.4),
+                style: const TextStyle(color: sfTextSecondary, height: 1.4),
               ),
               const SizedBox(height: 28),
               TextField(
                 controller: _codeCtrl,
                 textCapitalization: TextCapitalization.characters,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  labelText: 'Código temporal',
-                  prefixIcon: Icon(Icons.password),
+                decoration: InputDecoration(
+                  labelText: t('Temporary code'),
+                  prefixIcon: const Icon(Icons.password),
                 ),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _keyCtrl,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  labelText: 'Llave de acceso',
-                  prefixIcon: Icon(Icons.key),
+                decoration: InputDecoration(
+                  labelText: t('Access key'),
+                  prefixIcon: const Icon(Icons.key),
                 ),
               ),
               const SizedBox(height: 18),
               OutlinedButton.icon(
                 onPressed: _loading ? null : _scanQr,
                 icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Escanear QR temporal'),
+                label: Text(t('Scan temporary QR')),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 16),
@@ -1825,7 +1859,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.link),
-                label: Text(_loading ? 'Vinculando…' : 'Vincular celular'),
+                label: Text(_loading ? t('Pairing…') : t('Pair phone')),
                 style: FilledButton.styleFrom(
                   backgroundColor: sfGreen,
                   foregroundColor: Colors.black,
@@ -1868,7 +1902,7 @@ class _QrPairingScannerScreenState extends State<QrPairingScannerScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Escanear QR'),
+        title: Text(t('Scan QR')),
       ),
       body: Stack(
         fit: StackFit.expand,
@@ -1884,14 +1918,14 @@ class _QrPairingScannerScreenState extends State<QrPairingScannerScreen> {
               ),
             ),
           ),
-          const Positioned(
+          Positioned(
             left: 24,
             right: 24,
             bottom: 40,
             child: Text(
-              'Apuntá al QR de vinculación que muestra la web',
+              t('Point the camera at the pairing QR shown on the web'),
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white, fontSize: 16),
+              style: const TextStyle(color: Colors.white, fontSize: 16),
             ),
           ),
         ],
@@ -1919,7 +1953,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   String _deviceModel = '';
   String _androidVersion = '';
   String _appVersion = '';
-  String _languageLabel = '';
   bool _accessibilityEnabled = false;
   bool _serviceRunning = false;
   bool _ensureDeviceRunning = false;
@@ -1929,7 +1962,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _languageLabel = systemLanguageLabel();
     _loadUser();
     _ensureDevice();
     _refreshServiceHealth();
@@ -2024,20 +2056,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       builder: (ctx) => AlertDialog(
         backgroundColor: sfCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'Log out',
-          style: TextStyle(color: sfTextPrimary, fontSize: 18),
+        title: Text(
+          t('Log out'),
+          style: const TextStyle(color: sfTextPrimary, fontSize: 18),
         ),
         content: Text(
-          'Do you want to log out, $_userName?',
+          t('Do you want to log out, {n}?', [_userName]),
           style: const TextStyle(color: sfTextSecondary),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: sfTextSecondary),
+            child: Text(
+              t('Cancel'),
+              style: const TextStyle(color: sfTextSecondary),
             ),
           ),
           TextButton(
@@ -2051,9 +2083,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 );
               }
             },
-            child: const Text(
-              'Log out',
-              style: TextStyle(color: Colors.redAccent),
+            child: Text(
+              t('Log out'),
+              style: const TextStyle(color: Colors.redAccent),
             ),
           ),
         ],
@@ -2078,7 +2110,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         deviceModel: _deviceModel,
         androidVersion: _androidVersion,
         appVersion: _appVersion,
-        languageLabel: _languageLabel,
         accessibilityEnabled: _accessibilityEnabled,
         serviceRunning: _serviceRunning,
         onLogout: _showLogoutDialog,
@@ -2151,8 +2182,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     Expanded(
                       child: Text(
                         !_accessibilityEnabled
-                            ? 'Accessibility is disabled. Remote tasks cannot run.'
-                            : 'SouthFarm service is not running. Re-enable Accessibility to receive remote tasks.',
+                            ? t('Accessibility is disabled. Remote tasks cannot run.')
+                            : t('SouthFarm service is not running. Re-enable Accessibility to receive remote tasks.'),
                         style: const TextStyle(
                           color: sfTextPrimary,
                           fontSize: 12,
@@ -2164,7 +2195,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                         await WarmupApi.openAccessibilitySettings();
                         await _refreshServiceHealth();
                       },
-                      child: const Text('Fix'),
+                      child: Text(t('Fix')),
                     ),
                   ],
                 ),
@@ -2196,16 +2227,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             }
           }
         },
-        items: const [
+        items: [
           BottomNavigationBarItem(
-            icon: Icon(Icons.play_circle),
-            label: 'Warmup',
+            icon: const Icon(Icons.play_circle),
+            label: t('Warmup'),
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.person_outline),
-            label: 'Accounts',
+            icon: const Icon(Icons.person_outline),
+            label: t('Accounts'),
           ),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.history),
+            label: t('History'),
+          ),
         ],
       ),
     );
@@ -2213,48 +2247,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
 }
 
 // ─── Profile Drawer ───
-
-/// Human-readable label for the device's current system locale
-/// (e.g. "es-AR" → "Spanish (Argentina)"). The app UI is English-only
-/// today, so the label is explicitly marked as the system language.
-String systemLanguageLabel() {
-  final parts = Platform.localeName.replaceAll('_', '-').split('-');
-  const languageNames = {
-    'es': 'Spanish',
-    'en': 'English',
-    'pt': 'Portuguese',
-    'fr': 'French',
-    'de': 'German',
-    'it': 'Italian',
-    'zh': 'Chinese',
-    'ja': 'Japanese',
-    'ko': 'Korean',
-    'ru': 'Russian',
-    'hi': 'Hindi',
-    'ar': 'Arabic',
-    'nl': 'Dutch',
-    'pl': 'Polish',
-    'tr': 'Turkish',
-  };
-  const regionNames = {
-    'ar': 'Argentina',
-    'mx': 'Mexico',
-    'co': 'Colombia',
-    'cl': 'Chile',
-    'pe': 'Peru',
-    'uy': 'Uruguay',
-    'es': 'Spain',
-    'us': 'United States',
-    'gb': 'United Kingdom',
-    'br': 'Brazil',
-    'pt': 'Portugal',
-  };
-  final language = languageNames[parts[0].toLowerCase()] ?? parts[0];
-  final region = parts.length > 1
-      ? regionNames[parts[1].toLowerCase()]
-      : null;
-  return region != null ? '$language ($region)' : language;
-}
 
 Color _roleColor(String role) {
   switch (role.toLowerCase()) {
@@ -2279,7 +2271,6 @@ class _ProfileDrawer extends StatelessWidget {
     required this.deviceModel,
     required this.androidVersion,
     required this.appVersion,
-    required this.languageLabel,
     required this.accessibilityEnabled,
     required this.serviceRunning,
     required this.onLogout,
@@ -2293,7 +2284,6 @@ class _ProfileDrawer extends StatelessWidget {
   final String deviceModel;
   final String androidVersion;
   final String appVersion;
-  final String languageLabel;
   final bool accessibilityEnabled;
   final bool serviceRunning;
   final VoidCallback onLogout;
@@ -2301,6 +2291,118 @@ class _ProfileDrawer extends StatelessWidget {
   String get _initial => userName.trim().isEmpty
       ? 'S'
       : userName.trim().substring(0, 1).toUpperCase();
+
+  String _currentLanguageValue() {
+    if (followingSystem) {
+      return '${t('System')} · ${systemLanguageLabel()}';
+    }
+    return languageEndonyms[appLanguageNotifier.value] ??
+        appLanguageNotifier.value;
+  }
+
+  void _showLanguageSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: sfCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                t('Language'),
+                style: const TextStyle(
+                  color: sfTextPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _languageOption(
+                sheetContext,
+                title: t('System'),
+                subtitle: systemLanguageLabel(),
+                value: systemLanguagePref,
+                trailing: _pillBadge(text: t('Recommended'), color: sfGreen),
+              ),
+              for (final code in supportedLanguageCodes)
+                _languageOption(
+                  sheetContext,
+                  title: languageEndonyms[code] ?? code,
+                  value: code,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _languageOption(
+    BuildContext sheetContext, {
+    required String title,
+    String? subtitle,
+    required String value,
+    Widget? trailing,
+  }) {
+    final selected = appLanguageNotifier.value == value;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          await setAppLanguage(value);
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: sfTextPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    if (subtitle != null && subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: sfTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[
+                trailing,
+                const SizedBox(width: 8),
+              ],
+              Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: selected ? sfGreen : sfTextSecondary,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2322,11 +2424,11 @@ class _ProfileDrawer extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.only(bottom: 12),
                 children: [
-                  _sectionLabel('WORKSPACE'),
+                  _sectionLabel(t('WORKSPACE')),
                   _infoRow(
                     icon: Icons.hub_outlined,
                     iconColor: sfGreen,
-                    label: 'Workspace',
+                    label: t('Workspace'),
                     value: workspaceName,
                   ),
                   _infoRow(
@@ -2334,19 +2436,19 @@ class _ProfileDrawer extends StatelessWidget {
                     iconColor: userRole.isEmpty
                         ? sfTextSecondary
                         : _roleColor(userRole),
-                    label: 'Role',
+                    label: t('Role'),
                     trailing: _pillBadge(
-                      text: userRole.isEmpty ? 'unknown' : userRole,
+                      text: userRole.isEmpty ? t('unknown') : userRole,
                       color: userRole.isEmpty
                           ? sfTextSecondary
                           : _roleColor(userRole),
                     ),
                   ),
-                  _sectionLabel('DEVICE'),
+                  _sectionLabel(t('DEVICE')),
                   _infoRow(
                     icon: Icons.smartphone,
                     iconColor: sfGreen,
-                    label: 'Phone',
+                    label: t('Phone'),
                     value: deviceAlias.isNotEmpty
                         ? deviceAlias
                         : deviceModel,
@@ -2355,7 +2457,7 @@ class _ProfileDrawer extends StatelessWidget {
                     _infoRow(
                       icon: Icons.phone_android,
                       iconColor: sfGreen,
-                      label: 'Model',
+                      label: t('Model'),
                       value: deviceModel,
                     ),
                   _infoRow(
@@ -2367,7 +2469,7 @@ class _ProfileDrawer extends StatelessWidget {
                   _infoRow(
                     icon: Icons.install_mobile_outlined,
                     iconColor: sfGreen,
-                    label: 'App version',
+                    label: t('App version'),
                     value: appVersion,
                   ),
                   _infoRow(
@@ -2375,18 +2477,19 @@ class _ProfileDrawer extends StatelessWidget {
                         ? Icons.verified_user_outlined
                         : Icons.warning_amber_rounded,
                     iconColor: serviceHealthy ? sfGreen : sfAmber,
-                    label: 'Accessibility',
+                    label: t('Accessibility'),
                     trailing: _pillBadge(
-                      text: serviceHealthy ? 'Active' : 'Disabled',
+                      text: serviceHealthy ? t('Active') : t('Disabled'),
                       color: serviceHealthy ? sfGreen : sfAmber,
                     ),
                   ),
-                  _sectionLabel('PREFERENCES'),
+                  _sectionLabel(t('PREFERENCES')),
                   _infoRow(
                     icon: Icons.translate,
                     iconColor: sfGreen,
-                    label: 'Language (system)',
-                    value: languageLabel,
+                    label: t('Language'),
+                    value: _currentLanguageValue(),
+                    onTap: () => _showLanguageSheet(context),
                   ),
                 ],
               ),
@@ -2407,13 +2510,13 @@ class _ProfileDrawer extends StatelessWidget {
                       horizontal: 12,
                       vertical: 14,
                     ),
-                    child: const Row(
+                  child: Row(
                       children: [
                         Icon(Icons.logout, color: Colors.redAccent, size: 20),
                         SizedBox(width: 12),
                         Text(
-                          'Log out',
-                          style: TextStyle(
+                          t('Log out'),
+                          style: const TextStyle(
                             color: Colors.redAccent,
                             fontSize: 14,
                             fontWeight: FontWeight.w600,
@@ -2464,7 +2567,7 @@ class _ProfileDrawer extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  userName.isEmpty ? 'SouthFarm user' : userName,
+                  userName.isEmpty ? t('SouthFarm user') : userName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -2514,10 +2617,14 @@ class _ProfileDrawer extends StatelessWidget {
     required String label,
     String? value,
     Widget? trailing,
+    VoidCallback? onTap,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-      child: Row(
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Row(
         children: [
           Container(
             width: 34,
@@ -2559,6 +2666,7 @@ class _ProfileDrawer extends StatelessWidget {
               ),
             ),
         ],
+        ),
       ),
     );
   }
@@ -2881,7 +2989,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
     if (_selectedAccount.isEmpty) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Select an account first')));
+      ).showSnackBar(SnackBar(content: Text(t('Select an account first'))));
       return;
     }
 
@@ -2975,20 +3083,20 @@ class _WarmupScreenState extends State<WarmupScreen> {
     final m = jsonDecode(metrics) as Map<String, dynamic>;
     final viewedLabel = (m['platform'] ?? _selectedPlatform) == 'youtube'
         ? 'Shorts'
-        : 'Videos';
+        : t('Videos');
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: sfCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.check_circle, color: sfGreen, size: 28),
-            SizedBox(width: 12),
+            const Icon(Icons.check_circle, color: sfGreen, size: 28),
+            const SizedBox(width: 12),
             Text(
-              'Warmup complete',
-              style: TextStyle(color: sfTextPrimary, fontSize: 20),
+              t('Warmup complete'),
+              style: const TextStyle(color: sfTextPrimary, fontSize: 20),
             ),
           ],
         ),
@@ -3003,8 +3111,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   value: '${m['reels_viewed'] ?? m['videos_viewed'] ?? 0}',
                   label: viewedLabel,
                 ),
-                _MetricItem(value: '${m['likes'] ?? 0}', label: 'Likes'),
-                _MetricItem(value: '${m['saves'] ?? 0}', label: 'Saves'),
+                _MetricItem(value: '${m['likes'] ?? 0}', label: t('Likes')),
+                _MetricItem(value: '${m['saves'] ?? 0}', label: t('Saves')),
               ],
             ),
           ],
@@ -3028,9 +3136,12 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: const Text(
-                'Done',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              child: Text(
+                t('Done'),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
               ),
             ),
           ),
@@ -3295,7 +3406,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Platform',
+              t('Platform'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -3359,10 +3470,10 @@ class _WarmupScreenState extends State<WarmupScreen> {
             const SizedBox(height: 20),
             Text(
               _selectedPlatform == 'tiktok'
-                  ? 'TikTok Account'
+                  ? t('TikTok Account')
                   : _selectedPlatform == 'youtube'
-                  ? 'YouTube Channel'
-                  : 'Instagram Account',
+                  ? t('YouTube Channel')
+                  : t('Instagram Account'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -3410,7 +3521,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     const SizedBox(width: 12),
                     Text(
                       _selectedAccount.isEmpty
-                          ? 'Select account...'
+                          ? t('Select account...')
                           : '@$_selectedAccount',
                       style: TextStyle(
                         color: _selectedAccount.isEmpty
@@ -3430,7 +3541,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
             const SizedBox(height: 24),
 
             Text(
-              'Duration',
+              t('Duration'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -3502,10 +3613,10 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 ),
                 label: Text(
                   _status == 'paused'
-                      ? 'Resume Warmup'
+                      ? t('Resume Warmup')
                       : _isRunning
-                      ? 'Pause Warmup'
-                      : 'Start Warmup',
+                      ? t('Pause Warmup')
+                      : t('Start Warmup'),
                 ),
               ),
             ),
@@ -3517,7 +3628,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   child: OutlinedButton.icon(
                     onPressed: _stopWarmup,
                     icon: const Icon(Icons.stop_circle),
-                    label: const Text('Stop Warmup'),
+                    label: Text(t('Stop Warmup')),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.redAccent,
                       side: const BorderSide(color: Colors.redAccent),
@@ -3773,14 +3884,14 @@ class _AccountsScreenState extends State<AccountsScreen> {
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: sfCard,
-          title: const Text('Clean accounts'),
+          title: Text(t('Clean accounts')),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Choose the scanned platforms to remove from this phone. Scan history will be preserved.',
-                style: TextStyle(color: sfTextSecondary),
+              Text(
+                t('Choose the scanned platforms to remove from this phone. Scan history will be preserved.'),
+                style: const TextStyle(color: sfTextSecondary),
               ),
               const SizedBox(height: 12),
               Row(
@@ -3790,11 +3901,11 @@ class _AccountsScreenState extends State<AccountsScreen> {
                     onPressed: () => setDialogState(
                       () => selected.addAll(platforms.map((item) => item.$1)),
                     ),
-                    child: const Text('Select all'),
+                    child: Text(t('Select all')),
                   ),
                   TextButton(
                     onPressed: () => setDialogState(selected.clear),
-                    child: const Text('Clear selection'),
+                    child: Text(t('Clear selection')),
                   ),
                 ],
               ),
@@ -3819,14 +3930,14 @@ class _AccountsScreenState extends State<AccountsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
+              child: Text(t('Cancel')),
             ),
             FilledButton(
               onPressed: selected.isEmpty
                   ? null
                   : () => Navigator.pop(dialogContext, selected.toList()),
               style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
-              child: const Text('Clean selected'),
+              child: Text(t('Clean selected')),
             ),
           ],
         ),
@@ -3852,13 +3963,13 @@ class _AccountsScreenState extends State<AccountsScreen> {
       AccountsChangeNotifier.instance.notifyChanged();
       final total = result['total'] ?? 0;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cleaned $total scanned account records')),
+        SnackBar(content: Text(t('Cleaned {n} scanned account records', [total]))),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Clean accounts failed: $e')));
+      ).showSnackBar(SnackBar(content: Text(t('Clean accounts failed: {n}', [e]))));
     } finally {
       if (mounted) setState(() => _cleaning = false);
     }
@@ -3883,7 +3994,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
             children: [
               const SizedBox(height: 16),
               Text(
-                'Accounts',
+                t('Accounts'),
                 style: const TextStyle(
                   fontSize: 24,
                   fontWeight: FontWeight.bold,
@@ -3893,10 +4004,10 @@ class _AccountsScreenState extends State<AccountsScreen> {
               const SizedBox(height: 4),
               Text(
                 _selectedPlatform == 'tiktok'
-                    ? 'Detected TikTok accounts'
+                    ? t('Detected TikTok accounts')
                     : _selectedPlatform == 'youtube'
-                    ? 'Detected YouTube channels'
-                    : 'Detected Instagram accounts',
+                    ? t('Detected YouTube channels')
+                    : t('Detected Instagram accounts'),
                 style: const TextStyle(fontSize: 14, color: sfTextSecondary),
               ),
               const SizedBox(height: 20),
@@ -3997,7 +4108,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
                 child: ElevatedButton.icon(
                   onPressed: _loading || _cleaning ? null : _loadAccounts,
                   icon: const Icon(Icons.search),
-                  label: const Text('Scan accounts'),
+                  label: Text(t('Scan accounts')),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: sfGreen,
                     foregroundColor: Colors.black,
@@ -4013,7 +4124,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
                       : _showCleanAccountsDialog,
                   icon: const Icon(Icons.delete_sweep_outlined),
                   label: Text(
-                    _cleaning ? 'Cleaning accounts…' : 'Clean accounts',
+                    _cleaning ? t('Cleaning accounts…') : t('Clean accounts'),
                   ),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Colors.redAccent,
@@ -4035,14 +4146,14 @@ class _AccountsScreenState extends State<AccountsScreen> {
                       ),
                       const SizedBox(height: 12),
                       Text(
-                        'No accounts found',
+                        t('No accounts found'),
                         style: TextStyle(color: sfTextSecondary, fontSize: 16),
                       ),
                       const SizedBox(height: 16),
                       ElevatedButton.icon(
                         onPressed: _loadAccounts,
                         icon: const Icon(Icons.refresh),
-                        label: const Text('Scan'),
+                        label: Text(t('Scan')),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: sfGreen,
                           foregroundColor: Colors.black,
@@ -4380,7 +4491,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'History',
+                    t('History'),
                     style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -4398,7 +4509,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                '${_sessions.length} sesiones',
+                t('{n} sessions', [_sessions.length]),
                 style: const TextStyle(fontSize: 14, color: sfTextSecondary),
               ),
               const SizedBox(height: 20),
@@ -4411,7 +4522,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       Icon(Icons.history, size: 48, color: sfTextSecondary),
                       const SizedBox(height: 12),
                       Text(
-                        'No sessions yet',
+                        t('No sessions yet'),
                         style: TextStyle(color: sfTextSecondary, fontSize: 16),
                       ),
                     ],
@@ -4458,22 +4569,22 @@ class _HistoryScreenState extends State<HistoryScreen> {
                               '${s['reels_viewed'] ?? 0}',
                               _sessionPlatform(s) == 'youtube'
                                   ? 'Shorts'
-                                  : 'Videos',
+                                  : t('Videos'),
                               sfGreen,
                             ),
                             _metric(
                               '${s['likes'] ?? 0}',
-                              'Likes',
+                              t('Likes'),
                               const Color(0xFFf472b6),
                             ),
                             _metric(
                               '${_sessionInt(s, 'saves')}',
-                              'Saves',
+                              t('Saves'),
                               const Color(0xFFfbbf24),
                             ),
                             _metric(
                               '${s['duration_minutes'] ?? '?'}min',
-                              'Duration',
+                              t('Duration'),
                               sfTextSecondary,
                             ),
                           ],
