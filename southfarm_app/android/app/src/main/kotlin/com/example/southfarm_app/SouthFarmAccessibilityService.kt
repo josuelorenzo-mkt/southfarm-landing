@@ -34,7 +34,7 @@ const val TEST_NO_OVERLAYS = false
 // TEST_NO_LOADING_OVERLAY controls ONLY the fullscreen loading overlay
 // (SouthFarmLoadingService): true = hidden in QA so the live phone screen
 // stays visible during scans/warmups. MUST be false in production.
-const val TEST_NO_LOADING_OVERLAY = true
+const val TEST_NO_LOADING_OVERLAY = false
 
 class SouthFarmAccessibilityService : AccessibilityService() {
 
