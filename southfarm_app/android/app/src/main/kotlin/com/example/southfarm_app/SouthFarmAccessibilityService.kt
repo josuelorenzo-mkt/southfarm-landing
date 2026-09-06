@@ -1157,6 +1157,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         warmupThread = Thread {
             try {
+                // Defensive clean start: never launch into an app left alive
+                // by a previous task (mirrors the scan flows).
+                closeSocialAppForCleanStart(currentWarmupPlatform)
                 runWarmupLoop(username, durationMinutes)
             } catch (e: InterruptedException) {
                 Log.i(TAG, "Warmup interrupted")
@@ -2029,44 +2032,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             return
         }
         try {
-            // The warmup loops close on finish and the startWarmup finally
-            // runs right after — don't redo the whole sequence.
-            val now = System.currentTimeMillis()
-            if (pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L) {
-                Log.i(TAG, "Clean exit for $pkg already done recently, skipping")
-                return
-            }
-
-            // 1) Right nav button: open the app switcher (recents)
-            performGlobalAction(GLOBAL_ACTION_RECENTS)
-            cleanupSleep(2000)
-
-            // 2) One fling up over the centered app card: dismisses it from
-            //    the switcher, closing the app completely. The touch must
-            //    start INSIDE the card (its lower edge sits near mid-screen
-            //    in the launcher overview) and be straight and fast — a slow
-            //    or curved drag reads as scrolling the switcher.
-            val dismissed = try {
-                val path = Path().apply {
-                    moveTo(screenWidth / 2f, screenHeight * 0.45f)
-                    lineTo(screenWidth / 2f, screenHeight * 0.08f)
-                }
-                dispatchGesture(
-                    GestureDescription.Builder()
-                        .addStroke(GestureDescription.StrokeDescription(path, 0, 250L))
-                        .build(),
-                    null, null,
-                )
-            } catch (e: Exception) {
-                Log.w(TAG, "dismiss swipe failed: ${e.message}")
-                false
-            }
-            cleanupSleep(1000)
-
-            // 3) Center nav button: go to the phone home screen
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            cleanupSleep(500)
-
+            // Cheap and UI-free: kill background processes up front so even
+            // when the recents choreography is skipped the app ends up dead.
             try {
                 val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                 am.killBackgroundProcesses(pkg)
@@ -2074,10 +2041,91 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "killBackgroundProcesses($pkg) failed: ${e.message}")
             }
 
+            fun socialAppInForeground(): Boolean {
+                val foreground = try {
+                    rootInActiveWindow?.packageName?.toString()
+                } catch (e: Exception) {
+                    Log.w(TAG, "rootInActiveWindow failed: ${e.message}")
+                    null
+                }
+                return foreground == pkg
+            }
+
+            // The recents+fling choreography is disruptive, so skip it when
+            // it just ran for this package — but only while the app is NOT
+            // in the foreground. A foreground app means the earlier close
+            // failed (e.g. the fling missed), so it must run again.
+            val now = System.currentTimeMillis()
+            if (pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L &&
+                !socialAppInForeground()
+            ) {
+                Log.i(TAG, "Clean exit for $pkg already done recently, skipping")
+                return
+            }
+
+            // 1) Right nav button: open the app switcher (recents)
+            // 2) One fling up over the centered app card: dismisses it from
+            //    the switcher, closing the app completely. The touch must
+            //    start INSIDE the card (its lower edge sits near mid-screen
+            //    in the launcher overview) and be straight and fast — a slow
+            //    or curved drag reads as scrolling the switcher.
+            // 3) Center nav button: go to the phone home screen.
+            // The fling cannot be verified directly, so verify the outcome:
+            // the social app must NOT be the foreground window afterwards.
+            var cleaned = false
+            for (attempt in 1..3) {
+                val recentsOpened = try {
+                    performGlobalAction(GLOBAL_ACTION_RECENTS)
+                } catch (e: Exception) {
+                    Log.w(TAG, "GLOBAL_ACTION_RECENTS failed: ${e.message}")
+                    false
+                }
+                if (!recentsOpened) {
+                    Log.w(TAG, "SF-CLEAN: recents did not open (attempt $attempt)")
+                }
+                cleanupSleep(if (attempt == 1) 2000L else 3000L)
+
+                val dismissed = try {
+                    val path = Path().apply {
+                        moveTo(screenWidth / 2f, screenHeight * 0.45f)
+                        lineTo(screenWidth / 2f, screenHeight * 0.08f)
+                    }
+                    dispatchGesture(
+                        GestureDescription.Builder()
+                            .addStroke(GestureDescription.StrokeDescription(path, 0, 250L))
+                            .build(),
+                        null, null,
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "dismiss swipe failed: ${e.message}")
+                    false
+                }
+                cleanupSleep(1000)
+
+                // 3) Center nav button: go to the phone home screen
+                performGlobalAction(GLOBAL_ACTION_HOME)
+                cleanupSleep(500)
+
+                try {
+                    val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                    am.killBackgroundProcesses(pkg)
+                } catch (e: Exception) {
+                    Log.w(TAG, "killBackgroundProcesses($pkg) failed: ${e.message}")
+                }
+
+                if (!socialAppInForeground()) {
+                    cleaned = true
+                    Log.i(TAG, "Clean exit for $pkg done (recents+fling+home, dismissed=$dismissed, attempt=$attempt)")
+                    Log.e(TAG, "SF-CLEAN: done pkg=$pkg recents_fling_home dismissed=$dismissed attempt=$attempt")
+                    break
+                }
+                Log.w(TAG, "SF-CLEAN: $pkg still foreground after attempt $attempt, retrying")
+            }
+            if (!cleaned) {
+                Log.e(TAG, "SF-CLEAN: $pkg still foreground after 3 attempts, giving up")
+            }
             lastCleanExitPackage = pkg
             lastCleanExitAtMs = System.currentTimeMillis()
-            Log.i(TAG, "Clean exit for $pkg done (recents+fling+home, dismissed=$dismissed)")
-            Log.e(TAG, "SF-CLEAN: done pkg=$pkg recents_fling_home dismissed=$dismissed")
         } catch (e: Exception) {
             Log.e(TAG, "Clean exit for $pkg failed: ${e.message}")
             Log.e(TAG, "SF-CLEAN: FAILED pkg=$pkg err=${e.message}")
@@ -4137,6 +4185,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             }
             Thread.sleep(800)
 
+            // Defensive clean start: a previous task may have left the app
+            // alive in a state the scanner cannot navigate (e.g. stuck on
+            // the account switcher). Cheap no-op when already clean.
+            closeSocialAppForCleanStart("tiktok")
+
             debugLog("TikTok scan: opening app")
             if (!openTikTok()) return accounts
             // Wait bounded for TikTok to reach the foreground instead of
@@ -4166,6 +4219,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             if (close != null) clickNode(close)
             switcherRoot.recycle()
             debugLog("TIKTOK ACCOUNT SCAN RESULT: ${accounts.size} accounts -> $accounts")
+            // Final loading stage, mirroring the Instagram scan.
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Saving info..."))
+            Thread.sleep(800)
         } catch (e: Exception) {
             debugLog("TIKTOK SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting TikTok accounts: ${e.message}", e)
@@ -4222,6 +4278,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             }
             Thread.sleep(800)
 
+            // Defensive clean start (see TikTok scan).
+            closeSocialAppForCleanStart("youtube")
+
             debugLog("YouTube scan: opening app")
             if (!openYouTube()) return channels
             Thread.sleep(4000)
@@ -4251,6 +4310,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 "YOUTUBE CHANNEL SCAN RESULT: ${channels.size} channels -> " +
                     channels.map { "@${it.handle}(${it.sourceAccountName})" },
             )
+            // Final loading stage, mirroring the Instagram scan.
+            SouthFarmLoadingService.showLoading(SfStrings.s(this, "Saving info..."))
+            Thread.sleep(800)
         } catch (e: Exception) {
             debugLog("YOUTUBE SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting YouTube channels: ${e.message}", e)
@@ -4303,6 +4365,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 Thread.sleep(100)
             }
             Thread.sleep(400)
+
+            // Defensive clean start (see TikTok scan): a leftover switcher
+            // from a previous task breaks Profile navigation below.
+            closeSocialAppForCleanStart("instagram")
 
             // Step 1: Open Instagram
             debugLog("Step 1: Opening Instagram...")
