@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
@@ -1019,6 +1020,8 @@ class AuthService {
       'refresh_token',
       'user_email',
       'user_name',
+      'workspace_name',
+      'user_role',
     ]) {
       await prefs.remove(key);
       _logSessionEvent('remove', key, reason);
@@ -1262,6 +1265,28 @@ class AuthService {
               'registerDevice',
             );
           }
+          // Device identity for the profile drawer. The backend is the
+          // source of truth for the alias (editable from the command
+          // center); the rest come straight from the platform channel.
+          if (data is Map && data['device'] is Map) {
+            final device = Map<String, dynamic>.from(data['device'] as Map);
+            final alias = (device['alias'] ?? device['display_name'] ?? '')
+                .toString()
+                .trim();
+            if (alias.isNotEmpty) {
+              await prefs.setString('device_alias', alias);
+            }
+          }
+          final model = (deviceInfo['device_name'] ?? '').trim();
+          if (model.isNotEmpty) await prefs.setString('device_model', model);
+          final androidVersion = (deviceInfo['android_version'] ?? '').trim();
+          if (androidVersion.isNotEmpty) {
+            await prefs.setString('android_version', androidVersion);
+          }
+          final appVersion = (deviceInfo['app_version'] ?? '').trim();
+          if (appVersion.isNotEmpty) {
+            await prefs.setString('app_version', appVersion);
+          }
           await _setDevicePaired(prefs, true, 'registerDevice');
         });
         print('[Device] Registered: ${deviceInfo['device_name']}');
@@ -1281,6 +1306,46 @@ class AuthService {
       print('[Device] Register error: $e');
     }
     return DeviceRegistrationResult.unavailable;
+  }
+
+  /// Refreshes the session identity cached in prefs (workspace name, role,
+  /// user name/email) from GET /auth/me. Best-effort: on failure the cached
+  /// values stay untouched so the profile drawer always has something to
+  /// show, even offline.
+  static Future<bool> fetchSessionInfo() async {
+    try {
+      final token = await getValidAuthToken();
+      if (token == null) return false;
+      final res = await http
+          .get(
+            Uri.parse('$API_BASE/auth/me'),
+            headers: {'Authorization': 'Bearer $token'},
+          )
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return false;
+      final data = jsonDecode(res.body);
+      if (data is! Map || data['user'] is! Map) return false;
+      final user = Map<String, dynamic>.from(data['user'] as Map);
+      await _enqueue(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final name = (user['name'] ?? '').toString().trim();
+        if (name.isNotEmpty) await prefs.setString('user_name', name);
+        final email = (user['email'] ?? '').toString().trim();
+        if (email.isNotEmpty) await prefs.setString('user_email', email);
+        final role = (user['role'] ?? '').toString().trim();
+        if (role.isNotEmpty) await prefs.setString('user_role', role);
+        final workspace = user['workspace'];
+        final workspaceName =
+            workspace is Map ? (workspace['name'] ?? '').toString().trim() : '';
+        if (workspaceName.isNotEmpty) {
+          await prefs.setString('workspace_name', workspaceName);
+        }
+      });
+      return true;
+    } catch (e) {
+      print('[Auth] Fetch session info error: $e');
+      return false;
+    }
   }
 
   static Future<bool> claimDevice({
@@ -1845,7 +1910,16 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   final _historyKey = GlobalKey<State<HistoryScreen>>();
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   String _userName = '';
+  String _userEmail = '';
+  String _workspaceName = '';
+  String _userRole = '';
+  String _deviceAlias = '';
+  String _deviceModel = '';
+  String _androidVersion = '';
+  String _appVersion = '';
+  String _languageLabel = '';
   bool _accessibilityEnabled = false;
   bool _serviceRunning = false;
   bool _ensureDeviceRunning = false;
@@ -1855,6 +1929,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _languageLabel = systemLanguageLabel();
     _loadUser();
     _ensureDevice();
     _refreshServiceHealth();
@@ -1897,8 +1972,27 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _loadUser() async {
+    await _loadSessionPrefs();
+    // Workspace and role are not part of the login payload; fetch them from
+    // /auth/me and re-read whatever came back. Cached values survive a
+    // failed fetch so the drawer always has something to show.
+    await AuthService.fetchSessionInfo();
+    await _loadSessionPrefs();
+  }
+
+  Future<void> _loadSessionPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() => _userName = prefs.getString('user_name') ?? '');
+    if (!mounted) return;
+    setState(() {
+      _userName = prefs.getString('user_name') ?? '';
+      _userEmail = prefs.getString('user_email') ?? '';
+      _workspaceName = prefs.getString('workspace_name') ?? '';
+      _userRole = prefs.getString('user_role') ?? '';
+      _deviceAlias = prefs.getString('device_alias') ?? '';
+      _deviceModel = prefs.getString('device_model') ?? '';
+      _androidVersion = prefs.getString('android_version') ?? '';
+      _appVersion = prefs.getString('app_version') ?? '';
+    });
   }
 
   Future<void> _ensureDevice() async {
@@ -1970,7 +2064,25 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: sfBg,
+      // The drawer only opens from the profile chip: a right-edge drag would
+      // fight the system back gesture.
+      drawerEdgeDragWidth: 0,
+      endDrawer: _ProfileDrawer(
+        userName: _userName,
+        userEmail: _userEmail,
+        workspaceName: _workspaceName,
+        userRole: _userRole,
+        deviceAlias: _deviceAlias,
+        deviceModel: _deviceModel,
+        androidVersion: _androidVersion,
+        appVersion: _appVersion,
+        languageLabel: _languageLabel,
+        accessibilityEnabled: _accessibilityEnabled,
+        serviceRunning: _serviceRunning,
+        onLogout: _showLogoutDialog,
+      ),
       body: Column(
         children: [
           Container(
@@ -1980,7 +2092,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 const SouthFarmLogo(fontSize: 24, leafIcon: Icons.eco),
                 const Spacer(),
                 GestureDetector(
-                  onTap: () => _showLogoutDialog(),
+                  onTap: () =>
+                      _scaffoldKey.currentState?.openEndDrawer(),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
@@ -2094,6 +2207,378 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ),
           BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Profile Drawer ───
+
+/// Human-readable label for the device's current system locale
+/// (e.g. "es-AR" → "Spanish (Argentina)"). The app UI is English-only
+/// today, so the label is explicitly marked as the system language.
+String systemLanguageLabel() {
+  final parts = Platform.localeName.replaceAll('_', '-').split('-');
+  const languageNames = {
+    'es': 'Spanish',
+    'en': 'English',
+    'pt': 'Portuguese',
+    'fr': 'French',
+    'de': 'German',
+    'it': 'Italian',
+    'zh': 'Chinese',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'ru': 'Russian',
+    'hi': 'Hindi',
+    'ar': 'Arabic',
+    'nl': 'Dutch',
+    'pl': 'Polish',
+    'tr': 'Turkish',
+  };
+  const regionNames = {
+    'ar': 'Argentina',
+    'mx': 'Mexico',
+    'co': 'Colombia',
+    'cl': 'Chile',
+    'pe': 'Peru',
+    'uy': 'Uruguay',
+    'es': 'Spain',
+    'us': 'United States',
+    'gb': 'United Kingdom',
+    'br': 'Brazil',
+    'pt': 'Portugal',
+  };
+  final language = languageNames[parts[0].toLowerCase()] ?? parts[0];
+  final region = parts.length > 1
+      ? regionNames[parts[1].toLowerCase()]
+      : null;
+  return region != null ? '$language ($region)' : language;
+}
+
+Color _roleColor(String role) {
+  switch (role.toLowerCase()) {
+    case 'owner':
+      return sfAmber;
+    case 'admin':
+      return const Color(0xFF3b82f6);
+    case 'operator':
+      return sfGreen;
+    default:
+      return sfTextSecondary;
+  }
+}
+
+class _ProfileDrawer extends StatelessWidget {
+  const _ProfileDrawer({
+    required this.userName,
+    required this.userEmail,
+    required this.workspaceName,
+    required this.userRole,
+    required this.deviceAlias,
+    required this.deviceModel,
+    required this.androidVersion,
+    required this.appVersion,
+    required this.languageLabel,
+    required this.accessibilityEnabled,
+    required this.serviceRunning,
+    required this.onLogout,
+  });
+
+  final String userName;
+  final String userEmail;
+  final String workspaceName;
+  final String userRole;
+  final String deviceAlias;
+  final String deviceModel;
+  final String androidVersion;
+  final String appVersion;
+  final String languageLabel;
+  final bool accessibilityEnabled;
+  final bool serviceRunning;
+  final VoidCallback onLogout;
+
+  String get _initial => userName.trim().isEmpty
+      ? 'S'
+      : userName.trim().substring(0, 1).toUpperCase();
+
+  @override
+  Widget build(BuildContext context) {
+    final serviceHealthy = accessibilityEnabled && serviceRunning;
+    return Drawer(
+      backgroundColor: sfBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(20),
+          bottomLeft: Radius.circular(20),
+        ),
+      ),
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: 12),
+                children: [
+                  _sectionLabel('WORKSPACE'),
+                  _infoRow(
+                    icon: Icons.hub_outlined,
+                    iconColor: sfGreen,
+                    label: 'Workspace',
+                    value: workspaceName,
+                  ),
+                  _infoRow(
+                    icon: Icons.admin_panel_settings_outlined,
+                    iconColor: userRole.isEmpty
+                        ? sfTextSecondary
+                        : _roleColor(userRole),
+                    label: 'Role',
+                    trailing: _pillBadge(
+                      text: userRole.isEmpty ? 'unknown' : userRole,
+                      color: userRole.isEmpty
+                          ? sfTextSecondary
+                          : _roleColor(userRole),
+                    ),
+                  ),
+                  _sectionLabel('DEVICE'),
+                  _infoRow(
+                    icon: Icons.smartphone,
+                    iconColor: sfGreen,
+                    label: 'Phone',
+                    value: deviceAlias.isNotEmpty
+                        ? deviceAlias
+                        : deviceModel,
+                  ),
+                  if (deviceModel.isNotEmpty && deviceAlias.isNotEmpty)
+                    _infoRow(
+                      icon: Icons.phone_android,
+                      iconColor: sfGreen,
+                      label: 'Model',
+                      value: deviceModel,
+                    ),
+                  _infoRow(
+                    icon: Icons.android_outlined,
+                    iconColor: sfGreen,
+                    label: 'Android',
+                    value: androidVersion,
+                  ),
+                  _infoRow(
+                    icon: Icons.install_mobile_outlined,
+                    iconColor: sfGreen,
+                    label: 'App version',
+                    value: appVersion,
+                  ),
+                  _infoRow(
+                    icon: serviceHealthy
+                        ? Icons.verified_user_outlined
+                        : Icons.warning_amber_rounded,
+                    iconColor: serviceHealthy ? sfGreen : sfAmber,
+                    label: 'Accessibility',
+                    trailing: _pillBadge(
+                      text: serviceHealthy ? 'Active' : 'Disabled',
+                      color: serviceHealthy ? sfGreen : sfAmber,
+                    ),
+                  ),
+                  _sectionLabel('PREFERENCES'),
+                  _infoRow(
+                    icon: Icons.translate,
+                    iconColor: sfGreen,
+                    label: 'Language (system)',
+                    value: languageLabel,
+                  ),
+                ],
+              ),
+            ),
+            const Divider(color: sfBorder, height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    onLogout();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.logout, color: Colors.redAccent, size: 20),
+                        SizedBox(width: 12),
+                        Text(
+                          'Log out',
+                          style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+      decoration: const BoxDecoration(
+        color: sfCard,
+        border: Border(bottom: BorderSide(color: sfBorder)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: sfGreen.withValues(alpha: 0.2),
+              border: Border.all(color: sfGreen.withValues(alpha: 0.5)),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              _initial,
+              style: const TextStyle(
+                color: sfGreen,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  userName.isEmpty ? 'SouthFarm user' : userName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: sfTextPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (userEmail.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    userEmail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: sfTextSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+      child: Text(
+        text.toUpperCase(),
+        style: const TextStyle(
+          color: sfTextSecondary,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 1.2,
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow({
+    required IconData icon,
+    required Color iconColor,
+    required String label,
+    String? value,
+    Widget? trailing,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon, size: 18, color: iconColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: sfTextPrimary,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (trailing != null)
+            trailing
+          else
+            Flexible(
+              child: Text(
+                (value == null || value.isEmpty) ? '—' : value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                  color: sfTextSecondary,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pillBadge({required String text, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        text[0].toUpperCase() + text.substring(1).toLowerCase(),
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.3,
+        ),
       ),
     );
   }
