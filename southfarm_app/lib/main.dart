@@ -145,13 +145,17 @@ class PlatformLogo extends StatelessWidget {
           painter: _InstagramLogoPainter(),
         );
       case 'tiktok':
-        // Keep the exact look the owner already recognizes as the TikTok
-        // logo (white music note).
+        // Official TikTok glyph (simple-icons, viewBox 24x24) painted with
+        // the brand duotone treatment. Kept inside the same dark chip used
+        // before, so the row look is unchanged.
         return Container(
           width: size,
           height: size,
           alignment: Alignment.center,
-          child: Icon(Icons.music_note, color: Colors.white, size: size),
+          child: CustomPaint(
+            size: Size.square(size),
+            painter: _TikTokLogoPainter(),
+          ),
         );
       default:
         return Icon(Icons.camera_alt, size: size);
@@ -223,6 +227,72 @@ class _YouTubeLogoPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _YouTubeLogoPainter oldDelegate) => false;
+}
+
+// Official TikTok brand colors.
+const Color _tikTokCyan = Color(0xFF25F4EE);
+const Color _tikTokRed = Color(0xFFFE2C55);
+
+// Builds the official TikTok glyph (simple-icons "tiktok", 24x24 viewBox)
+// in absolute 24x24 units, scaled by [scale] and translated by [offset].
+// Conversion: every relative cubic ('c' with 6 params) becomes a cubicTo of
+// absolute control/end points accumulated from the current pen position.
+Path _tikTokPath(double scale, Offset offset) {
+  final p = Path();
+  p.moveTo(12.525 * scale + offset.dx, 0.02 * scale + offset.dy);
+  p.cubicTo(13.835 * scale + offset.dx, 0 * scale + offset.dy, 15.135 * scale + offset.dx, 0.01 * scale + offset.dy, 16.435 * scale + offset.dx, 0 * scale + offset.dy);
+  p.cubicTo(16.515 * scale + offset.dx, 1.53 * scale + offset.dy, 17.065 * scale + offset.dx, 3.09 * scale + offset.dy, 18.185 * scale + offset.dx, 4.17 * scale + offset.dy);
+  p.cubicTo(19.305 * scale + offset.dx, 5.28 * scale + offset.dy, 20.885 * scale + offset.dx, 5.79 * scale + offset.dy, 22.425 * scale + offset.dx, 5.96 * scale + offset.dy);
+  p.lineTo(22.425 * scale + offset.dx, 9.99 * scale + offset.dy);
+  p.cubicTo(20.985 * scale + offset.dx, 9.94 * scale + offset.dy, 19.535 * scale + offset.dx, 9.64 * scale + offset.dy, 18.225 * scale + offset.dx, 9.02 * scale + offset.dy);
+  p.cubicTo(17.655 * scale + offset.dx, 8.76 * scale + offset.dy, 17.125 * scale + offset.dx, 8.43 * scale + offset.dy, 16.605 * scale + offset.dx, 8.09 * scale + offset.dy);
+  p.cubicTo(16.595 * scale + offset.dx, 11.01 * scale + offset.dy, 16.615 * scale + offset.dx, 13.93 * scale + offset.dy, 16.585 * scale + offset.dx, 16.84 * scale + offset.dy);
+  p.cubicTo(16.505 * scale + offset.dx, 18.24 * scale + offset.dy, 16.045 * scale + offset.dx, 19.63 * scale + offset.dy, 15.235 * scale + offset.dx, 20.78 * scale + offset.dy);
+  p.cubicTo(13.925 * scale + offset.dx, 22.7 * scale + offset.dy, 11.655 * scale + offset.dx, 23.95 * scale + offset.dy, 9.325 * scale + offset.dx, 23.99 * scale + offset.dy);
+  p.cubicTo(7.895 * scale + offset.dx, 24.07 * scale + offset.dy, 6.465 * scale + offset.dx, 23.68 * scale + offset.dy, 5.245 * scale + offset.dx, 22.96 * scale + offset.dy);
+  p.cubicTo(3.225 * scale + offset.dx, 21.77 * scale + offset.dy, 1.805 * scale + offset.dx, 19.59 * scale + offset.dy, 1.595 * scale + offset.dx, 17.25 * scale + offset.dy);
+  p.cubicTo(1.575 * scale + offset.dx, 16.75 * scale + offset.dy, 1.565 * scale + offset.dx, 16.25 * scale + offset.dy, 1.585 * scale + offset.dx, 15.76 * scale + offset.dy);
+  p.cubicTo(1.765 * scale + offset.dx, 13.86 * scale + offset.dy, 2.705 * scale + offset.dx, 12.04 * scale + offset.dy, 4.165 * scale + offset.dx, 10.8 * scale + offset.dy);
+  p.cubicTo(5.825 * scale + offset.dx, 9.36 * scale + offset.dy, 8.145 * scale + offset.dx, 8.67 * scale + offset.dy, 10.315 * scale + offset.dx, 9.08 * scale + offset.dy);
+  p.cubicTo(10.335 * scale + offset.dx, 10.56 * scale + offset.dy, 10.275 * scale + offset.dx, 12.04 * scale + offset.dy, 10.275 * scale + offset.dx, 13.52 * scale + offset.dy);
+  p.cubicTo(9.285 * scale + offset.dx, 13.2 * scale + offset.dy, 8.125 * scale + offset.dx, 13.29 * scale + offset.dy, 7.255 * scale + offset.dx, 13.89 * scale + offset.dy);
+  p.cubicTo(6.625 * scale + offset.dx, 14.3 * scale + offset.dy, 6.145 * scale + offset.dx, 14.93 * scale + offset.dy, 5.895 * scale + offset.dx, 15.64 * scale + offset.dy);
+  p.cubicTo(5.685 * scale + offset.dx, 16.15 * scale + offset.dy, 5.745 * scale + offset.dx, 16.71 * scale + offset.dy, 5.755 * scale + offset.dx, 17.25 * scale + offset.dy);
+  p.cubicTo(5.995 * scale + offset.dx, 18.89 * scale + offset.dy, 7.575 * scale + offset.dx, 20.27 * scale + offset.dy, 9.255 * scale + offset.dx, 20.12 * scale + offset.dy);
+  p.cubicTo(10.375 * scale + offset.dx, 20.11 * scale + offset.dy, 11.445 * scale + offset.dx, 19.46 * scale + offset.dy, 12.025 * scale + offset.dx, 18.51 * scale + offset.dy);
+  p.cubicTo(12.215 * scale + offset.dx, 18.18 * scale + offset.dy, 12.425 * scale + offset.dx, 17.84 * scale + offset.dy, 12.435 * scale + offset.dx, 17.45 * scale + offset.dy);
+  p.cubicTo(12.535 * scale + offset.dx, 15.66 * scale + offset.dy, 12.495 * scale + offset.dx, 13.88 * scale + offset.dy, 12.505 * scale + offset.dx, 12.09 * scale + offset.dy);
+  p.cubicTo(12.515 * scale + offset.dx, 8.06 * scale + offset.dy, 12.495 * scale + offset.dx, 4.04 * scale + offset.dy, 12.525 * scale + offset.dx, 0.02 * scale + offset.dy);
+  p.close();
+  return p;
+}
+
+// Paints the official TikTok glyph with the brand duotone treatment: cyan
+// copy offset up-left, red copy offset down-right, white copy centered on
+// top (mirrors the layered look of the official logo).
+class _TikTokLogoPainter extends CustomPainter {
+  static const double _inkGap = 0.6; // 24x24-grid gap between color layers
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.shortestSide / 24;
+    final center = Offset(
+      (size.width - 24 * scale) / 2,
+      (size.height - 24 * scale) / 2,
+    );
+    canvas.drawPath(
+      _tikTokPath(scale, center + Offset(-_inkGap, -_inkGap) * scale),
+      Paint()..color = _tikTokCyan,
+    );
+    canvas.drawPath(
+      _tikTokPath(scale, center + Offset(_inkGap, _inkGap) * scale),
+      Paint()..color = _tikTokRed,
+    );
+    canvas.drawPath(_tikTokPath(scale, center), Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TikTokLogoPainter oldDelegate) => false;
 }
 
 // ─── SouthFarm Logo Widget ───
