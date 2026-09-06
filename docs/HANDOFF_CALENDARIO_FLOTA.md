@@ -20,8 +20,19 @@ teléfono) se construyó, probó y pulió toda la experiencia del **Activity Pla
   (logos de red, teléfono, cuenta, horario inicio→fin), pill AHORA en el gutter,
   glow por ventana de ejecución, panel de **acciones rápidas** en el día de clúster.
 
-**Estado: todo implementado, testeado (47/47 backend + 38/38 webapp) y pusheado en
-branches. PRODUCCIÓN NO FUE TOCADA.** Falta el deploy (ver §6).
+**Estado: DEPLOYADO A PRODUCCIÓN el 2026-09-06** (con luz verde del dueño).
+
+- Backend: dist nuevo copiado al runtime + tarea "SouthFarm API" reiniciada
+  (06:08 local). Backup previo: `runtime/backend/backups/dist-pre-deploy-20260906-060804`
+  (rollback = copiarlo de vuelta a `runtime/backend/dist` + reiniciar la tarea).
+  Verificado: health OK, `/move/preview` y `?cluster_id=` responden 401 (antes 404),
+  auditoría de solapes sobre DB productiva: **0 ACTIVOS** (143 vivas, 59 históricos).
+- Webapp: `feature/day-overview-strip` (f618c1e) mergeado fast-forward a `main`
+  → Vercel deployó (verificado por marcadores en el bundle: "All Clusters"
+  presente, "Warmup planner" ausente). Incluye el merge previo con main
+  (avatar + orden de plataformas) testeado.
+- Antes del deploy se corrieron sobre la rama: 47/47 slots + 3 suites de
+  publicaciones + refresh-auth (backend) y 38/38 + lint + build (webapp).
 
 ## 2. Dónde vive cada cosa
 
