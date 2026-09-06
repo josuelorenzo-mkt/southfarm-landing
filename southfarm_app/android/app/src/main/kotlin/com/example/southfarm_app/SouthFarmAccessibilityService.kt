@@ -2822,12 +2822,23 @@ class SouthFarmAccessibilityService : AccessibilityService() {
      * Newer YouTube Shorts builds expose a direct "Save" (or "Guardar")
      * action on the right-hand action rail next to like/comment/share, so a
      * short can be saved with a single tap instead of the More menu flow.
-     * Only nodes in the right third of the screen count, so unrelated "Save"
-     * texts in titles, chips or overlays are ignored. The node is tappable
-     * itself or through a clickable ancestor within the depth clickNode()
-     * walks (same resolution the other node searches in this file rely on).
-     * Returns null when no direct rail button is exposed; the caller then
-     * falls back to the legacy More -> Save to playlist flow.
+     * Observed on a real uiautomator dump (08) with a Short on screen: the
+     * button is the only node in the whole tree whose content-desc is
+     * EXACTLY "Save"; it is a clickable android.view.ViewGroup with no
+     * resource-id, sitting on the right rail at roughly 82% of the screen
+     * width (bounds [592,960][720,1080] on a 720px-wide display). Only nodes
+     * in the right 60% of the screen count, so unrelated "Save" texts in
+     * titles, chips or overlays are ignored. The description is compared by
+     * exact equality (trimmed, case-insensitive) because the already-saved
+     * state exposes desc "Saved" (YouTube standard) and the previous
+     * contains() match would tap it again and UNSAVE the short. The tappable
+     * info lives in content-desc, not node.text, so text is not considered;
+     * the "Save" label seen visually is on a non-clickable child TextView.
+     * The node is clickable itself or through a clickable ancestor within
+     * the depth clickNode() walks (same resolution the other node searches
+     * in this file rely on). Returns null when no direct rail button is
+     * exposed; the caller then falls back to the legacy More -> Save to
+     * playlist flow.
      */
     private fun findYouTubeSaveButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         fun hasClickableSelfOrAncestor(node: AccessibilityNodeInfo): Boolean {
@@ -2844,12 +2855,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         return findNodeByPredicate(root) { node ->
             if (!node.isVisibleToUser) return@findNodeByPredicate false
-            val description = node.contentDescription?.toString() ?: ""
-            val text = node.text?.toString() ?: ""
-            val matchesLabel = description.contains("Save", ignoreCase = true) ||
-                description.contains("Guardar", ignoreCase = true) ||
-                text.contains("Save", ignoreCase = true) ||
-                text.contains("Guardar", ignoreCase = true)
+            val description = node.contentDescription?.toString()?.trim() ?: ""
+            val matchesLabel = description.equals("Save", ignoreCase = true) ||
+                description.equals("Guardar", ignoreCase = true)
             if (!matchesLabel) return@findNodeByPredicate false
             val bounds = android.graphics.Rect()
             node.getBoundsInScreen(bounds)
