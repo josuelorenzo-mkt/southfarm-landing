@@ -3,7 +3,9 @@ package com.example.southfarm_app
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityManager
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -24,6 +26,15 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Random
+
+// TEST_NO_OVERLAYS controls ONLY the warmup control bubble
+// (SouthFarmOverlayService): false = bubble visible. Stays false in QA so
+// warmups can be paused; also false in production.
+const val TEST_NO_OVERLAYS = false
+// TEST_NO_LOADING_OVERLAY controls ONLY the fullscreen loading overlay
+// (SouthFarmLoadingService): true = hidden in QA so the live phone screen
+// stays visible during scans/warmups. MUST be false in production.
+const val TEST_NO_LOADING_OVERLAY = true
 
 class SouthFarmAccessibilityService : AccessibilityService() {
 
@@ -618,7 +629,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
                 overlayIntent.putExtra("username", account)
                 overlayIntent.putExtra("duration", duration)
-                startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) startService(overlayIntent)
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting overlay: ${e.message}")
             }
@@ -1139,7 +1150,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // Start loading overlay (Service-based — can draw over other apps)
         try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            startForegroundService(loadingIntent)
+            if (!TEST_NO_LOADING_OVERLAY) startForegroundService(loadingIntent)
         } catch (e: Exception) {
             Log.e(TAG, "Could not start loading overlay: ${e.message}")
         }
@@ -1174,6 +1185,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error stopping loading overlay: ${e.message}")
                 }
+                // Close the social app so the next launch starts from its home
+                // screen (covers finished, errored, stopped and remote-cancel).
+                closeSocialAppForCleanStart(currentWarmupPlatform)
                 returnToSouthFarm(paused = false)
             }
         }
@@ -1286,22 +1300,27 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         }
         xml.append("</hierarchy>\n")
 
-        val dir = getExternalFilesDir(null)
-        if (dir == null) {
-            Log.e(TAG, "dumpActiveWindowXml: getExternalFilesDir(null) is NULL")
-            return
-        }
+        // The dump goes to both the external files dir (legacy PC worker path)
+        // and the internal filesDir: on Android 11+ adb/run-as cannot traverse
+        // /sdcard/Android/data of another app, so the internal copy is the one
+        // `adb shell run-as ... cat files/southfarm_ui.xml` can retrieve.
+        val dirs = mutableListOf(filesDir)
+        getExternalFilesDir(null)?.let { dirs.add(it) }
         try {
-            val tmpFile = java.io.File(dir, "southfarm_ui.xml.tmp")
-            val finalFile = java.io.File(dir, "southfarm_ui.xml")
-            tmpFile.writeText(xml.toString(), Charsets.UTF_8)
-            if (finalFile.exists()) finalFile.delete()
-            if (!tmpFile.renameTo(finalFile)) {
-                Log.e(TAG, "dumpActiveWindowXml: renameTo failed")
-                return
+            var written = 0L
+            for (dir in dirs) {
+                val tmpFile = java.io.File(dir, "southfarm_ui.xml.tmp")
+                val finalFile = java.io.File(dir, "southfarm_ui.xml")
+                tmpFile.writeText(xml.toString(), Charsets.UTF_8)
+                if (finalFile.exists()) finalFile.delete()
+                if (!tmpFile.renameTo(finalFile)) {
+                    Log.e(TAG, "dumpActiveWindowXml: renameTo failed in $dir")
+                    continue
+                }
+                written = finalFile.length()
             }
             val elapsedMs = System.currentTimeMillis() - startedAt
-            Log.i(TAG, "dumpActiveWindowXml: wrote ${finalFile.length()} bytes in ${elapsedMs}ms (${roots.size} window root(s))")
+            Log.i(TAG, "dumpActiveWindowXml: wrote $written bytes in ${elapsedMs}ms (${roots.size} window root(s))")
         } catch (e: Exception) {
             Log.e(TAG, "dumpActiveWindowXml: write error: ${e.message}")
         }
@@ -1419,7 +1438,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     private fun resumeSocialSession(): Boolean {
         return try {
             val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-            startForegroundService(loadingIntent)
+            if (!TEST_NO_LOADING_OVERLAY) startForegroundService(loadingIntent)
             val ready = when (currentWarmupPlatform) {
                 "tiktok" -> {
                     updateLoadingText("Resuming TikTok warmup...")
@@ -1661,7 +1680,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         currentStatus = "finished"
         Log.i(TAG, "Warmup finished: $warmupMetrics")
 
-        // Close Instagram and return to SouthFarm
+        // Close Instagram and return to SouthFarm (clean start next time)
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1802,6 +1822,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         warmupMetrics = buildMetricsJson(totalElapsed, durationSec)
         currentStatus = "finished"
         Log.i(TAG, "TikTok warmup finished: $warmupMetrics")
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1943,6 +1964,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         warmupMetrics = buildMetricsJson(totalElapsed, durationSec)
         currentStatus = "finished"
         Log.i(TAG, "YouTube warmup finished: $warmupMetrics")
+        closeSocialAppForCleanStart(currentWarmupPlatform)
         returnToSouthFarm()
     }
 
@@ -1959,6 +1981,106 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Log.i(TAG, "Returned to SouthFarm (paused=$paused)")
         } catch (e: Exception) {
             Log.e(TAG, "Error returning to SouthFarm: ${e.message}")
+        }
+    }
+
+    // ─── Clean social app exit ───
+
+    // Social apps keep their last screen alive, so the next launch lands
+    // mid-app where task automation can't find its anchors. Closing them
+    // through the recents switcher wipes them from the switcher entirely,
+    // so the next launch is a clean cold start. Sequence per owner spec:
+    // task finishes or stop is received → recents (right nav button) →
+    // wait 2s → swipe up from the center of the screen once → home (center
+    // nav button) → back to SouthFarm (caller's returnToSouthFarm).
+    private var lastCleanExitPackage: String? = null
+    private var lastCleanExitAtMs = 0L
+
+    // Sleeps that swallow interrupts: stopWarmup() interrupts the warmup
+    // thread before this cleanup runs, and a second stop signal must not cut
+    // the close sequence short.
+    private fun cleanupSleep(ms: Long) {
+        var remaining = ms
+        while (remaining > 0) {
+            try {
+                Thread.sleep(remaining)
+                remaining = 0
+            } catch (e: InterruptedException) {
+                remaining -= 100
+                if (remaining < 0) remaining = 0
+            }
+        }
+    }
+
+    private fun socialPackageFor(platform: String?): String? {
+        return when (platform?.lowercase()) {
+            "instagram" -> "com.instagram.android"
+            "tiktok" -> "com.zhiliaoapp.musically"
+            "youtube" -> "com.google.android.youtube"
+            else -> null
+        }
+    }
+
+    private fun closeSocialAppForCleanStart(platform: String?) {
+        Log.e(TAG, "SF-CLEAN: called for platform=$platform")
+        val pkg = socialPackageFor(platform)
+        if (pkg == null) {
+            Log.e(TAG, "SF-CLEAN: no package for platform=$platform, returning")
+            return
+        }
+        try {
+            // The warmup loops close on finish and the startWarmup finally
+            // runs right after — don't redo the whole sequence.
+            val now = System.currentTimeMillis()
+            if (pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L) {
+                Log.i(TAG, "Clean exit for $pkg already done recently, skipping")
+                return
+            }
+
+            // 1) Right nav button: open the app switcher (recents)
+            performGlobalAction(GLOBAL_ACTION_RECENTS)
+            cleanupSleep(2000)
+
+            // 2) One fling up over the centered app card: dismisses it from
+            //    the switcher, closing the app completely. The touch must
+            //    start INSIDE the card (its lower edge sits near mid-screen
+            //    in the launcher overview) and be straight and fast — a slow
+            //    or curved drag reads as scrolling the switcher.
+            val dismissed = try {
+                val path = Path().apply {
+                    moveTo(screenWidth / 2f, screenHeight * 0.45f)
+                    lineTo(screenWidth / 2f, screenHeight * 0.08f)
+                }
+                dispatchGesture(
+                    GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(path, 0, 250L))
+                        .build(),
+                    null, null,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "dismiss swipe failed: ${e.message}")
+                false
+            }
+            cleanupSleep(1000)
+
+            // 3) Center nav button: go to the phone home screen
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            cleanupSleep(500)
+
+            try {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                am.killBackgroundProcesses(pkg)
+            } catch (e: Exception) {
+                Log.w(TAG, "killBackgroundProcesses($pkg) failed: ${e.message}")
+            }
+
+            lastCleanExitPackage = pkg
+            lastCleanExitAtMs = System.currentTimeMillis()
+            Log.i(TAG, "Clean exit for $pkg done (recents+fling+home, dismissed=$dismissed)")
+            Log.e(TAG, "SF-CLEAN: done pkg=$pkg recents_fling_home dismissed=$dismissed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Clean exit for $pkg failed: ${e.message}")
+            Log.e(TAG, "SF-CLEAN: FAILED pkg=$pkg err=${e.message}")
         }
     }
 
@@ -2240,16 +2362,17 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                     }
                 }
                 val profile = findNodeByDesc(root, "Profile", minY = screenHeight - 220)
+                    ?: findNodeByDesc(root, "Perfil", minY = screenHeight - 220)
                     ?: findNodeByText(root, "Profile")
                 if (profile != null && clickNode(profile)) {
                     root.recycle()
                     Log.e(TAG, "TikTok Profile opened on semantic attempt ${attempt + 1}")
-                    Thread.sleep(1800)
+                    Thread.sleep(1200)
                     return true
                 }
                 root.recycle()
             }
-            Thread.sleep(1000)
+            Thread.sleep(600)
         }
         Log.e(TAG, "TikTok Profile semantic control unavailable after retries")
         return false
@@ -2695,7 +2818,73 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             findNodeByTextContains(root, "Guardado en Ver más tarde") != null
     }
 
+    /**
+     * Newer YouTube Shorts builds expose a direct "Save" (or "Guardar")
+     * action on the right-hand action rail next to like/comment/share, so a
+     * short can be saved with a single tap instead of the More menu flow.
+     * Observed on a real uiautomator dump (08) with a Short on screen: the
+     * button is the only node in the whole tree whose content-desc is
+     * EXACTLY "Save"; it is a clickable android.view.ViewGroup with no
+     * resource-id, sitting on the right rail at roughly 82% of the screen
+     * width (bounds [592,960][720,1080] on a 720px-wide display). Only nodes
+     * in the right 60% of the screen count, so unrelated "Save" texts in
+     * titles, chips or overlays are ignored. The description is compared by
+     * exact equality (trimmed, case-insensitive) because the already-saved
+     * state exposes desc "Saved" (YouTube standard) and the previous
+     * contains() match would tap it again and UNSAVE the short. The tappable
+     * info lives in content-desc, not node.text, so text is not considered;
+     * the "Save" label seen visually is on a non-clickable child TextView.
+     * The node is clickable itself or through a clickable ancestor within
+     * the depth clickNode() walks (same resolution the other node searches
+     * in this file rely on). Returns null when no direct rail button is
+     * exposed; the caller then falls back to the legacy More -> Save to
+     * playlist flow.
+     */
+    private fun findYouTubeSaveButton(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun hasClickableSelfOrAncestor(node: AccessibilityNodeInfo): Boolean {
+            if (node.isClickable) return true
+            var parent = node.parent
+            var depth = 0
+            while (parent != null && depth < 4) {
+                if (parent.isClickable) return true
+                parent = parent.parent
+                depth++
+            }
+            return false
+        }
+
+        return findNodeByPredicate(root) { node ->
+            if (!node.isVisibleToUser) return@findNodeByPredicate false
+            val description = node.contentDescription?.toString()?.trim() ?: ""
+            val matchesLabel = description.equals("Save", ignoreCase = true) ||
+                description.equals("Guardar", ignoreCase = true)
+            if (!matchesLabel) return@findNodeByPredicate false
+            val bounds = android.graphics.Rect()
+            node.getBoundsInScreen(bounds)
+            bounds.left >= (screenWidth * 0.6f).toInt() &&
+                hasClickableSelfOrAncestor(node)
+        }
+    }
+
     private fun saveYouTubeShort(root: AccessibilityNodeInfo): Boolean {
+        // Fast path: YouTube Shorts now render a direct rail "Save" button.
+        // One tap on it completes the save; the full More -> Save to playlist
+        // flow below stays untouched and is used only when the rail button is
+        // not exposed on screen.
+        val freshRoot = getYouTubeRoot() ?: root
+        val saveButton = findYouTubeSaveButton(freshRoot)
+        if (saveButton != null) {
+            val tapped = clickNode(saveButton)
+            if (freshRoot !== root) freshRoot.recycle()
+            if (tapped) {
+                Log.e(TAG, "YouTube save via direct Save button")
+                return true
+            }
+            Log.e(TAG, "YouTube direct Save button tap failed; falling back to More menu flow")
+        } else if (freshRoot !== root) {
+            freshRoot.recycle()
+        }
+
         val currentRoot = getYouTubeRoot() ?: root
         val more = findYouTubeMoreNode(currentRoot)
         if (more == null) {
@@ -3939,10 +4128,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("=== TIKTOK ACCOUNT SCAN ===")
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning TikTok...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent)
+                if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting TikTok scan overlays: ${e.message}")
             }
@@ -3950,7 +4139,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             debugLog("TikTok scan: opening app")
             if (!openTikTok()) return accounts
-            Thread.sleep(3500)
+            // Wait bounded for TikTok to reach the foreground instead of
+            // paying a fixed 3.5s sleep; navigateTikTokToProfile's retry
+            // loop absorbs any remaining wait if the app is slow to start.
+            for (i in 0 until 12) {
+                if (getTikTokRoot() != null) break
+                Thread.sleep(500)
+            }
 
             debugLog("TikTok scan: opening Profile semantically")
             if (!navigateTikTokToProfile()) return accounts
@@ -3975,6 +4170,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("TIKTOK SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting TikTok accounts: ${e.message}", e)
         } finally {
+            closeSocialAppForCleanStart("tiktok")
             try { returnToSouthFarm() } catch (e: Exception) { Log.e(TAG, "Error returning after TikTok scan: ${e.message}") }
             Thread.sleep(500)
             try { SouthFarmLoadingService.dismissLoading() } catch (_: Exception) {}
@@ -4017,10 +4213,10 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("=== YOUTUBE CHANNEL SCAN ===")
             try {
                 val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(overlayIntent) else startService(overlayIntent) }
                 SouthFarmLoadingService.setInitialText("Scanning YouTube channels...")
                 val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent)
+                if (!TEST_NO_LOADING_OVERLAY) { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(loadingIntent) else startService(loadingIntent) }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting YouTube scan overlays: ${e.message}")
             }
@@ -4059,6 +4255,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             debugLog("YOUTUBE SCAN ERROR: ${e.message}")
             Log.e(TAG, "Error detecting YouTube channels: ${e.message}", e)
         } finally {
+            closeSocialAppForCleanStart("youtube")
             try { returnToSouthFarm() } catch (e: Exception) { Log.e(TAG, "Error returning after YouTube scan: ${e.message}") }
             Thread.sleep(500)
             try { SouthFarmLoadingService.dismissLoading() } catch (_: Exception) {}
@@ -4070,15 +4267,18 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     fun detectInstagramAccounts(): List<String> {
         val accounts = mutableListOf<String>()
         try {
+            Log.e(TAG, "SF-NOOVERLAY: overlay-free TEST build, scan starting")
             debugLog("=== ACCOUNT SCAN v5 (loading overlay) ===")
 
             // [Loading Overlay] Keep Instagram interaction protected while scanning.
             try {
-                val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(overlayIntent)
-                } else {
-                    startService(overlayIntent)
+                if (!TEST_NO_OVERLAYS) {
+                    val overlayIntent = Intent(applicationContext, SouthFarmOverlayService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(overlayIntent)
+                    } else {
+                        startService(overlayIntent)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting overlay for scan: ${e.message}")
@@ -4086,18 +4286,20 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Thread.sleep(500)
 
             try {
-                SouthFarmLoadingService.setInitialText("Scanning app...")
-                val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(loadingIntent)
-                } else {
-                    startService(loadingIntent)
+                if (!TEST_NO_LOADING_OVERLAY) {
+                    SouthFarmLoadingService.setInitialText("Scanning app...")
+                    val loadingIntent = Intent(applicationContext, SouthFarmLoadingService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(loadingIntent)
+                    } else {
+                        startService(loadingIntent)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error starting loading for scan: ${e.message}")
             }
             for (i in 0..20) {
-                if (SouthFarmLoadingService.isRunning) break
+                if (TEST_NO_LOADING_OVERLAY || SouthFarmLoadingService.isRunning) break
                 Thread.sleep(100)
             }
             Thread.sleep(400)
@@ -4141,43 +4343,81 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Thread.sleep(3000)
             root.recycle()
 
-            // Step 3: Find and tap the username in profile header to open switcher
+            // Step 3: Find and tap the username in profile header to open switcher.
+            // On cold start the profile header can take several seconds to render,
+            // so retry with a fresh root on every attempt until the switcher opens.
             debugLog("Step 3: Finding username header to open switcher...")
-            val profileRoot = getInstagramRoot() ?: run {
-                debugLog("Profile root null")
-                returnToSouthFarm()
-                return accounts
-            }
-
-            if (!openInstagramAccountSwitcher(profileRoot)) {
-                debugLog("Instagram account switcher could not be opened")
+            var switcherOpened = false
+            for (attempt in 1..10) {
+                val profileRoot = getInstagramRoot()
+                if (profileRoot == null) {
+                    debugLog("Switcher open attempt $attempt failed: profile root null")
+                    if (attempt < 10) Thread.sleep(700)
+                    continue
+                }
+                switcherOpened = openInstagramAccountSwitcher(profileRoot)
                 profileRoot.recycle()
+                if (switcherOpened) break
+                debugLog("Switcher open attempt $attempt failed")
+                if (attempt < 10) Thread.sleep(700)
+            }
+            if (!switcherOpened) {
+                debugLog("Instagram account switcher could not be opened")
                 returnToSouthFarm()
                 return accounts
             }
-            profileRoot.recycle()
 
             // Step 4: Read the account switcher popup
             debugLog("Step 4: Reading switcher popup...")
             SouthFarmLoadingService.showLoading("Detecting profiles...")
-            val switcherRoot = getInstagramRoot() ?: run {
-                debugLog("Switcher root null")
-                returnToSouthFarm()
-                return accounts
-            }
-            debugLog("Switcher pkg=${switcherRoot.packageName}")
 
-            // Step 5: Extract accounts from switcher
+            // Step 5: Extract accounts from switcher, consolidating several passes
+            // so rows that render late still make it into the final list.
             // Pattern from UI dump:
             //   - Each account is a ViewGroup with clickable=true
             //   - content-desc = "username" for active, "username, N chats" for others
             //   - The active account has selected=true
             //   - Children include a View with text=username
             debugLog("Step 5: Extracting accounts from switcher...")
-            extractAccountsFromSwitcher(switcherRoot, accounts)
+            var passesWithoutNew = 0
+            val consolidationStartMs = System.currentTimeMillis()
+            for (pass in 1..14) {
+                if (pass > 1) Thread.sleep(700)
+                val switcherRoot = getInstagramRoot()
+                if (switcherRoot == null) {
+                    debugLog("Switcher pass $pass (${System.currentTimeMillis() - consolidationStartMs}ms): root null")
+                    continue
+                }
+                if (pass == 1) debugLog("Switcher pkg=${switcherRoot.packageName}")
+                val passAccounts = mutableListOf<String>()
+                extractAccountsFromSwitcher(switcherRoot, passAccounts)
+                switcherRoot.recycle()
+                var added = 0
+                for (user in passAccounts) {
+                    if (!accounts.any { it.equals(user, ignoreCase = true) }) {
+                        accounts.add(user)
+                        added++
+                    }
+                }
+                val elapsedMs = System.currentTimeMillis() - consolidationStartMs
+                if (added > 0) {
+                    passesWithoutNew = 0
+                    debugLog("Switcher pass $pass (${elapsedMs}ms): +$added new, total=${accounts.size}")
+                } else {
+                    passesWithoutNew++
+                    debugLog("Switcher pass $pass (${elapsedMs}ms): +0 new, total=${accounts.size}")
+                }
+                // Early exit requires BOTH: 3 consecutive passes with no new
+                // accounts AND at least 5s elapsed, so late-rendering rows
+                // (e.g. a 4th account whose notification badge loads slowly
+                // after a cold start) still make it into the final list.
+                if (passesWithoutNew >= 3 && elapsedMs >= 5000L) {
+                    debugLog("Switcher list stabilized after $pass passes (${elapsedMs}ms)")
+                    break
+                }
+            }
 
             debugLog("ACCOUNT SCAN RESULT: ${accounts.size} accounts -> $accounts")
-            switcherRoot.recycle()
 
             // Step 6: Show the final loading state before returning to SouthFarm.
             SouthFarmLoadingService.showLoading("Saving info...")
@@ -4188,6 +4428,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             Log.e(TAG, "Error detecting accounts: ${e.message}", e)
         } finally {
             // Always return to SouthFarm and clean up both layers, including early exits.
+            closeSocialAppForCleanStart("instagram")
             try {
                 returnToSouthFarm()
             } catch (e: Exception) {
@@ -4312,45 +4553,103 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         // - content-desc = "username" (active, selected=true) OR "username, N chats" (others)
         // - Children: ImageView + View(text=username) + ImageView/View(text="N chats")
         // Non-account items are Buttons: "Add Instagram account", "Go to Accounts Center"
-        findSwitcherAccountsStrict(root, accounts)
+        // verbose = true so every switcher row (accepted or rejected) is
+        // traced in logcat; the wait-loop keeps using the quiet default.
+        findSwitcherAccountsStrict(root, accounts, verbose = true)
     }
 
     private fun findSwitcherAccountsStrict(
         node: AccessibilityNodeInfo,
-        accounts: MutableList<String>
+        accounts: MutableList<String>,
+        verbose: Boolean = false
     ) {
-        val desc = node.contentDescription?.toString()?.trim() ?: ""
-        // Instagram changes the metadata suffix depending on the account:
-        // "username", "username, 14 chats", "username, 1 chat and 3 more"
-        // and even "username, 1 follow and 5 more" have all appeared. The
-        // stable signal is the account row itself: a clickable ViewGroup with
-        // either selected=true (the active account) or row metadata after the
-        // username. Do not accept arbitrary clickable labels from the profile
-        // screen, such as follower/following counts.
-        val className = node.className?.toString().orEmpty()
-        val hasRowMetadata = desc.contains(",")
-        val isAccountRow = node.isClickable &&
-            className.endsWith("ViewGroup") &&
-            desc.isNotEmpty() &&
-            (node.isSelected || hasRowMetadata)
-        if (isAccountRow) {
-            // Extract the username from the part before optional row metadata.
-            val username = desc.substringBefore(",").trim()
-            if (username.length in 3..30 &&
-                username.matches(Regex("[a-z0-9._]+")) &&
-                username.any { it.isLetter() } &&
-                !ignoreTexts.any { it.equals(username, ignoreCase = true) }) {
-                if (!accounts.any { it.equals(username, ignoreCase = true) }) {
-                    accounts.add(username)
-                    debugLog("  Found REAL account: $username selected=${node.isSelected} desc=\"$desc\"")
+        // Username validation shared by both tiers (same rules as before):
+        // length, lowercase charset, at least one letter, and not one of the
+        // known non-account labels.
+        fun isValidSwitcherUsername(raw: String): Boolean {
+            return raw.length in 3..30 &&
+                raw.matches(Regex("[a-z0-9._]+")) &&
+                raw.any { it.isLetter() } &&
+                ignoreTexts.none { it.equals(raw, ignoreCase = true) }
+        }
+
+        // One tree walk per tier. The row shape is the same for both (a
+        // clickable ViewGroup with a content-desc); what differs is which
+        // content-descs count as an account.
+        fun walk(n: AccessibilityNodeInfo, tier: Int) {
+            val desc = n.contentDescription?.toString()?.trim() ?: ""
+            // Instagram changes the metadata suffix depending on the account:
+            // "username", "username, 14 chats", "username, 1 chat and 3 more"
+            // and even "username, 1 follow and 5 more" have all appeared. An
+            // account without pending chats/notifications carries a bare
+            // username with no suffix at all. Do not accept arbitrary
+            // clickable labels from the profile screen, such as
+            // follower/following counts.
+            val className = n.className?.toString().orEmpty()
+            val hasRowMetadata = desc.contains(",")
+            val isAccountRow = n.isClickable &&
+                className.endsWith("ViewGroup") &&
+                desc.isNotEmpty() &&
+                when (tier) {
+                    // TIER 1: the active account (selected=true) or rows that
+                    // carry metadata after the username ("username, N chats",
+                    // "username, N likes and X more", "username, N
+                    // notifications"). The active account is ALWAYS selected,
+                    // so a real switcher always yields at least one Tier 1 row.
+                    1 -> n.isSelected || hasRowMetadata
+                    // TIER 2: a bare desc that is EXACTLY a valid username
+                    // (e.g. "growtech.news" with no pending chats or
+                    // notifications). On its own it is indistinguishable from
+                    // profile-screen labels, so this tier is only walked once
+                    // Tier 1 proved we are really on the switcher.
+                    else -> !n.isSelected && !hasRowMetadata &&
+                        isValidSwitcherUsername(desc)
                 }
-                return // Don't recurse into this node's children
+            if (isAccountRow) {
+                // Extract the username from the part before optional row metadata.
+                val username = desc.substringBefore(",").trim()
+                if (isValidSwitcherUsername(username)) {
+                    if (!accounts.any { it.equals(username, ignoreCase = true) }) {
+                        accounts.add(username)
+                        if (tier == 1) {
+                            debugLog("  Found REAL account: $username selected=${n.isSelected} desc=\"$desc\"")
+                        } else {
+                            debugLog("Found account (bare desc): $username")
+                        }
+                    } else if (verbose) {
+                        debugLog("  Switcher row duplicate: username=\"$username\" desc=\"$desc\"")
+                    }
+                    return // Don't recurse into this node's children
+                }
+                if (verbose && tier == 1) {
+                    debugLog(
+                        "  Switcher row rejected: desc=\"$desc\" clickable=${n.isClickable} " +
+                            "selected=${n.isSelected} class=$className pattern=no-match"
+                    )
+                }
+            } else if (verbose && tier == 1 && desc.isNotEmpty()) {
+                // Rejections are only traced during the Tier 1 pass so the
+                // second (bare-username) pass does not duplicate them.
+                debugLog(
+                    "  Switcher row rejected: desc=\"$desc\" clickable=${n.isClickable} " +
+                        "selected=${n.isSelected} class=$className pattern=no-row"
+                )
+            }
+
+            for (i in 0 until n.childCount) {
+                val child = n.getChild(i) ?: continue
+                walk(child, tier)
             }
         }
 
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            findSwitcherAccountsStrict(child, accounts)
+        // Pass 1: rows that self-identify as accounts (selected or with
+        // metadata in the desc).
+        walk(node, tier = 1)
+        // Pass 2: bare username rows, accepted only if Tier 1 already found
+        // at least one row. Zero Tier 1 rows means we are probably NOT on the
+        // switcher, so nothing bare gets accepted.
+        if (accounts.isNotEmpty()) {
+            walk(node, tier = 2)
         }
     }
 

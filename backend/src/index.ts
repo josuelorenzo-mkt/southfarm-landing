@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import https from 'https';
 import path from 'path';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { existsSync, statSync } from 'fs';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
@@ -13,9 +14,10 @@ import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
+import { ensureAvatarStored, fetchInstagramProfilePicUrl, registerAvatarRoutes } from './avatars.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup, type PlannerDeps } from './activity-planner.js';
-import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
+import { signSouthFarmJwt, verifySouthFarmJwt, JWT_SECRET } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
   DAILY_MAX_WARMUP_SECONDS,
@@ -39,6 +41,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
+const APP_APK_PATH = path.resolve(String(process.env.SOUTHFARM_APP_APK_PATH || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'app', 'southfarm.apk')));
+const APP_LINK_TTL_SECONDS = Math.min(3600, Math.max(60, Number(process.env.SOUTHFARM_APP_LINK_TTL_SECONDS || 900)));
 const PUBLISHER_WORKER_TOKEN = String(process.env.SOUTHFARM_PUBLISHER_WORKER_TOKEN || '').trim();
 const PUBLISHER_WORKER_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.SOUTHFARM_PUBLISHER_WORKER_ENABLED || 'false'));
 if (PUBLISHER_WORKER_ENABLED && !PUBLISHER_WORKER_TOKEN) {
@@ -377,6 +381,14 @@ for (const [name, type] of [
   if (!deviceColumns.has(name)) {
     db.exec(`ALTER TABLE devices ADD COLUMN ${name} ${type}`);
   }
+}
+
+const workspaceColumns = new Set(
+  (db.prepare('PRAGMA table_info(workspaces)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!workspaceColumns.has('bridge_url')) {
+  db.exec('ALTER TABLE workspaces ADD COLUMN bridge_url TEXT');
 }
 
 const taskRunColumns = new Set(
@@ -1436,7 +1448,7 @@ function revokeRefreshToken(rawToken: string): void {
 
 function workspaceMembership(userId: number): any | null {
   return db.prepare(`
-    SELECT wm.*, w.name AS workspace_name, w.owner_user_id
+    SELECT wm.*, w.name AS workspace_name, w.owner_user_id, w.bridge_url AS workspace_bridge_url
     FROM workspace_members wm
     JOIN workspaces w ON w.id = wm.workspace_id
     WHERE wm.user_id = ? AND wm.status = 'active'
@@ -2365,6 +2377,7 @@ function authUserView(userId: number): any | null {
       id: membership.workspace_id,
       name: membership.workspace_name,
       owner_user_id: membership.owner_user_id,
+      bridge_url: membership.workspace_bridge_url || null,
     },
   };
 }
@@ -2486,9 +2499,63 @@ app.get('/api/team/members', auth, (req: any, res) => {
     workspace: {
       id: req.user.workspaceId,
       name: workspaceMembership(req.user.userId)?.workspace_name || 'SouthFarm workspace',
+      bridge_url: workspaceMembership(req.user.userId)?.workspace_bridge_url || null,
     },
     members: members.map(memberUserView),
   });
+});
+
+app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const membership = workspaceMembership(req.user.userId);
+  if (!membership) return res.status(403).json({ error: 'User is not a member of a workspace' });
+
+  if ('bridge_url' in req.body) {
+    const rawBridgeUrl = stringValue(req.body.bridge_url);
+    let bridgeUrl: string | null = null;
+    if (rawBridgeUrl) {
+      try {
+        const parsed = new URL(rawBridgeUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        bridgeUrl = parsed.toString().replace(/\/$/, '');
+      } catch {
+        return res.status(400).json({ error: 'bridge_url must be a valid http(s) URL' });
+      }
+    }
+    db.prepare('UPDATE workspaces SET bridge_url = ? WHERE id = ?').run(bridgeUrl, membership.workspace_id);
+  }
+
+  const updated = db.prepare('SELECT bridge_url FROM workspaces WHERE id = ?').get(membership.workspace_id) as any;
+  res.json({ workspace: { id: membership.workspace_id, name: membership.workspace_name, bridge_url: updated?.bridge_url || null } });
+});
+
+// ─── App móvil: descarga autenticada (el APK NO es público) ───
+function signAppDownloadLink(expiresAtEpoch: number): string {
+  const payload = String(expiresAtEpoch);
+  const sig = createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32);
+  return `${payload}.${sig}`;
+}
+
+app.post('/api/devices/app/install-link', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  const expiresAt = Math.floor(Date.now() / 1000) + APP_LINK_TTL_SECONDS;
+  res.json({
+    path: `/api/devices/app/download/${signAppDownloadLink(expiresAt)}`,
+    expires_at: new Date(expiresAt * 1000).toISOString(),
+    size_bytes: statSync(APP_APK_PATH).size,
+  });
+});
+
+app.get('/api/devices/app/download/:token', (req, res) => {
+  const [payload, sig] = String(req.params.token || '').split('.');
+  const expected = payload ? createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32) : '';
+  const sigBuf = Buffer.from(String(sig || ''), 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  if (!payload || !sig || sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+    return res.status(403).json({ error: 'Invalid download link' });
+  }
+  if (Number(payload) * 1000 < Date.now()) return res.status(410).json({ error: 'Download link expired' });
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  res.download(APP_APK_PATH, 'southfarm.apk');
 });
 
 app.get('/api/team/invites', auth, requireRole('owner', 'admin'), (req: any, res) => {
@@ -3927,22 +3994,19 @@ app.patch('/api/tasks/runs/:id', auth, requireRole('owner', 'admin', 'operator')
 });
 
 // ─── IG Accounts (per device) ───
-// ─── Scrape IG profile pic ───
+// ─── Avatar serving + profile-photo pipeline ───
+// Local mirror of the scanned profile photos lives in backend/src/avatars.ts:
+// GET /api/avatars/:filename serves data/avatars/ with a long cache, and
+// ensureAvatarStored() scrapes + downloads a photo for any platform. Registered
+// without auth because clients render these paths directly in <img> tags.
+registerAvatarRoutes(app);
+
+// Legacy Instagram-only scrape kept for the /api/ig-accounts endpoints, which
+// continue to store the CDN URL exactly as before; the implementation now
+// delegates to the shared avatar module so the og:image handling lives in one
+// place.
 function fetchProfilePicUrl(username: string): Promise<string> {
-  return new Promise((resolve) => {
-    const url = `https://www.instagram.com/${username}/`;
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
-      let html = '';
-      res.on('data', (chunk: Buffer) => { html += chunk.toString(); });
-      res.on('end', () => {
-        const match = html.match(/og:image[^>]*content="([^"]+)"/);
-        const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
-        resolve(picUrl);
-      });
-    });
-    req.setTimeout(8000, () => { req.destroy(); resolve(''); });
-    req.on('error', () => resolve(''));
-  });
+  return fetchInstagramProfilePicUrl(username);
 }
 
 app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), async (req: any, res) => {
@@ -4026,6 +4090,16 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
 
+  // Snapshot the photo pointers of the rows about to be wiped by the DELETE
+  // below, so a rescan never loses them. Values may be local /api/avatars/...
+  // paths or absolute CDN URLs stored by older builds — both are used verbatim.
+  const previousPicUrls = new Map<string, string>();
+  for (const row of db.prepare(
+    'SELECT username, profile_pic_url FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?'
+  ).all(dataUserId, numericDeviceId, platform) as Array<{ username: string; profile_pic_url: string }>) {
+    if (row.profile_pic_url) previousPicUrls.set(String(row.username), row.profile_pic_url);
+  }
+
   try {
     // Desvincular referencias ANTES del borrado: task_runs.social_account_id
     // apunta a social_accounts y, con foreign_keys=ON, borrar cuentas
@@ -4048,7 +4122,11 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
        display_name, source_account_name, source_account_email, byline)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
+  const updatePicUrl = db.prepare(
+    'UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?'
+  );
   let insertedCount = 0;
+  const accountsWithoutPic = new Set<string>();
   for (const rawAccount of rawAccounts) {
     const account = rawAccount && typeof rawAccount === 'object'
       ? rawAccount
@@ -4067,14 +4145,33 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
       String(account.source_account_email || ''),
       String(account.byline || ''),
     ).changes || 0);
-    if (platform === 'instagram' && !picUrl) {
-      void fetchProfilePicUrl(username).then((profilePicUrl) => {
-        if (!profilePicUrl) return;
-        db.prepare('UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?')
-          .run(profilePicUrl, dataUserId, numericDeviceId, platform, username);
-      }).catch(() => {});
-    }
+    if (!picUrl) accountsWithoutPic.add(username);
   }
+  // Re-attach photos that survived a previous scan (local data only, no
+  // network, so it happens before the response is sent); the accounts still
+  // left without a photo go through the async avatar pipeline below.
+  const accountsStillWithoutPic = [...accountsWithoutPic].filter((username) => {
+    const previous = previousPicUrls.get(username);
+    if (!previous) return true;
+    updatePicUrl.run(previous, dataUserId, numericDeviceId, platform, username);
+    return false;
+  });
+  // Best-effort avatar pipeline for everything still without a photo, now for
+  // all platforms (Instagram, TikTok, YouTube) and not just Instagram: fetch
+  // the profile page, download the image once into data/avatars/ and store the
+  // local /api/avatars/... path. Runs after the inserts without blocking the
+  // response, and skips the external scrape when the file already exists.
+  void (async () => {
+    for (const username of accountsStillWithoutPic) {
+      try {
+        const storedUrl = await ensureAvatarStored(platform, username);
+        if (!storedUrl) continue;
+        updatePicUrl.run(storedUrl, dataUserId, numericDeviceId, platform, username);
+      } catch {
+        // Best-effort: leave profile_pic_url empty and move on.
+      }
+    }
+  })();
   const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), platform, {
     accountsFound: insertedCount,
     status: req.body.scan_status,

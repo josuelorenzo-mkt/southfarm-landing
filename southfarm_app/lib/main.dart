@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'i18n.dart';
 
 const String defaultApiBase = 'https://api.southfarm.tech/api';
 String apiUrl = defaultApiBase;
@@ -21,6 +22,7 @@ const Color sfAmber = Color(0xFFf59e0b);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await loadAppLanguage();
   // Debug builds may override the API base at runtime (set via the
   // SET_API_BASE broadcast → SharedPreferences key 'api_base').
   if (kDebugMode) {
@@ -36,14 +38,47 @@ Future<void> main() async {
   runApp(const SouthFarmApp());
 }
 
-class SouthFarmApp extends StatelessWidget {
+class SouthFarmApp extends StatefulWidget {
   const SouthFarmApp({super.key});
+
+  @override
+  State<SouthFarmApp> createState() => _SouthFarmAppState();
+}
+
+class _SouthFarmAppState extends State<SouthFarmApp> {
+  // t() reads a global, so switching languages requires rebuilding the
+  // whole tree: the ValueKey below remounts MaterialApp whenever the
+  // language preference changes.
+  void _onLanguageChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    appLanguageNotifier.addListener(_onLanguageChanged);
+  }
+
+  @override
+  void dispose() {
+    appLanguageNotifier.removeListener(_onLanguageChanged);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      key: ValueKey('app-language-${appLanguageNotifier.value}'),
       title: 'SouthFarm',
       debugShowCheckedModeBanner: false,
+      supportedLocales: const [
+        Locale('en'),
+        Locale('es'),
+        Locale('pt'),
+      ],
+      locale: followingSystem
+          ? null
+          : Locale(appLanguageNotifier.value),
       theme: ThemeData(
         colorSchemeSeed: sfGreen,
         brightness: Brightness.dark,
@@ -80,6 +115,219 @@ class InstagramLogo extends StatelessWidget {
   Widget build(BuildContext context) {
     return Image.asset('assets/ig_logo.png', width: size, height: size);
   }
+}
+
+// Resolves an avatar URL coming from the backend: absolute CDN URLs are
+// kept as-is, while new relative paths like /api/avatars/x.jpg are
+// resolved against the API origin. API_BASE already ends in "/api", so a
+// naive concatenation would produce ".../api/api/avatars/...".
+String resolveAvatarUrl(String? picUrl, String apiBase) {
+  final url = (picUrl ?? '').trim();
+  if (url.isEmpty) return '';
+  if (url.startsWith('http')) return url;
+  if (url.startsWith('/')) {
+    final origin = apiBase.replaceAll(RegExp(r'/api/?$'), '');
+    return '$origin$url';
+  }
+  return url;
+}
+
+// Returns a copy of [list] sorted alphabetically by username
+// (case-insensitive), so every account listing renders in a stable,
+// predictable order regardless of the order in which the backend or a
+// local scan returned the records. 'username' is the identity key for
+// every account flow (Instagram, TikTok and YouTube included).
+List<Map<String, dynamic>> sortAccountsByUsername(
+  List<Map<String, dynamic>> list,
+) {
+  final sorted = List<Map<String, dynamic>>.from(list);
+  sorted.sort(
+    (a, b) => (a['username'] ?? '')
+        .toString()
+        .toLowerCase()
+        .compareTo((b['username'] ?? '').toString().toLowerCase()),
+  );
+  return sorted;
+}
+
+/// Accounts and Warm Up live in the same IndexedStack, so no lifecycle
+/// event tells Warm Up that the account list changed while it was hidden.
+/// AccountsScreen fires this after cleaning or scanning; WarmupScreen
+/// listens and reloads its platform's accounts.
+class AccountsChangeNotifier extends ChangeNotifier {
+  AccountsChangeNotifier._();
+  static final AccountsChangeNotifier instance = AccountsChangeNotifier._();
+  void notifyChanged() => notifyListeners();
+}
+
+// ─── Platform Logo Widget ───
+class PlatformLogo extends StatelessWidget {
+  final String platform;
+  final double size;
+  const PlatformLogo({super.key, required this.platform, this.size = 24});
+
+  @override
+  Widget build(BuildContext context) {
+    switch (platform) {
+      case 'youtube':
+        return CustomPaint(
+          size: Size.square(size),
+          painter: _YouTubeLogoPainter(),
+        );
+      case 'instagram':
+        return CustomPaint(
+          size: Size.square(size),
+          painter: _InstagramLogoPainter(),
+        );
+      case 'tiktok':
+        // Official TikTok glyph (simple-icons, viewBox 24x24) painted with
+        // the brand duotone treatment. Kept inside the same dark chip used
+        // before, so the row look is unchanged.
+        return Container(
+          width: size,
+          height: size,
+          alignment: Alignment.center,
+          child: CustomPaint(
+            size: Size.square(size),
+            painter: _TikTokLogoPainter(),
+          ),
+        );
+      default:
+        return Icon(Icons.camera_alt, size: size);
+    }
+  }
+}
+
+// Paints the Instagram camera glyph — rounded square outline with the
+// brand gradient, concentric lens circle and top-right dot — without
+// image assets.
+class _InstagramLogoPainter extends CustomPainter {
+  static const List<Color> _brand = [
+    Color(0xFFF58529),
+    Color(0xFFDD2A7B),
+    Color(0xFF8134AF),
+    Color(0xFFF7B500),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final stroke = (w * 0.09).clamp(1.5, 3.0).toDouble();
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round
+      ..shader = SweepGradient(
+        colors: [..._brand, _brand.first],
+      ).createShader(Rect.fromLTWH(0, 0, w, w));
+    final rect = Rect.fromLTWH(stroke / 2, stroke / 2, w - stroke, w - stroke);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(w * 0.26)),
+      paint,
+    );
+    canvas.drawCircle(rect.center, w * 0.20, paint);
+    canvas.drawCircle(
+      Offset(w * 0.77, w * 0.23),
+      w * 0.06,
+      Paint()..color = const Color(0xFFDD2A7B),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _InstagramLogoPainter oldDelegate) => false;
+}
+
+// Paints the YouTube play-button mark — red rounded rectangle with a
+// centered white triangle — without image assets.
+class _YouTubeLogoPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+    final rect = Rect.fromLTWH(0, h * 0.16, w, h * 0.68);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, Radius.circular(w * 0.24)),
+      Paint()..color = const Color(0xFFFF0000),
+    );
+    final center = rect.center;
+    final t = w * 0.16;
+    final path =
+        Path()
+          ..moveTo(center.dx - t * 0.7, center.dy - t)
+          ..lineTo(center.dx + t, center.dy)
+          ..lineTo(center.dx - t * 0.7, center.dy + t)
+          ..close();
+    canvas.drawPath(path, Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant _YouTubeLogoPainter oldDelegate) => false;
+}
+
+// Official TikTok brand colors.
+const Color _tikTokCyan = Color(0xFF25F4EE);
+const Color _tikTokRed = Color(0xFFFE2C55);
+
+// Builds the official TikTok glyph (simple-icons "tiktok", 24x24 viewBox)
+// in absolute 24x24 units, scaled by [scale] and translated by [offset].
+// Conversion: every relative cubic ('c' with 6 params) becomes a cubicTo of
+// absolute control/end points accumulated from the current pen position.
+Path _tikTokPath(double scale, Offset offset) {
+  final p = Path();
+  p.moveTo(12.525 * scale + offset.dx, 0.02 * scale + offset.dy);
+  p.cubicTo(13.835 * scale + offset.dx, 0 * scale + offset.dy, 15.135 * scale + offset.dx, 0.01 * scale + offset.dy, 16.435 * scale + offset.dx, 0 * scale + offset.dy);
+  p.cubicTo(16.515 * scale + offset.dx, 1.53 * scale + offset.dy, 17.065 * scale + offset.dx, 3.09 * scale + offset.dy, 18.185 * scale + offset.dx, 4.17 * scale + offset.dy);
+  p.cubicTo(19.305 * scale + offset.dx, 5.28 * scale + offset.dy, 20.885 * scale + offset.dx, 5.79 * scale + offset.dy, 22.425 * scale + offset.dx, 5.96 * scale + offset.dy);
+  p.lineTo(22.425 * scale + offset.dx, 9.99 * scale + offset.dy);
+  p.cubicTo(20.985 * scale + offset.dx, 9.94 * scale + offset.dy, 19.535 * scale + offset.dx, 9.64 * scale + offset.dy, 18.225 * scale + offset.dx, 9.02 * scale + offset.dy);
+  p.cubicTo(17.655 * scale + offset.dx, 8.76 * scale + offset.dy, 17.125 * scale + offset.dx, 8.43 * scale + offset.dy, 16.605 * scale + offset.dx, 8.09 * scale + offset.dy);
+  p.cubicTo(16.595 * scale + offset.dx, 11.01 * scale + offset.dy, 16.615 * scale + offset.dx, 13.93 * scale + offset.dy, 16.585 * scale + offset.dx, 16.84 * scale + offset.dy);
+  p.cubicTo(16.505 * scale + offset.dx, 18.24 * scale + offset.dy, 16.045 * scale + offset.dx, 19.63 * scale + offset.dy, 15.235 * scale + offset.dx, 20.78 * scale + offset.dy);
+  p.cubicTo(13.925 * scale + offset.dx, 22.7 * scale + offset.dy, 11.655 * scale + offset.dx, 23.95 * scale + offset.dy, 9.325 * scale + offset.dx, 23.99 * scale + offset.dy);
+  p.cubicTo(7.895 * scale + offset.dx, 24.07 * scale + offset.dy, 6.465 * scale + offset.dx, 23.68 * scale + offset.dy, 5.245 * scale + offset.dx, 22.96 * scale + offset.dy);
+  p.cubicTo(3.225 * scale + offset.dx, 21.77 * scale + offset.dy, 1.805 * scale + offset.dx, 19.59 * scale + offset.dy, 1.595 * scale + offset.dx, 17.25 * scale + offset.dy);
+  p.cubicTo(1.575 * scale + offset.dx, 16.75 * scale + offset.dy, 1.565 * scale + offset.dx, 16.25 * scale + offset.dy, 1.585 * scale + offset.dx, 15.76 * scale + offset.dy);
+  p.cubicTo(1.765 * scale + offset.dx, 13.86 * scale + offset.dy, 2.705 * scale + offset.dx, 12.04 * scale + offset.dy, 4.165 * scale + offset.dx, 10.8 * scale + offset.dy);
+  p.cubicTo(5.825 * scale + offset.dx, 9.36 * scale + offset.dy, 8.145 * scale + offset.dx, 8.67 * scale + offset.dy, 10.315 * scale + offset.dx, 9.08 * scale + offset.dy);
+  p.cubicTo(10.335 * scale + offset.dx, 10.56 * scale + offset.dy, 10.275 * scale + offset.dx, 12.04 * scale + offset.dy, 10.275 * scale + offset.dx, 13.52 * scale + offset.dy);
+  p.cubicTo(9.285 * scale + offset.dx, 13.2 * scale + offset.dy, 8.125 * scale + offset.dx, 13.29 * scale + offset.dy, 7.255 * scale + offset.dx, 13.89 * scale + offset.dy);
+  p.cubicTo(6.625 * scale + offset.dx, 14.3 * scale + offset.dy, 6.145 * scale + offset.dx, 14.93 * scale + offset.dy, 5.895 * scale + offset.dx, 15.64 * scale + offset.dy);
+  p.cubicTo(5.685 * scale + offset.dx, 16.15 * scale + offset.dy, 5.745 * scale + offset.dx, 16.71 * scale + offset.dy, 5.755 * scale + offset.dx, 17.25 * scale + offset.dy);
+  p.cubicTo(5.995 * scale + offset.dx, 18.89 * scale + offset.dy, 7.575 * scale + offset.dx, 20.27 * scale + offset.dy, 9.255 * scale + offset.dx, 20.12 * scale + offset.dy);
+  p.cubicTo(10.375 * scale + offset.dx, 20.11 * scale + offset.dy, 11.445 * scale + offset.dx, 19.46 * scale + offset.dy, 12.025 * scale + offset.dx, 18.51 * scale + offset.dy);
+  p.cubicTo(12.215 * scale + offset.dx, 18.18 * scale + offset.dy, 12.425 * scale + offset.dx, 17.84 * scale + offset.dy, 12.435 * scale + offset.dx, 17.45 * scale + offset.dy);
+  p.cubicTo(12.535 * scale + offset.dx, 15.66 * scale + offset.dy, 12.495 * scale + offset.dx, 13.88 * scale + offset.dy, 12.505 * scale + offset.dx, 12.09 * scale + offset.dy);
+  p.cubicTo(12.515 * scale + offset.dx, 8.06 * scale + offset.dy, 12.495 * scale + offset.dx, 4.04 * scale + offset.dy, 12.525 * scale + offset.dx, 0.02 * scale + offset.dy);
+  p.close();
+  return p;
+}
+
+// Paints the official TikTok glyph with the brand duotone treatment: cyan
+// copy offset up-left, red copy offset down-right, white copy centered on
+// top (mirrors the layered look of the official logo).
+class _TikTokLogoPainter extends CustomPainter {
+  static const double _inkGap = 0.6; // 24x24-grid gap between color layers
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.shortestSide / 24;
+    final center = Offset(
+      (size.width - 24 * scale) / 2,
+      (size.height - 24 * scale) / 2,
+    );
+    canvas.drawPath(
+      _tikTokPath(scale, center + Offset(-_inkGap, -_inkGap) * scale),
+      Paint()..color = _tikTokCyan,
+    );
+    canvas.drawPath(
+      _tikTokPath(scale, center + Offset(_inkGap, _inkGap) * scale),
+      Paint()..color = _tikTokRed,
+    );
+    canvas.drawPath(_tikTokPath(scale, center), Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(covariant _TikTokLogoPainter oldDelegate) => false;
 }
 
 // ─── SouthFarm Logo Widget ───
@@ -248,12 +496,13 @@ class WarmupApi {
               account['username'] = (account['username'] ?? '')
                   .toString()
                   .replaceFirst(RegExp(r'^@'), '');
-              account['profile_pic_url'] = account['profile_pic_url'] ?? '';
+              // Do NOT inject a default profile_pic_url here: an empty value
+              // must not clobber the backend's URL during merge (backend is
+              // the source of truth for avatars).
               return account;
             }
             return <String, dynamic>{
               'username': item.toString().replaceFirst(RegExp(r'^@'), ''),
-              'profile_pic_url': '',
             };
           })
           .where((item) => (item['username'] as String).isNotEmpty)
@@ -293,6 +542,18 @@ class WarmupApi {
         ...(byUsername[username] ?? <String, dynamic>{}),
         ...account,
       };
+      // Profile pictures are the exception: the backend is the source of
+      // truth, and a locally cached entry may carry an empty value that
+      // must not clobber a valid backend URL.
+      if ((value['profile_pic_url'] ?? '').toString().trim().isEmpty) {
+        final backendPic =
+            (byUsername[username]?['profile_pic_url'] ?? '')
+                .toString()
+                .trim();
+        if (backendPic.isNotEmpty) {
+          value['profile_pic_url'] = backendPic;
+        }
+      }
       value['username'] = (value['username'] ?? username)
           .toString()
           .replaceFirst(RegExp(r'^@'), '');
@@ -457,8 +718,26 @@ class WarmupApi {
       throw Exception(
         data is Map && data['error'] != null
             ? data['error'].toString()
-            : 'Could not clean scanned accounts',
+            : t('Could not clean scanned accounts'),
       );
+    }
+    // The backend wiped these accounts: also drop the local cache and the
+    // last-account preference per platform, otherwise the warmup screen keeps
+    // showing a deleted account in the collapsed row. Key mapping mirrors
+    // _lastAccountKey in the warmup screen state.
+    final prefs = await SharedPreferences.getInstance();
+    for (final platform in platforms) {
+      await prefs.remove(_accountCacheKey(platform));
+      switch (platform) {
+        case 'tiktok':
+          await prefs.remove('last_tiktok_account');
+          break;
+        case 'youtube':
+          await prefs.remove('last_youtube_channel');
+          break;
+        default:
+          await prefs.remove('last_account');
+      }
     }
     return data is Map<String, dynamic>
         ? data
@@ -536,9 +815,9 @@ class _SplashScreenState extends State<SplashScreen>
             children: [
               const SouthFarmLogo(fontSize: 40, leafIcon: Icons.local_florist),
               const SizedBox(height: 12),
-              const Text(
-                'Mobile automation',
-                style: TextStyle(color: sfTextSecondary, fontSize: 16),
+              Text(
+                t('Mobile automation'),
+                style: const TextStyle(color: sfTextSecondary, fontSize: 16),
               ),
             ],
           ),
@@ -561,23 +840,23 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final List<_OBStep> _steps = [
     _OBStep(
       Icons.local_florist,
-      'Welcome to SouthFarm',
-      'Automate tasks on your phone.\nWarmups, posts, and more.',
+      t('Welcome to SouthFarm'),
+      t('Automate tasks on your phone.\nWarmups, posts, and more.'),
     ),
     _OBStep(
       Icons.security,
-      'Enable Accessibility',
-      'SouthFarm needs accessibility permission\nto simulate screen taps.',
+      t('Enable Accessibility'),
+      t('SouthFarm needs accessibility permission\nto simulate screen taps.'),
     ),
     _OBStep(
       Icons.layers,
-      'Enable Overlay',
-      'You will see a protective layer when\nSouthFarm is working.',
+      t('Enable Overlay'),
+      t('You will see a protective layer when\nSouthFarm is working.'),
     ),
     _OBStep(
       Icons.check_circle,
-      'All set!',
-      'Set up your tasks and get started.\nsouthfarm.tech',
+      t('All set!'),
+      t('Set up your tasks and get started.\nsouthfarm.tech'),
     ),
   ];
 
@@ -653,8 +932,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 const SizedBox(height: 24),
                 Text(
                   _step == 1
-                      ? 'Tap the button and enable SouthFarm in Accessibility'
-                      : 'Tap the button and allow SouthFarm over other apps',
+                      ? t('Tap the button and enable SouthFarm in Accessibility')
+                      : t('Tap the button and allow SouthFarm over other apps'),
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: sfAmber, fontSize: 14),
                 ),
@@ -693,7 +972,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ),
                   ),
                   child: Text(
-                    _step < _steps.length - 1 ? 'Enable' : 'Get Started',
+                    _step < _steps.length - 1 ? t('Enable') : t('Get Started'),
                   ),
                 ),
               ),
@@ -775,6 +1054,8 @@ class AuthService {
       'refresh_token',
       'user_email',
       'user_name',
+      'workspace_name',
+      'user_role',
     ]) {
       await prefs.remove(key);
       _logSessionEvent('remove', key, reason);
@@ -1018,6 +1299,28 @@ class AuthService {
               'registerDevice',
             );
           }
+          // Device identity for the profile drawer. The backend is the
+          // source of truth for the alias (editable from the command
+          // center); the rest come straight from the platform channel.
+          if (data is Map && data['device'] is Map) {
+            final device = Map<String, dynamic>.from(data['device'] as Map);
+            final alias = (device['alias'] ?? device['display_name'] ?? '')
+                .toString()
+                .trim();
+            if (alias.isNotEmpty) {
+              await prefs.setString('device_alias', alias);
+            }
+          }
+          final model = (deviceInfo['device_name'] ?? '').trim();
+          if (model.isNotEmpty) await prefs.setString('device_model', model);
+          final androidVersion = (deviceInfo['android_version'] ?? '').trim();
+          if (androidVersion.isNotEmpty) {
+            await prefs.setString('android_version', androidVersion);
+          }
+          final appVersion = (deviceInfo['app_version'] ?? '').trim();
+          if (appVersion.isNotEmpty) {
+            await prefs.setString('app_version', appVersion);
+          }
           await _setDevicePaired(prefs, true, 'registerDevice');
         });
         print('[Device] Registered: ${deviceInfo['device_name']}');
@@ -1037,6 +1340,46 @@ class AuthService {
       print('[Device] Register error: $e');
     }
     return DeviceRegistrationResult.unavailable;
+  }
+
+  /// Refreshes the session identity cached in prefs (workspace name, role,
+  /// user name/email) from GET /auth/me. Best-effort: on failure the cached
+  /// values stay untouched so the profile drawer always has something to
+  /// show, even offline.
+  static Future<bool> fetchSessionInfo() async {
+    try {
+      final token = await getValidAuthToken();
+      if (token == null) return false;
+      final res = await http
+          .get(
+            Uri.parse('$API_BASE/auth/me'),
+            headers: {'Authorization': 'Bearer $token'},
+          )
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode != 200) return false;
+      final data = jsonDecode(res.body);
+      if (data is! Map || data['user'] is! Map) return false;
+      final user = Map<String, dynamic>.from(data['user'] as Map);
+      await _enqueue(() async {
+        final prefs = await SharedPreferences.getInstance();
+        final name = (user['name'] ?? '').toString().trim();
+        if (name.isNotEmpty) await prefs.setString('user_name', name);
+        final email = (user['email'] ?? '').toString().trim();
+        if (email.isNotEmpty) await prefs.setString('user_email', email);
+        final role = (user['role'] ?? '').toString().trim();
+        if (role.isNotEmpty) await prefs.setString('user_role', role);
+        final workspace = user['workspace'];
+        final workspaceName =
+            workspace is Map ? (workspace['name'] ?? '').toString().trim() : '';
+        if (workspaceName.isNotEmpty) {
+          await prefs.setString('workspace_name', workspaceName);
+        }
+      });
+      return true;
+    } catch (e) {
+      print('[Auth] Fetch session info error: $e');
+      return false;
+    }
   }
 
   static Future<bool> claimDevice({
@@ -1164,7 +1507,7 @@ class _AuthScreenState extends State<AuthScreen> {
 
     if (email.isEmpty || pass.isEmpty || (!_isLogin && name.isEmpty)) {
       setState(() {
-        _error = 'Please fill in all fields';
+        _error = t('Please fill in all fields');
         _loading = false;
       });
       return;
@@ -1193,8 +1536,8 @@ class _AuthScreenState extends State<AuthScreen> {
     } else {
       setState(() {
         _error = _isLogin
-            ? 'Incorrect email or password'
-            : 'Error creating account. Already exists?';
+            ? t('Incorrect email or password')
+            : t('Error creating account. Already exists?');
         _loading = false;
       });
     }
@@ -1223,14 +1566,14 @@ class _AuthScreenState extends State<AuthScreen> {
                   children: [
                     Expanded(
                       child: _tabBtn(
-                        'Log In',
+                        t('Log In'),
                         _isLogin,
                         () => setState(() => _isLogin = true),
                       ),
                     ),
                     Expanded(
                       child: _tabBtn(
-                        'Sign Up',
+                        t('Sign Up'),
                         !_isLogin,
                         () => setState(() => _isLogin = false),
                       ),
@@ -1244,9 +1587,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 TextField(
                   controller: _nameCtrl,
                   style: const TextStyle(color: sfTextPrimary),
-                  decoration: const InputDecoration(
-                    hintText: 'Name',
-                    hintStyle: TextStyle(color: sfTextSecondary),
+                  decoration: InputDecoration(
+                    hintText: t('Name'),
+                    hintStyle: const TextStyle(color: sfTextSecondary),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -1256,9 +1599,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 controller: _emailCtrl,
                 keyboardType: TextInputType.emailAddress,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  hintText: 'Email',
-                  hintStyle: TextStyle(color: sfTextSecondary),
+                decoration: InputDecoration(
+                  hintText: t('Email'),
+                  hintStyle: const TextStyle(color: sfTextSecondary),
                 ),
               ),
               const SizedBox(height: 12),
@@ -1267,9 +1610,9 @@ class _AuthScreenState extends State<AuthScreen> {
                 controller: _passCtrl,
                 obscureText: true,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  hintText: 'Password',
-                  hintStyle: TextStyle(color: sfTextSecondary),
+                decoration: InputDecoration(
+                  hintText: t('Password'),
+                  hintStyle: const TextStyle(color: sfTextSecondary),
                 ),
               ),
               const SizedBox(height: 24),
@@ -1304,7 +1647,7 @@ class _AuthScreenState extends State<AuthScreen> {
                           ),
                         )
                       : Text(
-                          _isLogin ? 'Log In' : 'Sign Up',
+                          _isLogin ? t('Log In') : t('Sign Up'),
                           style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -1382,13 +1725,13 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       final code = payload?['code'] ?? payload?['pairing_code'];
       final accessKey = payload?['access_key'] ?? payload?['key'];
       if (code == null || accessKey == null) {
-        throw const FormatException('QR does not contain a SouthFarm pairing');
+        throw FormatException(t('QR does not contain a SouthFarm pairing'));
       }
       _codeCtrl.text = code.toString().toUpperCase();
       _keyCtrl.text = accessKey.toString();
       setState(() => _error = null);
     } catch (e) {
-      setState(() => _error = 'QR inválido o vencido');
+      setState(() => _error = t('Invalid or expired QR'));
     }
   }
 
@@ -1404,7 +1747,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     final code = _codeCtrl.text.trim();
     final accessKey = _keyCtrl.text.trim();
     if (code.isEmpty || accessKey.isEmpty) {
-      setState(() => _error = 'Ingresá el código y la llave temporal');
+      setState(() => _error = t('Enter the code and the temporary key'));
       return;
     }
     setState(() {
@@ -1421,7 +1764,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     } else {
       setState(() {
         _loading = false;
-        _error = 'El código no es válido, venció o ya fue utilizado';
+        _error = t('The code is invalid, expired or already used');
       });
     }
   }
@@ -1441,12 +1784,12 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       backgroundColor: sfBg,
       appBar: AppBar(
         backgroundColor: sfBg,
-        title: const Text('Vincular celular'),
+        title: Text(t('Pair phone')),
         actions: [
           IconButton(
             onPressed: _loading ? null : _logout,
             icon: const Icon(Icons.logout),
-            tooltip: 'Cerrar sesión',
+            tooltip: t('Log out'),
           ),
         ],
       ),
@@ -1458,45 +1801,45 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
             children: [
               const Icon(Icons.phonelink_setup, size: 72, color: sfGreen),
               const SizedBox(height: 20),
-              const Text(
-                'Este celular todavía no está vinculado a tu workspace.',
+              Text(
+                t('This phone is not paired to your workspace yet.'),
                 textAlign: TextAlign.center,
-                style: TextStyle(
+                style: const TextStyle(
                   color: sfTextPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                 ),
               ),
               const SizedBox(height: 10),
-              const Text(
-                'Generá un código desde Device fleet en la web. Podés ingresar la llave manualmente o escanear el QR temporal.',
+              Text(
+                t('Generate a code from Device fleet on the web. You can enter the key manually or scan the temporary QR.'),
                 textAlign: TextAlign.center,
-                style: TextStyle(color: sfTextSecondary, height: 1.4),
+                style: const TextStyle(color: sfTextSecondary, height: 1.4),
               ),
               const SizedBox(height: 28),
               TextField(
                 controller: _codeCtrl,
                 textCapitalization: TextCapitalization.characters,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  labelText: 'Código temporal',
-                  prefixIcon: Icon(Icons.password),
+                decoration: InputDecoration(
+                  labelText: t('Temporary code'),
+                  prefixIcon: const Icon(Icons.password),
                 ),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _keyCtrl,
                 style: const TextStyle(color: sfTextPrimary),
-                decoration: const InputDecoration(
-                  labelText: 'Llave de acceso',
-                  prefixIcon: Icon(Icons.key),
+                decoration: InputDecoration(
+                  labelText: t('Access key'),
+                  prefixIcon: const Icon(Icons.key),
                 ),
               ),
               const SizedBox(height: 18),
               OutlinedButton.icon(
                 onPressed: _loading ? null : _scanQr,
                 icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Escanear QR temporal'),
+                label: Text(t('Scan temporary QR')),
               ),
               if (_error != null) ...[
                 const SizedBox(height: 16),
@@ -1516,7 +1859,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.link),
-                label: Text(_loading ? 'Vinculando…' : 'Vincular celular'),
+                label: Text(_loading ? t('Pairing…') : t('Pair phone')),
                 style: FilledButton.styleFrom(
                   backgroundColor: sfGreen,
                   foregroundColor: Colors.black,
@@ -1559,7 +1902,7 @@ class _QrPairingScannerScreenState extends State<QrPairingScannerScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: const Text('Escanear QR'),
+        title: Text(t('Scan QR')),
       ),
       body: Stack(
         fit: StackFit.expand,
@@ -1575,14 +1918,14 @@ class _QrPairingScannerScreenState extends State<QrPairingScannerScreen> {
               ),
             ),
           ),
-          const Positioned(
+          Positioned(
             left: 24,
             right: 24,
             bottom: 40,
             child: Text(
-              'Apuntá al QR de vinculación que muestra la web',
+              t('Point the camera at the pairing QR shown on the web'),
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white, fontSize: 16),
+              style: const TextStyle(color: Colors.white, fontSize: 16),
             ),
           ),
         ],
@@ -1601,7 +1944,15 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   final _historyKey = GlobalKey<State<HistoryScreen>>();
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   String _userName = '';
+  String _userEmail = '';
+  String _workspaceName = '';
+  String _userRole = '';
+  String _deviceAlias = '';
+  String _deviceModel = '';
+  String _androidVersion = '';
+  String _appVersion = '';
   bool _accessibilityEnabled = false;
   bool _serviceRunning = false;
   bool _ensureDeviceRunning = false;
@@ -1653,8 +2004,27 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _loadUser() async {
+    await _loadSessionPrefs();
+    // Workspace and role are not part of the login payload; fetch them from
+    // /auth/me and re-read whatever came back. Cached values survive a
+    // failed fetch so the drawer always has something to show.
+    await AuthService.fetchSessionInfo();
+    await _loadSessionPrefs();
+  }
+
+  Future<void> _loadSessionPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() => _userName = prefs.getString('user_name') ?? '');
+    if (!mounted) return;
+    setState(() {
+      _userName = prefs.getString('user_name') ?? '';
+      _userEmail = prefs.getString('user_email') ?? '';
+      _workspaceName = prefs.getString('workspace_name') ?? '';
+      _userRole = prefs.getString('user_role') ?? '';
+      _deviceAlias = prefs.getString('device_alias') ?? '';
+      _deviceModel = prefs.getString('device_model') ?? '';
+      _androidVersion = prefs.getString('android_version') ?? '';
+      _appVersion = prefs.getString('app_version') ?? '';
+    });
   }
 
   Future<void> _ensureDevice() async {
@@ -1686,20 +2056,20 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       builder: (ctx) => AlertDialog(
         backgroundColor: sfCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text(
-          'Log out',
-          style: TextStyle(color: sfTextPrimary, fontSize: 18),
+        title: Text(
+          t('Log out'),
+          style: const TextStyle(color: sfTextPrimary, fontSize: 18),
         ),
         content: Text(
-          'Do you want to log out, $_userName?',
+          t('Do you want to log out, {n}?', [_userName]),
           style: const TextStyle(color: sfTextSecondary),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text(
-              'Cancel',
-              style: TextStyle(color: sfTextSecondary),
+            child: Text(
+              t('Cancel'),
+              style: const TextStyle(color: sfTextSecondary),
             ),
           ),
           TextButton(
@@ -1713,9 +2083,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 );
               }
             },
-            child: const Text(
-              'Log out',
-              style: TextStyle(color: Colors.redAccent),
+            child: Text(
+              t('Log out'),
+              style: const TextStyle(color: Colors.redAccent),
             ),
           ),
         ],
@@ -1726,7 +2096,24 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: sfBg,
+      // The drawer only opens from the profile chip: a right-edge drag would
+      // fight the system back gesture.
+      drawerEdgeDragWidth: 0,
+      endDrawer: _ProfileDrawer(
+        userName: _userName,
+        userEmail: _userEmail,
+        workspaceName: _workspaceName,
+        userRole: _userRole,
+        deviceAlias: _deviceAlias,
+        deviceModel: _deviceModel,
+        androidVersion: _androidVersion,
+        appVersion: _appVersion,
+        accessibilityEnabled: _accessibilityEnabled,
+        serviceRunning: _serviceRunning,
+        onLogout: _showLogoutDialog,
+      ),
       body: Column(
         children: [
           Container(
@@ -1736,7 +2123,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 const SouthFarmLogo(fontSize: 24, leafIcon: Icons.eco),
                 const Spacer(),
                 GestureDetector(
-                  onTap: () => _showLogoutDialog(),
+                  onTap: () =>
+                      _scaffoldKey.currentState?.openEndDrawer(),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
@@ -1794,8 +2182,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                     Expanded(
                       child: Text(
                         !_accessibilityEnabled
-                            ? 'Accessibility is disabled. Remote tasks cannot run.'
-                            : 'SouthFarm service is not running. Re-enable Accessibility to receive remote tasks.',
+                            ? t('Accessibility is disabled. Remote tasks cannot run.')
+                            : t('SouthFarm service is not running. Re-enable Accessibility to receive remote tasks.'),
                         style: const TextStyle(
                           color: sfTextPrimary,
                           fontSize: 12,
@@ -1807,7 +2195,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                         await WarmupApi.openAccessibilitySettings();
                         await _refreshServiceHealth();
                       },
-                      child: const Text('Fix'),
+                      child: Text(t('Fix')),
                     ),
                   ],
                 ),
@@ -1839,17 +2227,466 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
             }
           }
         },
-        items: const [
+        items: [
           BottomNavigationBarItem(
-            icon: Icon(Icons.play_circle),
-            label: 'Warmup',
+            icon: const Icon(Icons.play_circle),
+            label: t('Warmup'),
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.person_outline),
-            label: 'Accounts',
+            icon: const Icon(Icons.person_outline),
+            label: t('Accounts'),
           ),
-          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
+          BottomNavigationBarItem(
+            icon: const Icon(Icons.history),
+            label: t('History'),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Profile Drawer ───
+
+Color _roleColor(String role) {
+  switch (role.toLowerCase()) {
+    case 'owner':
+      return sfAmber;
+    case 'admin':
+      return const Color(0xFF3b82f6);
+    case 'operator':
+      return sfGreen;
+    default:
+      return sfTextSecondary;
+  }
+}
+
+class _ProfileDrawer extends StatelessWidget {
+  const _ProfileDrawer({
+    required this.userName,
+    required this.userEmail,
+    required this.workspaceName,
+    required this.userRole,
+    required this.deviceAlias,
+    required this.deviceModel,
+    required this.androidVersion,
+    required this.appVersion,
+    required this.accessibilityEnabled,
+    required this.serviceRunning,
+    required this.onLogout,
+  });
+
+  final String userName;
+  final String userEmail;
+  final String workspaceName;
+  final String userRole;
+  final String deviceAlias;
+  final String deviceModel;
+  final String androidVersion;
+  final String appVersion;
+  final bool accessibilityEnabled;
+  final bool serviceRunning;
+  final VoidCallback onLogout;
+
+  String get _initial => userName.trim().isEmpty
+      ? 'S'
+      : userName.trim().substring(0, 1).toUpperCase();
+
+  String _currentLanguageValue() {
+    if (followingSystem) {
+      return '${t('System')} · ${systemLanguageLabel()}';
+    }
+    return languageEndonyms[appLanguageNotifier.value] ??
+        appLanguageNotifier.value;
+  }
+
+  void _showLanguageSheet(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: sfCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                t('Language'),
+                style: const TextStyle(
+                  color: sfTextPrimary,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _languageOption(
+                sheetContext,
+                title: t('System'),
+                subtitle: systemLanguageLabel(),
+                value: systemLanguagePref,
+                trailing: _pillBadge(text: t('Recommended'), color: sfGreen),
+              ),
+              for (final code in supportedLanguageCodes)
+                _languageOption(
+                  sheetContext,
+                  title: languageEndonyms[code] ?? code,
+                  value: code,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _languageOption(
+    BuildContext sheetContext, {
+    required String title,
+    String? subtitle,
+    required String value,
+    Widget? trailing,
+  }) {
+    final selected = appLanguageNotifier.value == value;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () async {
+          Navigator.pop(sheetContext);
+          await setAppLanguage(value);
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        color: sfTextPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    if (subtitle != null && subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: sfTextSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (trailing != null) ...[
+                trailing,
+                const SizedBox(width: 8),
+              ],
+              Icon(
+                selected ? Icons.check_circle : Icons.radio_button_unchecked,
+                color: selected ? sfGreen : sfTextSecondary,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final serviceHealthy = accessibilityEnabled && serviceRunning;
+    return Drawer(
+      backgroundColor: sfBg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.only(
+          topLeft: Radius.circular(20),
+          bottomLeft: Radius.circular(20),
+        ),
+      ),
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(bottom: 12),
+                children: [
+                  _sectionLabel(t('WORKSPACE')),
+                  _infoRow(
+                    icon: Icons.hub_outlined,
+                    iconColor: sfGreen,
+                    label: t('Workspace'),
+                    value: workspaceName,
+                  ),
+                  _infoRow(
+                    icon: Icons.admin_panel_settings_outlined,
+                    iconColor: userRole.isEmpty
+                        ? sfTextSecondary
+                        : _roleColor(userRole),
+                    label: t('Role'),
+                    trailing: _pillBadge(
+                      text: userRole.isEmpty ? t('unknown') : userRole,
+                      color: userRole.isEmpty
+                          ? sfTextSecondary
+                          : _roleColor(userRole),
+                    ),
+                  ),
+                  _sectionLabel(t('DEVICE')),
+                  _infoRow(
+                    icon: Icons.smartphone,
+                    iconColor: sfGreen,
+                    label: t('Phone'),
+                    value: deviceAlias.isNotEmpty
+                        ? deviceAlias
+                        : deviceModel,
+                  ),
+                  if (deviceModel.isNotEmpty && deviceAlias.isNotEmpty)
+                    _infoRow(
+                      icon: Icons.phone_android,
+                      iconColor: sfGreen,
+                      label: t('Model'),
+                      value: deviceModel,
+                    ),
+                  _infoRow(
+                    icon: Icons.android_outlined,
+                    iconColor: sfGreen,
+                    label: 'Android',
+                    value: androidVersion,
+                  ),
+                  _infoRow(
+                    icon: Icons.install_mobile_outlined,
+                    iconColor: sfGreen,
+                    label: t('App version'),
+                    value: appVersion,
+                  ),
+                  _infoRow(
+                    icon: serviceHealthy
+                        ? Icons.verified_user_outlined
+                        : Icons.warning_amber_rounded,
+                    iconColor: serviceHealthy ? sfGreen : sfAmber,
+                    label: t('Accessibility'),
+                    trailing: _pillBadge(
+                      text: serviceHealthy ? t('Active') : t('Disabled'),
+                      color: serviceHealthy ? sfGreen : sfAmber,
+                    ),
+                  ),
+                  _sectionLabel(t('PREFERENCES')),
+                  _infoRow(
+                    icon: Icons.translate,
+                    iconColor: sfGreen,
+                    label: t('Language'),
+                    value: _currentLanguageValue(),
+                    onTap: () => _showLanguageSheet(context),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(color: sfBorder, height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    onLogout();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 14,
+                    ),
+                  child: Row(
+                      children: [
+                        Icon(Icons.logout, color: Colors.redAccent, size: 20),
+                        SizedBox(width: 12),
+                        Text(
+                          t('Log out'),
+                          style: const TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+      decoration: const BoxDecoration(
+        color: sfCard,
+        border: Border(bottom: BorderSide(color: sfBorder)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: sfGreen.withValues(alpha: 0.2),
+              border: Border.all(color: sfGreen.withValues(alpha: 0.5)),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              _initial,
+              style: const TextStyle(
+                color: sfGreen,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  userName.isEmpty ? t('SouthFarm user') : userName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: sfTextPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (userEmail.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    userEmail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: sfTextSecondary,
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+      child: Text(
+        text.toUpperCase(),
+        style: const TextStyle(
+          color: sfTextSecondary,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 1.2,
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow({
+    required IconData icon,
+    required Color iconColor,
+    required String label,
+    String? value,
+    Widget? trailing,
+    VoidCallback? onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: iconColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon, size: 18, color: iconColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: sfTextPrimary,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (trailing != null)
+            trailing
+          else
+            Flexible(
+              child: Text(
+                (value == null || value.isEmpty) ? '—' : value,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.end,
+                style: const TextStyle(
+                  color: sfTextSecondary,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+        ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pillBadge({required String text, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Text(
+        text[0].toUpperCase() + text.substring(1).toLowerCase(),
+        style: TextStyle(
+          color: color,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.3,
+        ),
       ),
     );
   }
@@ -1888,8 +2725,18 @@ class _WarmupScreenState extends State<WarmupScreen> {
   @override
   void initState() {
     super.initState();
+    AccountsChangeNotifier.instance.addListener(_onExternalAccountsChanged);
     _loadSavedAccount();
     _startRemotePolling();
+  }
+
+  /// Fired by AccountsScreen after a clean or a scan. Both screens live in
+  /// the same IndexedStack, so Warm Up never gets an unmount/remount cycle
+  /// and would otherwise keep showing ghost accounts until the platform
+  /// changes. While a warmup is running we leave the selection untouched.
+  void _onExternalAccountsChanged() {
+    if (!mounted || _isRunning) return;
+    _loadSavedAccount();
   }
 
   @override
@@ -1911,26 +2758,46 @@ class _WarmupScreenState extends State<WarmupScreen> {
     }
     final saved = prefs.getString(_lastAccountKey(requestedPlatform)) ?? '';
     if (requestedPlatform != 'instagram') {
+      // Same data strategy as _showAccountPicker: merge the local cache with
+      // the backend so the collapsed row also gets profile pictures and does
+      // not show stale entries that no longer exist remotely.
       final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      var accounts = localAccounts;
+      try {
+        final backendAccounts = await WarmupApi.getAccountsFromBackend(
+          platform: requestedPlatform,
+        );
+        if (requestedPlatform == 'youtube') {
+          accounts = WarmupApi.mergeAccountMetadata(
+            localAccounts,
+            backendAccounts,
+          );
+        } else if (backendAccounts.isNotEmpty) {
+          accounts = backendAccounts;
+        }
+      } catch (_) {
+        // Backend unreachable: keep the local cache only.
+      }
+      final sortedAccounts = sortAccountsByUsername(accounts);
       if (mounted && _selectedPlatform == requestedPlatform) {
         final savedAccount = saved.replaceFirst(RegExp(r'^@'), '');
         final selected =
-            localAccounts.any((a) => (a['username'] ?? '') == savedAccount)
+            sortedAccounts.any((a) => (a['username'] ?? '') == savedAccount)
             ? savedAccount
-            : (localAccounts.isNotEmpty
-                  ? (localAccounts.first['username'] ?? '').toString()
+            : (sortedAccounts.isNotEmpty
+                  ? (sortedAccounts.first['username'] ?? '').toString()
                   : '');
         setState(() {
           _selectedAccount = selected;
-          _savedAccounts = localAccounts;
+          _savedAccounts = sortedAccounts;
         });
       }
       return;
     }
     // Try backend first
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: requestedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: requestedPlatform),
       );
       if (backendAccounts.isNotEmpty &&
           mounted &&
@@ -1956,10 +2823,21 @@ class _WarmupScreenState extends State<WarmupScreen> {
       }
     } catch (_) {}
     // Fallback to local
-    final accounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+    final accounts = sortAccountsByUsername(
+      await WarmupApi.getLocalAccounts(requestedPlatform),
+    );
     if (mounted && _selectedPlatform == requestedPlatform) {
+      // Same selection rule as the non-Instagram branch: only keep the saved
+      // account if it still exists, never revive a deleted one.
+      final savedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+      final selected =
+          accounts.any((a) => (a['username'] ?? '') == savedAccount)
+          ? savedAccount
+          : (accounts.isNotEmpty
+                ? (accounts.first['username'] ?? '').toString()
+                : '');
       setState(() {
-        _selectedAccount = saved.replaceFirst(RegExp(r'^@'), '');
+        _selectedAccount = selected;
         _savedAccounts = accounts;
       });
     }
@@ -1968,16 +2846,35 @@ class _WarmupScreenState extends State<WarmupScreen> {
   Future<void> _loadSavedAccounts() async {
     final requestedPlatform = _selectedPlatform;
     if (requestedPlatform != 'instagram') {
+      // Same data strategy as _showAccountPicker: backend-first with a local
+      // merge for YouTube, so the collapsed row matches the expanded picker.
       final localAccounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+      var accounts = localAccounts;
+      try {
+        final backendAccounts = await WarmupApi.getAccountsFromBackend(
+          platform: requestedPlatform,
+        );
+        if (requestedPlatform == 'youtube') {
+          accounts = WarmupApi.mergeAccountMetadata(
+            localAccounts,
+            backendAccounts,
+          );
+        } else if (backendAccounts.isNotEmpty) {
+          accounts = backendAccounts;
+        }
+      } catch (_) {
+        // Backend unreachable: keep the local cache only.
+      }
+      final sortedAccounts = sortAccountsByUsername(accounts);
       if (mounted && _selectedPlatform == requestedPlatform) {
-        setState(() => _savedAccounts = localAccounts);
+        setState(() => _savedAccounts = sortedAccounts);
       }
       return;
     }
     // Try backend first
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: requestedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: requestedPlatform),
       );
       if (backendAccounts.isNotEmpty &&
           mounted &&
@@ -1987,7 +2884,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
       }
     } catch (_) {}
     // Fallback to local
-    final accounts = await WarmupApi.getLocalAccounts(requestedPlatform);
+    final accounts = sortAccountsByUsername(
+      await WarmupApi.getLocalAccounts(requestedPlatform),
+    );
     if (mounted && _selectedPlatform == requestedPlatform) {
       setState(() => _savedAccounts = accounts);
     }
@@ -1998,6 +2897,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
     _pollTimer?.cancel();
     _backendPollTimer?.cancel();
     _remotePollTimer?.cancel();
+    AccountsChangeNotifier.instance.removeListener(_onExternalAccountsChanged);
     super.dispose();
   }
 
@@ -2089,7 +2989,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
     if (_selectedAccount.isEmpty) {
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(const SnackBar(content: Text('Select an account first')));
+      ).showSnackBar(SnackBar(content: Text(t('Select an account first'))));
       return;
     }
 
@@ -2183,20 +3083,20 @@ class _WarmupScreenState extends State<WarmupScreen> {
     final m = jsonDecode(metrics) as Map<String, dynamic>;
     final viewedLabel = (m['platform'] ?? _selectedPlatform) == 'youtube'
         ? 'Shorts'
-        : 'Videos';
+        : t('Videos');
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: sfCard,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.check_circle, color: sfGreen, size: 28),
-            SizedBox(width: 12),
+            const Icon(Icons.check_circle, color: sfGreen, size: 28),
+            const SizedBox(width: 12),
             Text(
-              'Warmup complete',
-              style: TextStyle(color: sfTextPrimary, fontSize: 20),
+              t('Warmup complete'),
+              style: const TextStyle(color: sfTextPrimary, fontSize: 20),
             ),
           ],
         ),
@@ -2211,8 +3111,8 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   value: '${m['reels_viewed'] ?? m['videos_viewed'] ?? 0}',
                   label: viewedLabel,
                 ),
-                _MetricItem(value: '${m['likes'] ?? 0}', label: 'Likes'),
-                _MetricItem(value: '${m['saves'] ?? 0}', label: 'Saves'),
+                _MetricItem(value: '${m['likes'] ?? 0}', label: t('Likes')),
+                _MetricItem(value: '${m['saves'] ?? 0}', label: t('Saves')),
               ],
             ),
           ],
@@ -2236,9 +3136,12 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              child: const Text(
-                'Done',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              child: Text(
+                t('Done'),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
               ),
             ),
           ),
@@ -2413,11 +3316,14 @@ class _WarmupScreenState extends State<WarmupScreen> {
           : backendAccounts.isNotEmpty
           ? backendAccounts
           : localAccounts;
-      if (accounts.isNotEmpty && mounted) {
-        setState(() => _savedAccounts = accounts);
+      final sortedAccounts = sortAccountsByUsername(accounts);
+      if (sortedAccounts.isNotEmpty && mounted) {
+        setState(() => _savedAccounts = sortedAccounts);
         // If selected account no longer exists, deselect
         if (_selectedAccount.isNotEmpty &&
-            !accounts.any((a) => (a['username'] ?? '') == _selectedAccount)) {
+            !sortedAccounts.any(
+              (a) => (a['username'] ?? '') == _selectedAccount,
+            )) {
           setState(() => _selectedAccount = '');
         }
       }
@@ -2446,12 +3352,13 @@ class _WarmupScreenState extends State<WarmupScreen> {
             ..._savedAccounts.map((acc) {
               final username = (acc['username'] ?? '') as String;
               final picUrl = (acc['profile_pic_url'] ?? '') as String;
+              final avatarUrl = resolveAvatarUrl(picUrl, API_BASE);
               final selected = username == _selectedAccount;
               return ListTile(
-                leading: picUrl.isNotEmpty
+                leading: avatarUrl.isNotEmpty
                     ? CircleAvatar(
                         radius: 18,
-                        backgroundImage: NetworkImage(picUrl),
+                        backgroundImage: NetworkImage(avatarUrl),
                         backgroundColor: sfGreen.withValues(alpha: 0.2),
                       )
                     : CircleAvatar(
@@ -2466,17 +3373,9 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     fontWeight: selected ? FontWeight.bold : FontWeight.normal,
                   ),
                 ),
-                trailing: Icon(
-                  _selectedPlatform == 'tiktok'
-                      ? Icons.music_note
-                      : _selectedPlatform == 'youtube'
-                      ? Icons.smart_display
-                      : Icons.camera_alt,
-                  color: _selectedPlatform == 'tiktok'
-                      ? Colors.white
-                      : _selectedPlatform == 'youtube'
-                      ? Colors.redAccent
-                      : null,
+                trailing: PlatformLogo(
+                  platform: _selectedPlatform,
+                  size: 24,
                 ),
                 onTap: () {
                   setState(() => _selectedAccount = username);
@@ -2507,7 +3406,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Platform',
+              t('Platform'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -2533,24 +3432,6 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: ChoiceChip(
-                    label: const Text('TikTok'),
-                    selected: _selectedPlatform == 'tiktok',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _isRunning
-                        ? null
-                        : (_) => _selectPlatform('tiktok'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
                     label: const Text('YouTube'),
                     selected: _selectedPlatform == 'youtube',
                     selectedColor: sfGreen,
@@ -2566,15 +3447,33 @@ class _WarmupScreenState extends State<WarmupScreen> {
                         : (_) => _selectPlatform('youtube'),
                   ),
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Text('TikTok'),
+                    selected: _selectedPlatform == 'tiktok',
+                    selectedColor: sfGreen,
+                    backgroundColor: sfCard,
+                    side: const BorderSide(color: sfBorder),
+                    labelStyle: TextStyle(
+                      color: _selectedPlatform == 'tiktok'
+                          ? Colors.black
+                          : sfTextSecondary,
+                    ),
+                    onSelected: _isRunning
+                        ? null
+                        : (_) => _selectPlatform('tiktok'),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 20),
             Text(
               _selectedPlatform == 'tiktok'
-                  ? 'TikTok Account'
+                  ? t('TikTok Account')
                   : _selectedPlatform == 'youtube'
-                  ? 'YouTube Channel'
-                  : 'Instagram Account',
+                  ? t('YouTube Channel')
+                  : t('Instagram Account'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -2602,10 +3501,14 @@ class _WarmupScreenState extends State<WarmupScreen> {
                                   );
                               final picUrl =
                                   (acc['profile_pic_url'] ?? '') as String;
-                              return picUrl.isNotEmpty
+                              final avatarUrl = resolveAvatarUrl(
+                                picUrl,
+                                API_BASE,
+                              );
+                              return avatarUrl.isNotEmpty
                                   ? CircleAvatar(
                                       radius: 14,
-                                      backgroundImage: NetworkImage(picUrl),
+                                      backgroundImage: NetworkImage(avatarUrl),
                                     )
                                   : const Icon(
                                       Icons.person,
@@ -2618,7 +3521,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                     const SizedBox(width: 12),
                     Text(
                       _selectedAccount.isEmpty
-                          ? 'Select account...'
+                          ? t('Select account...')
                           : '@$_selectedAccount',
                       style: TextStyle(
                         color: _selectedAccount.isEmpty
@@ -2628,18 +3531,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                       ),
                     ),
                     const Spacer(),
-                    Icon(
-                      _selectedPlatform == 'tiktok'
-                          ? Icons.music_note
-                          : _selectedPlatform == 'youtube'
-                          ? Icons.smart_display
-                          : Icons.camera_alt,
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.white
-                          : _selectedPlatform == 'youtube'
-                          ? Colors.redAccent
-                          : null,
-                    ),
+                    PlatformLogo(platform: _selectedPlatform, size: 24),
                     const SizedBox(width: 8),
                     const Icon(Icons.chevron_right, color: sfTextSecondary),
                   ],
@@ -2649,7 +3541,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
             const SizedBox(height: 24),
 
             Text(
-              'Duration',
+              t('Duration'),
               style: TextStyle(color: sfTextSecondary, fontSize: 14),
             ),
             const SizedBox(height: 8),
@@ -2721,10 +3613,10 @@ class _WarmupScreenState extends State<WarmupScreen> {
                 ),
                 label: Text(
                   _status == 'paused'
-                      ? 'Resume Warmup'
+                      ? t('Resume Warmup')
                       : _isRunning
-                      ? 'Pause Warmup'
-                      : 'Start Warmup',
+                      ? t('Pause Warmup')
+                      : t('Start Warmup'),
                 ),
               ),
             ),
@@ -2736,7 +3628,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
                   child: OutlinedButton.icon(
                     onPressed: _stopWarmup,
                     icon: const Icon(Icons.stop_circle),
-                    label: const Text('Stop Warmup'),
+                    label: Text(t('Stop Warmup')),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.redAccent,
                       side: const BorderSide(color: Colors.redAccent),
@@ -2784,11 +3676,48 @@ class _AccountsScreenState extends State<AccountsScreen> {
   List<Map<String, dynamic>> _accounts = [];
   bool _loading = false;
   bool _cleaning = false;
+  Timer? _avatarRefreshTimer;
+  bool _avatarRefreshInFlight = false;
 
   @override
   void initState() {
     super.initState();
     _loadInitialPlatform();
+    // The backend fills profile pictures asynchronously after a scan
+    // finishes, so poll while any visible account is still missing its
+    // avatar; ticks stop doing work once every avatar has resolved.
+    _avatarRefreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _refreshIfAvatarsMissing();
+    });
+  }
+
+  @override
+  void dispose() {
+    _avatarRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  // Re-fetches the accounts (same path as a platform switch) only when at
+  // least one visible account has no profile picture yet.
+  Future<void> _refreshIfAvatarsMissing() async {
+    if (!mounted ||
+        _loading ||
+        _cleaning ||
+        _avatarRefreshInFlight ||
+        _accounts.isEmpty) {
+      return;
+    }
+    final missingAvatar = _accounts.any(
+      (acc) =>
+          resolveAvatarUrl(acc['profile_pic_url'] as String?, API_BASE).isEmpty,
+    );
+    if (!missingAvatar) return;
+    _avatarRefreshInFlight = true;
+    try {
+      await _loadSavedAccounts();
+    } finally {
+      _avatarRefreshInFlight = false;
+    }
   }
 
   Future<void> _loadInitialPlatform() async {
@@ -2809,19 +3738,37 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Future<void> _loadSavedAccounts() async {
     // Try backend first, fallback to local
     try {
-      final backendAccounts = await WarmupApi.getAccountsFromBackend(
-        platform: _selectedPlatform,
+      final backendAccounts = sortAccountsByUsername(
+        await WarmupApi.getAccountsFromBackend(platform: _selectedPlatform),
       );
       if (backendAccounts.isNotEmpty && mounted) {
-        setState(() => _accounts = backendAccounts);
+        if (_accountsChanged(backendAccounts)) {
+          setState(() => _accounts = backendAccounts);
+        }
         return;
       }
     } catch (_) {}
     try {
-      final localAccounts = await WarmupApi.getLocalAccounts(_selectedPlatform);
-      if (mounted) setState(() => _accounts = localAccounts);
+      final localAccounts = sortAccountsByUsername(
+        await WarmupApi.getLocalAccounts(_selectedPlatform),
+      );
+      if (mounted && _accountsChanged(localAccounts)) {
+        setState(() => _accounts = localAccounts);
+      }
     } catch (e) {
       debugLog('Error loading saved accounts: $e');
+    }
+  }
+
+  // True when [next] differs from the accounts currently rendered, so the
+  // periodic avatar refresh only rebuilds when the backend actually
+  // changed something.
+  bool _accountsChanged(List<Map<String, dynamic>> next) {
+    if (next.length != _accounts.length) return true;
+    try {
+      return jsonEncode(next) != jsonEncode(_accounts);
+    } catch (_) {
+      return true;
     }
   }
 
@@ -2875,6 +3822,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
           : backendAccounts.isNotEmpty
           ? backendAccounts
           : detectedAccounts;
+      accounts = sortAccountsByUsername(accounts);
       if (mounted) setState(() => _accounts = accounts);
 
       // Also save locally as backup, namespaced by platform.
@@ -2883,6 +3831,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
         WarmupApi._accountCacheKey(_selectedPlatform),
         jsonEncode(accounts),
       );
+      // Scan succeeded: tell Warm Up to reload so newly scanned accounts
+      // show up there without waiting for a platform switch.
+      AccountsChangeNotifier.instance.notifyChanged();
     } catch (e) {
       debugLog('SCAN ERROR: $e');
       // On error, try loading from local cache or backend
@@ -2894,7 +3845,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
           debugLog(
             'SCAN ERROR: loaded ${backendAccounts.length} accounts from backend as fallback',
           );
-          setState(() => _accounts = backendAccounts);
+          setState(
+            () => _accounts = sortAccountsByUsername(backendAccounts),
+          );
         } else {
           final prefs = await SharedPreferences.getInstance();
           final cached = prefs.getString(
@@ -2904,10 +3857,11 @@ class _AccountsScreenState extends State<AccountsScreen> {
             debugLog(
               'SCAN ERROR: loaded accounts from local cache as fallback',
             );
-            setState(
-              () => _accounts = (jsonDecode(cached) as List)
-                  .cast<Map<String, dynamic>>(),
-            );
+            setState(() {
+              _accounts = sortAccountsByUsername(
+                (jsonDecode(cached) as List).cast<Map<String, dynamic>>(),
+              );
+            });
           }
         }
       } catch (e2) {
@@ -2922,22 +3876,22 @@ class _AccountsScreenState extends State<AccountsScreen> {
     final selected = <String>{_selectedPlatform};
     final platforms = const [
       ('instagram', 'Instagram'),
-      ('tiktok', 'TikTok'),
       ('youtube', 'YouTube'),
+      ('tiktok', 'TikTok'),
     ];
     final confirmed = await showDialog<List<String>>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: sfCard,
-          title: const Text('Clean accounts'),
+          title: Text(t('Clean accounts')),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Choose the scanned platforms to remove from this phone. Scan history will be preserved.',
-                style: TextStyle(color: sfTextSecondary),
+              Text(
+                t('Choose the scanned platforms to remove from this phone. Scan history will be preserved.'),
+                style: const TextStyle(color: sfTextSecondary),
               ),
               const SizedBox(height: 12),
               Row(
@@ -2947,11 +3901,11 @@ class _AccountsScreenState extends State<AccountsScreen> {
                     onPressed: () => setDialogState(
                       () => selected.addAll(platforms.map((item) => item.$1)),
                     ),
-                    child: const Text('Select all'),
+                    child: Text(t('Select all')),
                   ),
                   TextButton(
                     onPressed: () => setDialogState(selected.clear),
-                    child: const Text('Clear selection'),
+                    child: Text(t('Clear selection')),
                   ),
                 ],
               ),
@@ -2976,14 +3930,14 @@ class _AccountsScreenState extends State<AccountsScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
+              child: Text(t('Cancel')),
             ),
             FilledButton(
               onPressed: selected.isEmpty
                   ? null
                   : () => Navigator.pop(dialogContext, selected.toList()),
               style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
-              child: const Text('Clean selected'),
+              child: Text(t('Clean selected')),
             ),
           ],
         ),
@@ -3004,15 +3958,18 @@ class _AccountsScreenState extends State<AccountsScreen> {
       } else {
         await _loadSavedAccounts();
       }
+      // Let Warm Up (mounted beside us in the IndexedStack) reload its
+      // platform's accounts so it does not show freshly deleted ones.
+      AccountsChangeNotifier.instance.notifyChanged();
       final total = result['total'] ?? 0;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Cleaned $total scanned account records')),
+        SnackBar(content: Text(t('Cleaned {n} scanned account records', [total]))),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Clean accounts failed: $e')));
+      ).showSnackBar(SnackBar(content: Text(t('Clean accounts failed: {n}', [e]))));
     } finally {
       if (mounted) setState(() => _cleaning = false);
     }
@@ -3026,234 +3983,232 @@ class _AccountsScreenState extends State<AccountsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: sfBg,
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 16),
-            Text(
-              'Accounts',
-              style: const TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                color: sfTextPrimary,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _selectedPlatform == 'tiktok'
-                  ? 'Detected TikTok accounts'
-                  : _selectedPlatform == 'youtube'
-                  ? 'Detected YouTube channels'
-                  : 'Detected Instagram accounts',
-              style: const TextStyle(fontSize: 14, color: sfTextSecondary),
-            ),
-            const SizedBox(height: 20),
-            Row(
-              children: [
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('Instagram'),
-                    selected: _selectedPlatform == 'instagram',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'instagram'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'instagram',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'instagram';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('YouTube'),
-                    selected: _selectedPlatform == 'youtube',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'youtube'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'youtube',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'youtube';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ChoiceChip(
-                    label: const Text('TikTok'),
-                    selected: _selectedPlatform == 'tiktok',
-                    selectedColor: sfGreen,
-                    backgroundColor: sfCard,
-                    side: const BorderSide(color: sfBorder),
-                    labelStyle: TextStyle(
-                      color: _selectedPlatform == 'tiktok'
-                          ? Colors.black
-                          : sfTextSecondary,
-                    ),
-                    onSelected: _loading
-                        ? null
-                        : (_) async {
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.setString(
-                              'selected_platform',
-                              'tiktok',
-                            );
-                            setState(() {
-                              _selectedPlatform = 'tiktok';
-                              _accounts = [];
-                            });
-                            await _loadSavedAccounts();
-                          },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            // Always-visible scan button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: _loading || _cleaning ? null : _loadAccounts,
-                icon: const Icon(Icons.search),
-                label: const Text('Scan accounts'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: sfGreen,
-                  foregroundColor: Colors.black,
+      body: RefreshIndicator(
+        color: sfGreen,
+        backgroundColor: sfCard,
+        onRefresh: _loadSavedAccounts,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 16),
+              Text(
+                t('Accounts'),
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: sfTextPrimary,
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _loading || _cleaning
-                    ? null
-                    : _showCleanAccountsDialog,
-                icon: const Icon(Icons.delete_sweep_outlined),
-                label: Text(
-                  _cleaning ? 'Cleaning accounts…' : 'Clean accounts',
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.redAccent,
-                  side: const BorderSide(color: Colors.redAccent),
-                ),
+              const SizedBox(height: 4),
+              Text(
+                _selectedPlatform == 'tiktok'
+                    ? t('Detected TikTok accounts')
+                    : _selectedPlatform == 'youtube'
+                    ? t('Detected YouTube channels')
+                    : t('Detected Instagram accounts'),
+                style: const TextStyle(fontSize: 14, color: sfTextSecondary),
               ),
-            ),
-            const SizedBox(height: 16),
-            if (_loading)
-              const Center(child: CircularProgressIndicator(color: sfGreen))
-            else if (_accounts.isEmpty)
-              Center(
-                child: Column(
-                  children: [
-                    Icon(
-                      Icons.person_outline,
-                      size: 48,
-                      color: sfTextSecondary,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'No accounts found',
-                      style: TextStyle(color: sfTextSecondary, fontSize: 16),
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      onPressed: _loadAccounts,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Scan'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: sfGreen,
-                        foregroundColor: Colors.black,
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('Instagram'),
+                      selected: _selectedPlatform == 'instagram',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
+                        color: _selectedPlatform == 'instagram'
+                            ? Colors.black
+                            : sfTextSecondary,
                       ),
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'instagram',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'instagram';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
                     ),
-                  ],
-                ),
-              )
-            else
-              ..._accounts.map((acc) {
-                final username = acc['username'] ?? acc.toString();
-                final picUrl = acc['profile_pic_url'] ?? '';
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 12),
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: sfCard,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: sfBorder),
                   ),
-                  child: Row(
-                    children: [
-                      picUrl.isNotEmpty
-                          ? CircleAvatar(
-                              radius: 20,
-                              backgroundColor: sfGreen.withValues(alpha: 0.2),
-                              backgroundImage: NetworkImage(picUrl),
-                            )
-                          : CircleAvatar(
-                              radius: 20,
-                              backgroundColor: sfGreen.withValues(alpha: 0.2),
-                              child: Icon(Icons.person, color: sfGreen),
-                            ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          '@$username',
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: sfTextPrimary,
-                          ),
-                        ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('YouTube'),
+                      selected: _selectedPlatform == 'youtube',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
+                        color: _selectedPlatform == 'youtube'
+                            ? Colors.black
+                            : sfTextSecondary,
                       ),
-                      Icon(
-                        _selectedPlatform == 'tiktok'
-                            ? Icons.music_note
-                            : _selectedPlatform == 'youtube'
-                            ? Icons.smart_display
-                            : Icons.camera_alt,
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'youtube',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'youtube';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ChoiceChip(
+                      label: const Text('TikTok'),
+                      selected: _selectedPlatform == 'tiktok',
+                      selectedColor: sfGreen,
+                      backgroundColor: sfCard,
+                      side: const BorderSide(color: sfBorder),
+                      labelStyle: TextStyle(
                         color: _selectedPlatform == 'tiktok'
-                            ? Colors.white
-                            : _selectedPlatform == 'youtube'
-                            ? Colors.redAccent
-                            : null,
+                            ? Colors.black
+                            : sfTextSecondary,
+                      ),
+                      onSelected: _loading
+                          ? null
+                          : (_) async {
+                              final prefs = await SharedPreferences.getInstance();
+                              await prefs.setString(
+                                'selected_platform',
+                                'tiktok',
+                              );
+                              setState(() {
+                                _selectedPlatform = 'tiktok';
+                                _accounts = [];
+                              });
+                              await _loadSavedAccounts();
+                            },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              // Always-visible scan button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _loading || _cleaning ? null : _loadAccounts,
+                  icon: const Icon(Icons.search),
+                  label: Text(t('Scan accounts')),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: sfGreen,
+                    foregroundColor: Colors.black,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _loading || _cleaning
+                      ? null
+                      : _showCleanAccountsDialog,
+                  icon: const Icon(Icons.delete_sweep_outlined),
+                  label: Text(
+                    _cleaning ? t('Cleaning accounts…') : t('Clean accounts'),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(color: Colors.redAccent),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              if (_loading)
+                const Center(child: CircularProgressIndicator(color: sfGreen))
+              else if (_accounts.isEmpty)
+                Center(
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.person_outline,
+                        size: 48,
+                        color: sfTextSecondary,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        t('No accounts found'),
+                        style: TextStyle(color: sfTextSecondary, fontSize: 16),
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton.icon(
+                        onPressed: _loadAccounts,
+                        icon: const Icon(Icons.refresh),
+                        label: Text(t('Scan')),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: sfGreen,
+                          foregroundColor: Colors.black,
+                        ),
                       ),
                     ],
                   ),
-                );
-              }),
-          ],
+                )
+              else
+                ..._accounts.map((acc) {
+                  final username = acc['username'] ?? acc.toString();
+                  final picUrl = acc['profile_pic_url'] ?? '';
+                  final avatarUrl = resolveAvatarUrl(
+                    picUrl as String?,
+                    API_BASE,
+                  );
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: sfCard,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: sfBorder),
+                    ),
+                    child: Row(
+                      children: [
+                        avatarUrl.isNotEmpty
+                            ? CircleAvatar(
+                                radius: 20,
+                                backgroundColor: sfGreen.withValues(alpha: 0.2),
+                                backgroundImage: NetworkImage(avatarUrl),
+                              )
+                            : CircleAvatar(
+                                radius: 20,
+                                backgroundColor: sfGreen.withValues(alpha: 0.2),
+                                child: Icon(Icons.person, color: sfGreen),
+                              ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            '@$username',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: sfTextPrimary,
+                            ),
+                          ),
+                        ),
+                        PlatformLogo(platform: _selectedPlatform, size: 24),
+                      ],
+                    ),
+                  );
+                }),
+            ],
+          ),
         ),
       ),
     );
@@ -3536,7 +4491,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'History',
+                    t('History'),
                     style: const TextStyle(
                       fontSize: 24,
                       fontWeight: FontWeight.bold,
@@ -3554,7 +4509,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               ),
               const SizedBox(height: 4),
               Text(
-                '${_sessions.length} sesiones',
+                t('{n} sessions', [_sessions.length]),
                 style: const TextStyle(fontSize: 14, color: sfTextSecondary),
               ),
               const SizedBox(height: 20),
@@ -3567,7 +4522,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                       Icon(Icons.history, size: 48, color: sfTextSecondary),
                       const SizedBox(height: 12),
                       Text(
-                        'No sessions yet',
+                        t('No sessions yet'),
                         style: TextStyle(color: sfTextSecondary, fontSize: 16),
                       ),
                     ],
@@ -3614,22 +4569,22 @@ class _HistoryScreenState extends State<HistoryScreen> {
                               '${s['reels_viewed'] ?? 0}',
                               _sessionPlatform(s) == 'youtube'
                                   ? 'Shorts'
-                                  : 'Videos',
+                                  : t('Videos'),
                               sfGreen,
                             ),
                             _metric(
                               '${s['likes'] ?? 0}',
-                              'Likes',
+                              t('Likes'),
                               const Color(0xFFf472b6),
                             ),
                             _metric(
                               '${_sessionInt(s, 'saves')}',
-                              'Saves',
+                              t('Saves'),
                               const Color(0xFFfbbf24),
                             ),
                             _metric(
                               '${s['duration_minutes'] ?? '?'}min',
-                              'Duration',
+                              t('Duration'),
                               sfTextSecondary,
                             ),
                           ],

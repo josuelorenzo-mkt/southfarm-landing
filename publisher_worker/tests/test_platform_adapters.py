@@ -446,6 +446,40 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(device.typed, [])
         self.assertEqual(publisher._baseline_posts, 8)
 
+    def test_instagram_baseline_polls_until_grid_renders(self):
+        # 2026-08-21 false failure: right after the account switch the grid
+        # has not rendered yet (title + count only), and baselining on that
+        # single early dump aborted with TILE_BASELINE_INVALID. prepare() must
+        # poll fresh dumps until both the post count and reel tiles render.
+        early_profile = [
+            node(text="expected.account", **{"resource-id": "com.instagram.android:id/action_bar_title"}),
+            node(**{"content-desc": "Profile"}),
+            node(**{"resource-id": "com.instagram.android:id/profile_header_post_count_front_familiar", "content-desc": "8posts"}),
+        ]
+        rendered_profile = early_profile + [
+            node(**{"content-desc": "Reel by Expected at row 1, column 1"}),
+            node(**{"content-desc": "Create New"}),
+        ]
+        # Stub semantics (advance_on_poll=True): EVERY read serves the next
+        # revision.  tap_and_wait takes one immediately-before dump and only
+        # accepts a post-tap screen whose target fingerprint changed or
+        # disappeared -- so that before-read must still be the bare tab bar.
+        # A profile revision there would make the identical action-bar title
+        # look stale on every later revision and starve _wait_for_fresh.
+        device = Device("com.instagram.android", [
+            [node(**{"content-desc": "Profile"})],   # cold start: only the tab bar renders
+            [node(**{"content-desc": "Profile"})],   # immediately-before dump of the tab tap
+            *[early_profile for _ in range(4)],      # profile landed: count yes, grid not yet
+            *[rendered_profile for _ in range(6)],   # grid renders: baseline becomes ready
+        ], advance_on_poll=True)
+
+        publisher = InstagramPublisher(expected_account="expected.account")
+        publisher.prepare(job("instagram"), device)
+
+        self.assertEqual(publisher._baseline_posts, 8)
+        self.assertIn("Reel by Expected at row 1, column 1", publisher._baseline_tiles)
+        self.assertEqual(device.typed, [])
+
     def test_forbidden_santilorennzo_is_blocked_before_account_switch(self):
         device = Device("com.zhiliaoapp.musically", [[node(text="Profile")]])
 
