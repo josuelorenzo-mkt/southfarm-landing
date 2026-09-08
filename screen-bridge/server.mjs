@@ -223,12 +223,18 @@ class ScreenSource {
       if (gen !== this.gen) return;
       this.log(`reverse code=${rev.code} out=${rev.stdout.trim().slice(0, 80)} err=${rev.stderr.trim().slice(0, 80)}`);
       if (rev.code !== 0) throw new Error(`adb reverse falló: ${rev.stderr || rev.stdout}`);
+      // Despertar el telefono: con la pantalla apagada el encoder no produce
+      // frames y el espectador queda en "Conectando..." para siempre. Si el
+      // wake falla (telefono desconectado) se continua igual.
+      const wake = await adb(["-s", this.serial, "shell", "input keyevent KEYCODE_WAKEUP"], 8000).catch(() => ({ code: -1 }));
+      if (gen !== this.gen) return;
+      this.log(`wake code=${wake.code ?? "?"}`);
       const shellArgs = [
         "-s", this.serial, "shell",
         `CLASSPATH=${DEVICE_JAR_PATH} app_process / com.genymobile.scrcpy.Server ` +
           `${SERVER_VERSION} log_level=info max_size=${MAX_SIZE} max_fps=${MAX_FPS} ` +
           `video_bit_rate=${VIDEO_BIT_RATE} video_codec=h264 video=true audio=false ` +
-          `send_frame_meta=true control=false cleanup=false` +
+          `send_frame_meta=true control=false cleanup=false stay_awake=true` +
           (CODEC_OPTIONS ? ` video_codec_options=${CODEC_OPTIONS}` : ""),
       ];
       const proc = (this.proc = spawn(ADB, shellArgs, { windowsHide: true }));
