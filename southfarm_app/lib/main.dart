@@ -1045,6 +1045,18 @@ class AuthService {
     _logSessionEvent('set', 'device_paired', reason);
   }
 
+  // The accessibility service reads the same store and keeps heartbeating as
+  // long as a device_token exists. Leaving a stale token behind would let the
+  // phone report presence for an installation the backend no longer considers
+  // paired, so every unpair path must go through here.
+  static Future<void> _clearDeviceCredentials(
+    SharedPreferences prefs,
+    String reason,
+  ) async {
+    await _removeSessionKey(prefs, 'device_token', reason);
+    await _setDevicePaired(prefs, false, reason);
+  }
+
   static Future<void> _clearUserSessionKeys(
     SharedPreferences prefs,
     String reason,
@@ -1158,6 +1170,9 @@ class AuthService {
           } catch (_) {}
         }
         await _clearUserSessionKeys(prefs, 'logout');
+        // Logging out also unpairs the phone: without this, the accessibility
+        // service keeps heartbeating with a device_token the UI no longer owns.
+        await _clearDeviceCredentials(prefs, 'logout');
       });
     } finally {
       _logoutInFlight = false;
@@ -1329,11 +1344,21 @@ class AuthService {
         print('[Device] Register failed: ${res.statusCode} ${res.body}');
         if (res.statusCode == 401) {
           lastAuthSessionExpired = true;
+          await _enqueue(() async {
+            final prefs = await SharedPreferences.getInstance();
+            await _clearDeviceCredentials(prefs, 'registerDeviceUnauthorized');
+          });
           return DeviceRegistrationResult.authRequired;
         }
         if (res.statusCode == 409) {
           final code = data is Map ? data['code']?.toString() : null;
-          if (code == 'DEVICE_NOT_PAIRED') return DeviceRegistrationResult.notPaired;
+          if (code == 'DEVICE_NOT_PAIRED') {
+            await _enqueue(() async {
+              final prefs = await SharedPreferences.getInstance();
+              await _clearDeviceCredentials(prefs, 'registerDeviceNotPaired');
+            });
+            return DeviceRegistrationResult.notPaired;
+          }
         }
       }
     } catch (e) {

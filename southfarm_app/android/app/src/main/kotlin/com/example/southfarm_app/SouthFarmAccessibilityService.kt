@@ -232,10 +232,29 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     }
 
     private fun authToken(): String? {
+        // Device-scoped endpoints only: falling back to the user session token
+        // would let the service heartbeat for an installation the UI shows as
+        // unpaired. No device_token means no polling.
         val prefs = getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
         return prefs.getString("flutter.device_token", null)
             ?.takeIf { it.isNotBlank() }
-            ?: prefs.getString("flutter.auth_token", null)
+    }
+
+    private fun handleDeviceAuthRejected(source: String, code: Int) {
+        // The backend rejected this installation's device token (unpaired or
+        // revoked). Wipe the credential and stop polling so the service never
+        // operates behind a UI that shows the phone as unlinked.
+        Log.e(TAG, "Device auth rejected ($source): HTTP $code — clearing device token and stopping polling")
+        try {
+            getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
+                .edit()
+                .remove("flutter.device_token")
+                .putBoolean("flutter.device_paired", false)
+                .apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear device credentials: ${e.message}")
+        }
+        stopTaskPolling()
     }
 
     private fun apiBase(): String {
@@ -260,7 +279,7 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             .put("app_version", packageManager.getPackageInfo(packageName, 0).versionName.orEmpty())
     }
 
-    private fun sendDeviceHeartbeat(token: String): Boolean {
+    private fun sendDeviceHeartbeat(token: String): Int {
         return try {
             val url = URL("${apiBase()}/devices/heartbeat")
             val conn = url.openConnection() as HttpURLConnection
@@ -273,13 +292,13 @@ class SouthFarmAccessibilityService : AccessibilityService() {
             conn.outputStream.use { output ->
                 output.write(devicePayload().toString().toByteArray())
             }
-            val ok = conn.responseCode in 200..299
-            Log.i(TAG, "Heartbeat: response=${conn.responseCode} device=${stableDeviceId()}")
+            val code = conn.responseCode
+            Log.i(TAG, "Heartbeat: response=$code device=${stableDeviceId()}")
             conn.disconnect()
-            ok
+            code
         } catch (e: Exception) {
             Log.e(TAG, "Heartbeat error: ${e.message}")
-            false
+            -1
         }
     }
 
@@ -370,6 +389,9 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 val responseCode = conn.responseCode
                 if (responseCode !in 200..299) {
                     Log.w(TAG, "Global control poll failed: HTTP $responseCode")
+                    if (responseCode == 401 || responseCode == 403) {
+                        handleDeviceAuthRejected("control", responseCode)
+                    }
                     conn.disconnect()
                     return@Thread
                 }
@@ -519,7 +541,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
                 Log.e(TAG, "Poll: token=${if (token != null) token.take(20) + "..." else "NULL"}")
                 if (token == null) return@Thread
 
-                sendDeviceHeartbeat(token)
+                val heartbeatCode = sendDeviceHeartbeat(token)
+                if (heartbeatCode == 401 || heartbeatCode == 403) {
+                    handleDeviceAuthRejected("heartbeat", heartbeatCode)
+                    return@Thread
+                }
 
                 val url = URL("${apiBase()}/tasks/claim")
                 val conn = url.openConnection() as HttpURLConnection
@@ -535,6 +561,12 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
                 val responseCode = conn.responseCode
                 Log.e(TAG, "Poll: response=$responseCode")
+
+                if (responseCode == 401 || responseCode == 403) {
+                    handleDeviceAuthRejected("claim", responseCode)
+                    conn.disconnect()
+                    return@Thread
+                }
 
                 if (responseCode == 200) {
                     val body = conn.inputStream.bufferedReader().readText()
