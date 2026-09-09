@@ -555,7 +555,11 @@ function findDeviceForUser(
     `).get(userId, deviceValue);
   }
   if (!device && !preferStableId && deviceValue && /^\d+$/.test(deviceValue)) {
-    device = db.prepare('SELECT * FROM devices WHERE user_id = ? AND id = ?').get(userId, Number(deviceValue));
+    device = db.prepare(`
+      SELECT * FROM devices
+      WHERE user_id = ? AND id = ? AND lifecycle_status != 'revoked'
+      ORDER BY id DESC LIMIT 1
+    `).get(userId, Number(deviceValue));
   }
   return device || null;
 }
@@ -2721,6 +2725,11 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
 });
 
 app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  // Presence comes from the paired device agent itself. A user JWT must not
+  // be able to keep a device row "online" on the phone's behalf.
+  if (req.user.authType !== 'device') {
+    return res.status(403).json({ error: 'Device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+  }
   try {
     const device = touchDevice(req.user.userId, req.body);
     res.json({
