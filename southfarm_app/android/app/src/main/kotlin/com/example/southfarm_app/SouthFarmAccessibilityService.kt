@@ -1881,12 +1881,30 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
         currentStatus = "switching_account"
         updateLoadingText("Setting up YouTube channel...")
-        if (!ensureCorrectYouTubeChannel(
-                username,
-                currentWarmupSourceAccountName,
-                currentWarmupSourceAccountEmail,
-                currentWarmupChannelDisplayName,
-            )) {
+        fun switchChannel(): Boolean = ensureCorrectYouTubeChannel(
+            username,
+            currentWarmupSourceAccountName,
+            currentWarmupSourceAccountEmail,
+            currentWarmupChannelDisplayName,
+        )
+        if (!switchChannel()) {
+            // A prior task can leave YouTube half-open while the routine
+            // clean start gets skipped by its dedup window. Force a real
+            // close and retry the channel selection once before giving up.
+            Log.e(TAG, "YouTube channel switch failed; forcing clean start and retrying once")
+            currentStatus = "retrying_channel_switch"
+            closeSocialAppForCleanStart("youtube", force = true)
+            Thread.sleep(1500)
+            if (!openYouTube()) {
+                currentStatus = "error: could_not_open_youtube"
+                updateLoadingText("Error al abrir YouTube")
+                Thread.sleep(2000)
+                SouthFarmLoadingService.dismissLoading()
+                return
+            }
+            Thread.sleep(4000)
+        }
+        if (!switchChannel()) {
             Log.e(TAG, "ERROR: could not switch YouTube channel $username")
             currentStatus = "error: could_not_switch_to_$username"
             updateLoadingText("Error al cambiar canal de YouTube")
@@ -2053,8 +2071,8 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun closeSocialAppForCleanStart(platform: String?) {
-        Log.e(TAG, "SF-CLEAN: called for platform=$platform")
+    private fun closeSocialAppForCleanStart(platform: String?, force: Boolean = false) {
+        Log.e(TAG, "SF-CLEAN: called for platform=$platform force=$force")
         val pkg = socialPackageFor(platform)
         if (pkg == null) {
             Log.e(TAG, "SF-CLEAN: no package for platform=$platform, returning")
@@ -2062,9 +2080,11 @@ class SouthFarmAccessibilityService : AccessibilityService() {
         }
         try {
             // The warmup loops close on finish and the startWarmup finally
-            // runs right after — don't redo the whole sequence.
+            // runs right after — don't redo the whole sequence. force=true
+            // bypasses the dedup window: callers use it after a failed task
+            // step, when the previous close may have silently not worked.
             val now = System.currentTimeMillis()
-            if (pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L) {
+            if (!force && pkg == lastCleanExitPackage && now - lastCleanExitAtMs < 10_000L) {
                 Log.i(TAG, "Clean exit for $pkg already done recently, skipping")
                 return
             }
@@ -2479,12 +2499,24 @@ class SouthFarmAccessibilityService : AccessibilityService() {
     }
 
     private fun findTikTokAccountSelector(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        // On the observed TikTok build the display-name row (s5_) opens the
-        // account sheet; the @handle row only exposes the current identity.
-        return findNodeById(root, "com.zhiliaoapp.musically:id/s5_")
-            ?: findNodeByPredicate(root) { node ->
-                node.isClickable && node.text?.toString()?.trim()?.matches(Regex("[a-zA-Z0-9._]+")) == true
-            }
+        // The display-name row opens the account sheet. Its obfuscated id
+        // churns between TikTok releases (s5_ on the previous build observed,
+        // t0u on the current one), so try the known ids first and fall back to
+        // any clickable row exposing a bare username via text or description.
+        // The @handle row never matches (leading '@' breaks the shape), which
+        // is intentional: it only shows identity, it does not switch accounts.
+        for (id in listOf("com.zhiliaoapp.musically:id/t0u", "com.zhiliaoapp.musically:id/s5_")) {
+            findNodeById(root, id)?.let { return it }
+        }
+        val usernameShape = Regex("[a-zA-Z0-9._]{3,40}")
+        return findNodeByPredicate(root) { node ->
+            if (!node.isClickable) return@findNodeByPredicate false
+            val text = node.text?.toString()?.trim().orEmpty()
+            if (text.matches(usernameShape)) return@findNodeByPredicate true
+            val desc = node.contentDescription?.toString()?.trim().orEmpty()
+                .substringBefore(",").trim()
+            desc.matches(usernameShape)
+        }
     }
 
     private fun readTikTokProfileUsername(root: AccessibilityNodeInfo): String {
@@ -4181,10 +4213,19 @@ class SouthFarmAccessibilityService : AccessibilityService() {
 
             debugLog("TikTok scan: opening Profile semantically")
             if (!navigateTikTokToProfile()) return accounts
-            val profileRoot = getTikTokRoot() ?: return accounts
-            val selector = findTikTokAccountSelector(profileRoot)
-            val openedSwitcher = selector != null && clickNode(selector)
-            profileRoot.recycle()
+            // The selector row may still be composing when Profile lands: poll
+            // instead of failing the whole scan on a rendering race.
+            var openedSwitcher = false
+            for (attempt in 0 until 5) {
+                val profileRoot = getTikTokRoot()
+                if (profileRoot != null) {
+                    val selector = findTikTokAccountSelector(profileRoot)
+                    openedSwitcher = selector != null && clickNode(selector)
+                    profileRoot.recycle()
+                    if (openedSwitcher) break
+                }
+                Thread.sleep(700)
+            }
             if (!openedSwitcher) {
                 debugLog("TikTok scan: profile handle selector not found")
                 return accounts
