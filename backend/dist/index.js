@@ -3,9 +3,9 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
-import https from 'https';
 import path from 'path';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { existsSync, statSync } from 'fs';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
@@ -13,9 +13,10 @@ import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
+import { ensureAvatarStored, fetchInstagramProfilePicUrl, registerAvatarRoutes } from './avatars.js';
 import { applyClusterMigrations } from './cluster-migrations.js';
 import { registerActivityPlanner, runActivityPlannerStartup } from './activity-planner.js';
-import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
+import { signSouthFarmJwt, verifySouthFarmJwt, JWT_SECRET } from './jwt-config.js';
 import { BUENOS_AIRES_TIMEZONE, DAILY_MAX_WARMUP_SECONDS, DAILY_MIN_WARMUP_SECONDS, DEFAULT_FIXED_WARMUP_SECONDS, chooseDailyTargetSeconds, chooseSessionCount, expiresAtIso, isTaskExpired, isTaskOverdue, localDateTimeToIso, overdueAtIso, splitWarmupDurationSeconds, } from './scheduler.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,6 +24,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
+const APP_APK_PATH = path.resolve(String(process.env.SOUTHFARM_APP_APK_PATH || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'app', 'southfarm.apk')));
+const APP_LINK_TTL_SECONDS = Math.min(3600, Math.max(60, Number(process.env.SOUTHFARM_APP_LINK_TTL_SECONDS || 900)));
 const PUBLISHER_WORKER_TOKEN = String(process.env.SOUTHFARM_PUBLISHER_WORKER_TOKEN || '').trim();
 const PUBLISHER_WORKER_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.SOUTHFARM_PUBLISHER_WORKER_ENABLED || 'false'));
 if (PUBLISHER_WORKER_ENABLED && !PUBLISHER_WORKER_TOKEN) {
@@ -175,11 +178,12 @@ db.exec(`
     last_seen_at TEXT,
     workspace_id INTEGER,
     installation_id TEXT,
-    lifecycle_status TEXT DEFAULT 'active',
+    lifecycle_status TEXT DEFAULT 'enrolled',
     paired_at TEXT,
     revoked_at TEXT,
     last_auth_at TEXT,
     device_token_hash TEXT,
+    agent_token_version INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
@@ -315,15 +319,33 @@ for (const [name, type] of [
     ['last_seen_at', 'TEXT'],
     ['workspace_id', 'INTEGER'],
     ['installation_id', 'TEXT'],
-    ['lifecycle_status', "TEXT DEFAULT 'active'"],
+    ['lifecycle_status', "TEXT DEFAULT 'enrolled'"],
     ['paired_at', 'TEXT'],
     ['revoked_at', 'TEXT'],
     ['last_auth_at', 'TEXT'],
     ['device_token_hash', 'TEXT'],
+    ['agent_token_version', 'INTEGER NOT NULL DEFAULT 1'],
 ]) {
     if (!deviceColumns.has(name)) {
         db.exec(`ALTER TABLE devices ADD COLUMN ${name} ${type}`);
     }
+}
+// Ciclo de vida explícito de un dispositivo:
+//   pending  → reservado, aún sin enrolamiento completo (Fase 2)
+//   enrolled → vinculado y autorizado al workspace
+//   revoked  → desvinculado; solo claim vuelve a enrolar
+// 'active' era el valor legado de enrolled: se normaliza (idempotente).
+db.exec(`
+  UPDATE devices
+  SET lifecycle_status = 'enrolled'
+  WHERE lifecycle_status IS NULL
+     OR TRIM(lifecycle_status) = ''
+     OR lifecycle_status = 'active'
+`);
+const workspaceColumns = new Set(db.prepare('PRAGMA table_info(workspaces)').all()
+    .map((column) => column.name));
+if (!workspaceColumns.has('bridge_url')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN bridge_url TEXT');
 }
 const taskRunColumns = new Set(db.prepare('PRAGMA table_info(task_runs)').all()
     .map((column) => column.name));
@@ -417,13 +439,33 @@ function deviceView(device) {
     const currentTask = Number.isInteger(Number(device.id))
         ? activeTaskForDevice(Number(device.id))
         : null;
+    // Enrolamiento normalizado: 'active' (legado) se reporta como 'enrolled'.
+    const enrollmentStatus = device.lifecycle_status === 'revoked'
+        ? 'revoked'
+        : device.lifecycle_status === 'pending'
+            ? 'pending'
+            : 'enrolled';
     const view = {
         ...device,
         alias: device.device_alias || null,
         display_name: device.device_alias || device.device_name || 'Android device',
         online,
-        device_status: device.lifecycle_status || 'active',
+        device_status: enrollmentStatus,
         connection_status: online ? 'online' : device.last_seen_at ? 'offline' : 'never_seen',
+        // Señales separadas (cada una con su fuente de verdad y timestamp):
+        // enrollment lo controla la API; agent es el heartbeat autenticado del
+        // teléfono. attachment (USB) y screen (sesión) se suman en la Fase 2.
+        enrollment: {
+            status: enrollmentStatus,
+            paired_at: device.paired_at || null,
+            revoked_at: device.revoked_at || null,
+        },
+        agent: {
+            last_seen_at: device.last_seen_at || null,
+            last_auth_at: device.last_auth_at || null,
+            online,
+            app_version: device.app_version || null,
+        },
         current_task: currentTask ? {
             id: currentTask.id,
             task_type: currentTask.task_type,
@@ -472,7 +514,11 @@ function findDeviceForUser(userId, rawDeviceId, preferStableId = false, rawInsta
     `).get(userId, deviceValue);
     }
     if (!device && !preferStableId && deviceValue && /^\d+$/.test(deviceValue)) {
-        device = db.prepare('SELECT * FROM devices WHERE user_id = ? AND id = ?').get(userId, Number(deviceValue));
+        device = db.prepare(`
+      SELECT * FROM devices
+      WHERE user_id = ? AND id = ? AND lifecycle_status != 'revoked'
+      ORDER BY id DESC LIMIT 1
+    `).get(userId, Number(deviceValue));
     }
     return device || null;
 }
@@ -480,6 +526,7 @@ function findDeviceFromPayload(userId, payload) {
     return findDeviceForUser(userId, payload.device_id, true, payload.installation_id);
 }
 function touchDevice(userId, payload, options = {}) {
+    const mode = options.mode ?? (options.allowCreate ? 'enroll' : 'register');
     const stableDeviceId = stringValue(payload.device_id);
     if (!stableDeviceId)
         throw new Error('device_id required');
@@ -495,16 +542,45 @@ function touchDevice(userId, payload, options = {}) {
         throw new Error('User is not assigned to a workspace');
     const existing = findDeviceFromPayload(userId, payload);
     if (existing) {
-        db.prepare(`
-      UPDATE devices
-      SET device_name = COALESCE(?, device_name),
-          android_version = COALESCE(?, android_version),
-          app_version = COALESCE(?, app_version),
-          device_id = ?, installation_id = ?, workspace_id = ?,
-          lifecycle_status = 'active', revoked_at = NULL,
-          last_seen_at = ?, last_auth_at = ?
-      WHERE id = ?
-    `).run(deviceName, androidVersion, appVersion, stableDeviceId, installationId, workspaceId, seenAt, seenAt, existing.id);
+        if (mode === 'presence') {
+            // Heartbeat: refresco de presencia únicamente. La identidad
+            // (device_id/installation_id/workspace) y el ciclo de vida NO se tocan:
+            // ni re-vincular ni reactivar live aquí, eso solo ocurre en claim.
+            db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(deviceName, androidVersion, appVersion, seenAt, seenAt, existing.id);
+        }
+        else if (mode === 'enroll') {
+            // Re-claim de una instalación existente: (re)enrola explícitamente.
+            db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            lifecycle_status = 'enrolled', revoked_at = NULL, paired_at = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(deviceName, androidVersion, appVersion, stableDeviceId, installationId, workspaceId, seenAt, seenAt, seenAt, existing.id);
+        }
+        else {
+            // register: refresca identidad reportada por el teléfono, sin tocar
+            // lifecycle ni tokens (la rotación vive únicamente en claim).
+            db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(deviceName, androidVersion, appVersion, stableDeviceId, installationId, workspaceId, seenAt, seenAt, existing.id);
+        }
     }
     else if (options.allowCreate) {
         db.prepare(`
@@ -512,7 +588,7 @@ function touchDevice(userId, payload, options = {}) {
         (user_id, workspace_id, device_id, installation_id, device_name,
          android_version, app_version, lifecycle_status, paired_at,
          last_seen_at, last_auth_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)
     `).run(userId, workspaceId, stableDeviceId, installationId, deviceName, androidVersion, appVersion, seenAt, seenAt, seenAt);
     }
     else {
@@ -521,10 +597,19 @@ function touchDevice(userId, payload, options = {}) {
     return db.prepare('SELECT * FROM devices WHERE workspace_id = ? AND installation_id = ? ORDER BY id DESC LIMIT 1')
         .get(workspaceId, installationId);
 }
-function issueDeviceToken(deviceId) {
-    const rawToken = `sfd_${randomBytes(32).toString('base64url')}`;
-    db.prepare('UPDATE devices SET device_token_hash = ?, last_auth_at = ? WHERE id = ?')
-        .run(hashInviteToken(rawToken), nowIso(), deviceId);
+function issueDeviceToken(deviceId, options = {}) {
+    // El token embebe la versión del agente: subir agent_token_version invalida
+    // de golpe todos los tokens emitidos para la versión anterior, aun cuando el
+    // hash en DB se restaurara de un backup. La rotación de versión se hace en
+    // claim (re-enrolamiento) y al revocar.
+    const device = db.prepare('SELECT agent_token_version FROM devices WHERE id = ?').get(deviceId);
+    const nextVersion = Number(device?.agent_token_version || 1) + (options.rotateVersion ? 1 : 0);
+    const rawToken = `sfd_v${nextVersion}_${randomBytes(32).toString('base64url')}`;
+    db.prepare(`
+    UPDATE devices
+    SET device_token_hash = ?, agent_token_version = ?, last_auth_at = ?
+    WHERE id = ?
+  `).run(hashInviteToken(rawToken), nextVersion, nowIso(), deviceId);
     return rawToken;
 }
 function taskLeaseExpiresAt() {
@@ -1081,6 +1166,34 @@ function rotateRefreshSession(rawToken, userAgent) {
             return null;
         const now = nowIso();
         if (current.revoked_at) {
+            // EXCEPCIÓN (carrera de refresh simultáneo): el cliente Flutter no tiene
+            // single-flight en refreshSession; con varios flujos concurrentes el
+            // mismo token vencido puede llegar dos veces: el primero rota, el resto
+            // llega con el ya-revocado y antes se mataba la familia entera =
+            // logout masivo en los teléfonos. Si la rotación es reciente (gracia) y
+            // la familia conserva al menos una sesión activa, se emite una sesión
+            // hermana nueva en vez de revocar todo. Fuera de gracia o sin hermana
+            // activa sigue siendo tratarlo como robo y revocar la familia.
+            const revokedAtMs = Date.parse(current.revoked_at);
+            const graceMs = Number(process.env.SOUTHFARM_REFRESH_REUSE_GRACE_MS || '60000');
+            if (Number.isFinite(revokedAtMs) && Date.now() - revokedAtMs <= graceMs) {
+                const activeSibling = db.prepare(`
+          SELECT id FROM refresh_sessions
+          WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(current.family_id, now);
+                if (activeSibling) {
+                    const graceRawToken = `sfr_${randomBytes(48).toString('base64url')}`;
+                    const graceHash = hashInviteToken(graceRawToken);
+                    const graceExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+                    db.prepare(`
+            INSERT INTO refresh_sessions
+              (user_id, family_id, token_hash, created_at, expires_at, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(current.user_id, current.family_id, graceHash, now, graceExpiresAt, userAgent);
+                    return { userId: Number(current.user_id), refreshToken: graceRawToken };
+                }
+            }
             // A rotated token must never be accepted twice. Reuse revokes the
             // complete family so a stolen token cannot keep a session alive.
             db.prepare(`
@@ -1121,7 +1234,7 @@ function revokeRefreshToken(rawToken) {
 }
 function workspaceMembership(userId) {
     return db.prepare(`
-    SELECT wm.*, w.name AS workspace_name, w.owner_user_id
+    SELECT wm.*, w.name AS workspace_name, w.owner_user_id, w.bridge_url AS workspace_bridge_url
     FROM workspace_members wm
     JOIN workspaces w ON w.id = wm.workspace_id
     WHERE wm.user_id = ? AND wm.status = 'active'
@@ -1328,7 +1441,7 @@ db.transaction(() => {
   `).run();
     db.prepare(`
     UPDATE devices
-    SET lifecycle_status = 'active'
+    SET lifecycle_status = 'enrolled'
     WHERE lifecycle_status IS NULL OR TRIM(lifecycle_status) = ''
   `).run();
     db.prepare(`
@@ -1830,12 +1943,16 @@ function auth(req, res, next) {
     catch {
         // Device tokens are intentionally opaque and scoped to one paired
         // installation. They let the mobile agent keep working after a user JWT
-        // expires, without giving the phone a team-management role.
+        // expires, without giving the phone a team-management role. Tokens embed
+        // their agent_token_version (sfd_v<N>_...; sin prefijo = legado v1): una
+        // fila cuya versión avanzó rechaza todo token emitido antes de la rotación.
+        const versionMatch = /^sfd_v(\d+)_/.exec(bearer);
+        const tokenVersion = versionMatch ? Number(versionMatch[1]) : 1;
         const device = db.prepare(`
       SELECT * FROM devices
-      WHERE device_token_hash = ? AND lifecycle_status = 'active'
+      WHERE device_token_hash = ? AND lifecycle_status = 'enrolled' AND agent_token_version = ?
       LIMIT 1
-    `).get(hashInviteToken(bearer));
+    `).get(hashInviteToken(bearer), tokenVersion);
         if (!device || !device.workspace_id)
             return res.status(401).json({ error: 'Invalid token' });
         const membership = db.prepare(`
@@ -1896,6 +2013,7 @@ function authUserView(userId) {
             id: membership.workspace_id,
             name: membership.workspace_name,
             owner_user_id: membership.owner_user_id,
+            bridge_url: membership.workspace_bridge_url || null,
         },
     };
 }
@@ -2017,9 +2135,63 @@ app.get('/api/team/members', auth, (req, res) => {
         workspace: {
             id: req.user.workspaceId,
             name: workspaceMembership(req.user.userId)?.workspace_name || 'SouthFarm workspace',
+            bridge_url: workspaceMembership(req.user.userId)?.workspace_bridge_url || null,
         },
         members: members.map(memberUserView),
     });
+});
+app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req, res) => {
+    const membership = workspaceMembership(req.user.userId);
+    if (!membership)
+        return res.status(403).json({ error: 'User is not a member of a workspace' });
+    if ('bridge_url' in req.body) {
+        const rawBridgeUrl = stringValue(req.body.bridge_url);
+        let bridgeUrl = null;
+        if (rawBridgeUrl) {
+            try {
+                const parsed = new URL(rawBridgeUrl);
+                if (!['http:', 'https:'].includes(parsed.protocol))
+                    throw new Error('bad protocol');
+                bridgeUrl = parsed.toString().replace(/\/$/, '');
+            }
+            catch {
+                return res.status(400).json({ error: 'bridge_url must be a valid http(s) URL' });
+            }
+        }
+        db.prepare('UPDATE workspaces SET bridge_url = ? WHERE id = ?').run(bridgeUrl, membership.workspace_id);
+    }
+    const updated = db.prepare('SELECT bridge_url FROM workspaces WHERE id = ?').get(membership.workspace_id);
+    res.json({ workspace: { id: membership.workspace_id, name: membership.workspace_name, bridge_url: updated?.bridge_url || null } });
+});
+// ─── App móvil: descarga autenticada (el APK NO es público) ───
+function signAppDownloadLink(expiresAtEpoch) {
+    const payload = String(expiresAtEpoch);
+    const sig = createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32);
+    return `${payload}.${sig}`;
+}
+app.post('/api/devices/app/install-link', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    if (!existsSync(APP_APK_PATH))
+        return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+    const expiresAt = Math.floor(Date.now() / 1000) + APP_LINK_TTL_SECONDS;
+    res.json({
+        path: `/api/devices/app/download/${signAppDownloadLink(expiresAt)}`,
+        expires_at: new Date(expiresAt * 1000).toISOString(),
+        size_bytes: statSync(APP_APK_PATH).size,
+    });
+});
+app.get('/api/devices/app/download/:token', (req, res) => {
+    const [payload, sig] = String(req.params.token || '').split('.');
+    const expected = payload ? createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32) : '';
+    const sigBuf = Buffer.from(String(sig || ''), 'utf8');
+    const expBuf = Buffer.from(expected, 'utf8');
+    if (!payload || !sig || sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+        return res.status(403).json({ error: 'Invalid download link' });
+    }
+    if (Number(payload) * 1000 < Date.now())
+        return res.status(410).json({ error: 'Download link expired' });
+    if (!existsSync(APP_APK_PATH))
+        return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+    res.download(APP_APK_PATH, 'southfarm.apk');
 });
 app.get('/api/team/invites', auth, requireRole('owner', 'admin'), (req, res) => {
     const invites = db.prepare(`
@@ -2166,8 +2338,8 @@ app.post('/api/devices/claim', auth, requireRole('owner', 'admin', 'operator'), 
           AND lifecycle_status != 'revoked'
           AND (installation_id IS NULL OR installation_id != ?)
       `).run(seenAt, req.user.workspaceId, payload.device_id, installationId);
-            const claimed = touchDevice(req.user.userId, payload, { allowCreate: true });
-            deviceToken = issueDeviceToken(Number(claimed.id));
+            const claimed = touchDevice(req.user.userId, payload, { allowCreate: true, mode: 'enroll' });
+            deviceToken = issueDeviceToken(Number(claimed.id), { rotateVersion: true });
             db.prepare(`
         UPDATE device_pairings
         SET consumed_at = ?, consumed_by_user_id = ?, consumed_device_id = ?
@@ -2193,9 +2365,15 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
                 code: 'DEVICE_NOT_PAIRED',
             });
         }
-        const device = touchDevice(req.user.userId, req.body);
-        const deviceToken = issueDeviceToken(Number(device.id));
-        res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+        const device = touchDevice(req.user.userId, req.body, { mode: 'register' });
+        // Este endpoint SOLO re-registra dispositivos ya emparejados (si no existe
+        // la fila responde 409 y el emparejamiento real ocurre en /devices/claim).
+        // Nunca rotar el token acá: la app llama a register como "ensure registered"
+        // antes de/durante cada scan (con JWT de usuario o token de dispositivo), y
+        // rotar invalida el token que la tarea remota capturó al reclamar → el POST
+        // final a /social-accounts llega con 401, las cuentas detectadas se pierden
+        // y la tarea queda trabada. La rotación de token vive únicamente en claim.
+        res.status(200).json({ device: deviceView(device) });
     }
     catch (error) {
         res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
@@ -2205,8 +2383,13 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
     }
 });
 app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    // Presence comes from the paired device agent itself. A user JWT must not
+    // be able to keep a device row "online" on the phone's behalf.
+    if (req.user.authType !== 'device') {
+        return res.status(403).json({ error: 'Device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+    }
     try {
-        const device = touchDevice(req.user.userId, req.body);
+        const device = touchDevice(req.user.userId, req.body, { mode: 'presence' });
         res.json({
             ok: true,
             server_time: nowIso(),
@@ -2440,7 +2623,8 @@ app.delete('/api/devices/:id', auth, requireRole('owner', 'admin'), (req, res) =
     const now = nowIso();
     const r = db.prepare(`
     UPDATE devices
-    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL
+    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL,
+        agent_token_version = agent_token_version + 1
     WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
   `).run(now, req.params.id, req.user.workspaceId);
     r.changes
@@ -3292,22 +3476,18 @@ app.patch('/api/tasks/runs/:id', auth, requireRole('owner', 'admin', 'operator')
     res.json({ ok: true, status, session, scan_session: scanSession, accounting });
 });
 // ─── IG Accounts (per device) ───
-// ─── Scrape IG profile pic ───
+// ─── Avatar serving + profile-photo pipeline ───
+// Local mirror of the scanned profile photos lives in backend/src/avatars.ts:
+// GET /api/avatars/:filename serves data/avatars/ with a long cache, and
+// ensureAvatarStored() scrapes + downloads a photo for any platform. Registered
+// without auth because clients render these paths directly in <img> tags.
+registerAvatarRoutes(app);
+// Legacy Instagram-only scrape kept for the /api/ig-accounts endpoints, which
+// continue to store the CDN URL exactly as before; the implementation now
+// delegates to the shared avatar module so the og:image handling lives in one
+// place.
 function fetchProfilePicUrl(username) {
-    return new Promise((resolve) => {
-        const url = `https://www.instagram.com/${username}/`;
-        const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
-            let html = '';
-            res.on('data', (chunk) => { html += chunk.toString(); });
-            res.on('end', () => {
-                const match = html.match(/og:image[^>]*content="([^"]+)"/);
-                const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
-                resolve(picUrl);
-            });
-        });
-        req.setTimeout(8000, () => { req.destroy(); resolve(''); });
-        req.on('error', () => resolve(''));
-    });
+    return fetchInstagramProfilePicUrl(username);
 }
 app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), async (req, res) => {
     const { device_id, usernames } = req.body;
@@ -3393,13 +3573,38 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
         return res.status(400).json({ error: 'device_id required' });
     const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId);
     const dataUserId = deviceOwner?.user_id ?? req.user.userId;
-    db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
-        .run(dataUserId, numericDeviceId, platform);
+    // Snapshot the photo pointers of the rows about to be wiped by the DELETE
+    // below, so a rescan never loses them. Values may be local /api/avatars/...
+    // paths or absolute CDN URLs stored by older builds — both are used verbatim.
+    const previousPicUrls = new Map();
+    for (const row of db.prepare('SELECT username, profile_pic_url FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?').all(dataUserId, numericDeviceId, platform)) {
+        if (row.profile_pic_url)
+            previousPicUrls.set(String(row.username), row.profile_pic_url);
+    }
+    try {
+        // Desvincular referencias ANTES del borrado: task_runs.social_account_id
+        // apunta a social_accounts y, con foreign_keys=ON, borrar cuentas
+        // referenciadas por tareas (warmups/scan) tira SQLITE_CONSTRAINT.
+        db.prepare(`
+      UPDATE task_runs SET social_account_id = NULL
+      WHERE social_account_id IN (
+        SELECT id FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?
+      )
+    `).run(dataUserId, numericDeviceId, platform);
+        db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
+            .run(dataUserId, numericDeviceId, platform);
+    }
+    catch (error) {
+        console.error('[SocialAccounts] replace failed:', error?.code || error?.message);
+        return res.status(500).json({ error: 'Could not replace scanned accounts' });
+    }
     const insert = db.prepare(`INSERT OR IGNORE INTO social_accounts
       (user_id, device_id, platform, username, profile_pic_url,
        display_name, source_account_name, source_account_email, byline)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const updatePicUrl = db.prepare('UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?');
     let insertedCount = 0;
+    const accountsWithoutPic = new Set();
     for (const rawAccount of rawAccounts) {
         const account = rawAccount && typeof rawAccount === 'object'
             ? rawAccount
@@ -3409,15 +3614,37 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
             continue;
         const picUrl = String(account.profile_pic_url || '');
         insertedCount += Number(insert.run(dataUserId, numericDeviceId, platform, username, picUrl, String(account.display_name || ''), String(account.source_account_name || ''), String(account.source_account_email || ''), String(account.byline || '')).changes || 0);
-        if (platform === 'instagram' && !picUrl) {
-            void fetchProfilePicUrl(username).then((profilePicUrl) => {
-                if (!profilePicUrl)
-                    return;
-                db.prepare('UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?')
-                    .run(profilePicUrl, dataUserId, numericDeviceId, platform, username);
-            }).catch(() => { });
-        }
+        if (!picUrl)
+            accountsWithoutPic.add(username);
     }
+    // Re-attach photos that survived a previous scan (local data only, no
+    // network, so it happens before the response is sent); the accounts still
+    // left without a photo go through the async avatar pipeline below.
+    const accountsStillWithoutPic = [...accountsWithoutPic].filter((username) => {
+        const previous = previousPicUrls.get(username);
+        if (!previous)
+            return true;
+        updatePicUrl.run(previous, dataUserId, numericDeviceId, platform, username);
+        return false;
+    });
+    // Best-effort avatar pipeline for everything still without a photo, now for
+    // all platforms (Instagram, TikTok, YouTube) and not just Instagram: fetch
+    // the profile page, download the image once into data/avatars/ and store the
+    // local /api/avatars/... path. Runs after the inserts without blocking the
+    // response, and skips the external scrape when the file already exists.
+    void (async () => {
+        for (const username of accountsStillWithoutPic) {
+            try {
+                const storedUrl = await ensureAvatarStored(platform, username);
+                if (!storedUrl)
+                    continue;
+                updatePicUrl.run(storedUrl, dataUserId, numericDeviceId, platform, username);
+            }
+            catch {
+                // Best-effort: leave profile_pic_url empty and move on.
+            }
+        }
+    })();
     const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), platform, {
         accountsFound: insertedCount,
         status: req.body.scan_status,
@@ -3839,5 +4066,14 @@ runActivityPlannerStartup({
     accountKeyFor,
     deviceIsOnline,
     plannerDateKey,
+});
+// Red de seguridad: un rechazo no manejado en un handler async (Express 4 no
+// los captura) NO debe tumbar la API entera con toda la flota colgando de
+// ella. Se registra con stack en stderr y el proceso sigue vivo.
+process.on('unhandledRejection', (reason) => {
+    console.error('[Fatal-guard] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+    console.error('[Fatal-guard] uncaughtException:', error);
 });
 app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));

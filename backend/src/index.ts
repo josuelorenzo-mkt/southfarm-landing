@@ -221,11 +221,12 @@ db.exec(`
     last_seen_at TEXT,
     workspace_id INTEGER,
     installation_id TEXT,
-    lifecycle_status TEXT DEFAULT 'active',
+    lifecycle_status TEXT DEFAULT 'enrolled',
     paired_at TEXT,
     revoked_at TEXT,
     last_auth_at TEXT,
     device_token_hash TEXT,
+    agent_token_version INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
@@ -372,16 +373,30 @@ for (const [name, type] of [
   ['last_seen_at', 'TEXT'],
   ['workspace_id', 'INTEGER'],
   ['installation_id', 'TEXT'],
-  ['lifecycle_status', "TEXT DEFAULT 'active'"],
+  ['lifecycle_status', "TEXT DEFAULT 'enrolled'"],
   ['paired_at', 'TEXT'],
   ['revoked_at', 'TEXT'],
   ['last_auth_at', 'TEXT'],
   ['device_token_hash', 'TEXT'],
+  ['agent_token_version', 'INTEGER NOT NULL DEFAULT 1'],
 ] as const) {
   if (!deviceColumns.has(name)) {
     db.exec(`ALTER TABLE devices ADD COLUMN ${name} ${type}`);
   }
 }
+
+// Ciclo de vida explícito de un dispositivo:
+//   pending  → reservado, aún sin enrolamiento completo (Fase 2)
+//   enrolled → vinculado y autorizado al workspace
+//   revoked  → desvinculado; solo claim vuelve a enrolar
+// 'active' era el valor legado de enrolled: se normaliza (idempotente).
+db.exec(`
+  UPDATE devices
+  SET lifecycle_status = 'enrolled'
+  WHERE lifecycle_status IS NULL
+     OR TRIM(lifecycle_status) = ''
+     OR lifecycle_status = 'active'
+`);
 
 const workspaceColumns = new Set(
   (db.prepare('PRAGMA table_info(workspaces)').all() as Array<{ name: string }>)
@@ -490,13 +505,33 @@ function deviceView(device: any): any {
   const currentTask = Number.isInteger(Number(device.id))
     ? activeTaskForDevice(Number(device.id))
     : null;
+  // Enrolamiento normalizado: 'active' (legado) se reporta como 'enrolled'.
+  const enrollmentStatus = device.lifecycle_status === 'revoked'
+    ? 'revoked'
+    : device.lifecycle_status === 'pending'
+      ? 'pending'
+      : 'enrolled';
   const view: any = {
     ...device,
     alias: device.device_alias || null,
     display_name: device.device_alias || device.device_name || 'Android device',
     online,
-    device_status: device.lifecycle_status || 'active',
+    device_status: enrollmentStatus,
     connection_status: online ? 'online' : device.last_seen_at ? 'offline' : 'never_seen',
+    // Señales separadas (cada una con su fuente de verdad y timestamp):
+    // enrollment lo controla la API; agent es el heartbeat autenticado del
+    // teléfono. attachment (USB) y screen (sesión) se suman en la Fase 2.
+    enrollment: {
+      status: enrollmentStatus,
+      paired_at: device.paired_at || null,
+      revoked_at: device.revoked_at || null,
+    },
+    agent: {
+      last_seen_at: device.last_seen_at || null,
+      last_auth_at: device.last_auth_at || null,
+      online,
+      app_version: device.app_version || null,
+    },
     current_task: currentTask ? {
       id: currentTask.id,
       task_type: currentTask.task_type,
@@ -568,11 +603,14 @@ function findDeviceFromPayload(userId: number, payload: Record<string, unknown>)
   return findDeviceForUser(userId, payload.device_id, true, payload.installation_id);
 }
 
+type DeviceTouchMode = 'presence' | 'register' | 'enroll';
+
 function touchDevice(
   userId: number,
   payload: Record<string, unknown>,
-  options: { allowCreate?: boolean } = {},
+  options: { allowCreate?: boolean; mode?: DeviceTouchMode } = {},
 ): any {
+  const mode: DeviceTouchMode = options.mode ?? (options.allowCreate ? 'enroll' : 'register');
   const stableDeviceId = stringValue(payload.device_id);
   if (!stableDeviceId) throw new Error('device_id required');
   const installationId = deviceInstallationId(payload);
@@ -587,33 +625,71 @@ function touchDevice(
   const existing = findDeviceFromPayload(userId, payload) as any;
 
   if (existing) {
-    db.prepare(`
-      UPDATE devices
-      SET device_name = COALESCE(?, device_name),
-          android_version = COALESCE(?, android_version),
-          app_version = COALESCE(?, app_version),
-          device_id = ?, installation_id = ?, workspace_id = ?,
-          lifecycle_status = 'active', revoked_at = NULL,
-          last_seen_at = ?, last_auth_at = ?
-      WHERE id = ?
-    `).run(
-      deviceName,
-      androidVersion,
-      appVersion,
-      stableDeviceId,
-      installationId,
-      workspaceId,
-      seenAt,
-      seenAt,
-      existing.id,
-    );
+    if (mode === 'presence') {
+      // Heartbeat: refresco de presencia únicamente. La identidad
+      // (device_id/installation_id/workspace) y el ciclo de vida NO se tocan:
+      // ni re-vincular ni reactivar live aquí, eso solo ocurre en claim.
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(deviceName, androidVersion, appVersion, seenAt, seenAt, existing.id);
+    } else if (mode === 'enroll') {
+      // Re-claim de una instalación existente: (re)enrola explícitamente.
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            lifecycle_status = 'enrolled', revoked_at = NULL, paired_at = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(
+        deviceName,
+        androidVersion,
+        appVersion,
+        stableDeviceId,
+        installationId,
+        workspaceId,
+        seenAt,
+        seenAt,
+        seenAt,
+        existing.id,
+      );
+    } else {
+      // register: refresca identidad reportada por el teléfono, sin tocar
+      // lifecycle ni tokens (la rotación vive únicamente en claim).
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(
+        deviceName,
+        androidVersion,
+        appVersion,
+        stableDeviceId,
+        installationId,
+        workspaceId,
+        seenAt,
+        seenAt,
+        existing.id,
+      );
+    }
   } else if (options.allowCreate) {
     db.prepare(`
       INSERT INTO devices
         (user_id, workspace_id, device_id, installation_id, device_name,
          android_version, app_version, lifecycle_status, paired_at,
          last_seen_at, last_auth_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)
     `).run(
       userId,
       workspaceId,
@@ -634,10 +710,19 @@ function touchDevice(
     .get(workspaceId, installationId);
 }
 
-function issueDeviceToken(deviceId: number): string {
-  const rawToken = `sfd_${randomBytes(32).toString('base64url')}`;
-  db.prepare('UPDATE devices SET device_token_hash = ?, last_auth_at = ? WHERE id = ?')
-    .run(hashInviteToken(rawToken), nowIso(), deviceId);
+function issueDeviceToken(deviceId: number, options: { rotateVersion?: boolean } = {}): string {
+  // El token embebe la versión del agente: subir agent_token_version invalida
+  // de golpe todos los tokens emitidos para la versión anterior, aun cuando el
+  // hash en DB se restaurara de un backup. La rotación de versión se hace en
+  // claim (re-enrolamiento) y al revocar.
+  const device = db.prepare('SELECT agent_token_version FROM devices WHERE id = ?').get(deviceId) as any;
+  const nextVersion = Number(device?.agent_token_version || 1) + (options.rotateVersion ? 1 : 0);
+  const rawToken = `sfd_v${nextVersion}_${randomBytes(32).toString('base64url')}`;
+  db.prepare(`
+    UPDATE devices
+    SET device_token_hash = ?, agent_token_version = ?, last_auth_at = ?
+    WHERE id = ?
+  `).run(hashInviteToken(rawToken), nextVersion, nowIso(), deviceId);
   return rawToken;
 }
 
@@ -1363,6 +1448,41 @@ function rotateRefreshSession(rawToken: string, userAgent: string | null): Rotat
 
     const now = nowIso();
     if (current.revoked_at) {
+      // EXCEPCIÓN (carrera de refresh simultáneo): el cliente Flutter no tiene
+      // single-flight en refreshSession; con varios flujos concurrentes el
+      // mismo token vencido puede llegar dos veces: el primero rota, el resto
+      // llega con el ya-revocado y antes se mataba la familia entera =
+      // logout masivo en los teléfonos. Si la rotación es reciente (gracia) y
+      // la familia conserva al menos una sesión activa, se emite una sesión
+      // hermana nueva en vez de revocar todo. Fuera de gracia o sin hermana
+      // activa sigue siendo tratarlo como robo y revocar la familia.
+      const revokedAtMs = Date.parse(current.revoked_at);
+      const graceMs = Number(process.env.SOUTHFARM_REFRESH_REUSE_GRACE_MS || '60000');
+      if (Number.isFinite(revokedAtMs) && Date.now() - revokedAtMs <= graceMs) {
+        const activeSibling = db.prepare(`
+          SELECT id FROM refresh_sessions
+          WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(current.family_id, now) as { id: number } | undefined;
+        if (activeSibling) {
+          const graceRawToken = `sfr_${randomBytes(48).toString('base64url')}`;
+          const graceHash = hashInviteToken(graceRawToken);
+          const graceExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+          db.prepare(`
+            INSERT INTO refresh_sessions
+              (user_id, family_id, token_hash, created_at, expires_at, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            current.user_id,
+            current.family_id,
+            graceHash,
+            now,
+            graceExpiresAt,
+            userAgent,
+          );
+          return { userId: Number(current.user_id), refreshToken: graceRawToken };
+        }
+      }
       // A rotated token must never be accepted twice. Reuse revokes the
       // complete family so a stolen token cannot keep a session alive.
       db.prepare(`
@@ -1644,7 +1764,7 @@ db.transaction(() => {
   `).run();
   db.prepare(`
     UPDATE devices
-    SET lifecycle_status = 'active'
+    SET lifecycle_status = 'enrolled'
     WHERE lifecycle_status IS NULL OR TRIM(lifecycle_status) = ''
   `).run();
   db.prepare(`
@@ -2279,12 +2399,16 @@ function auth(req: any, res: any, next: any) {
   } catch {
     // Device tokens are intentionally opaque and scoped to one paired
     // installation. They let the mobile agent keep working after a user JWT
-    // expires, without giving the phone a team-management role.
+    // expires, without giving the phone a team-management role. Tokens embed
+    // their agent_token_version (sfd_v<N>_...; sin prefijo = legado v1): una
+    // fila cuya versión avanzó rechaza todo token emitido antes de la rotación.
+    const versionMatch = /^sfd_v(\d+)_/.exec(bearer);
+    const tokenVersion = versionMatch ? Number(versionMatch[1]) : 1;
     const device: any = db.prepare(`
       SELECT * FROM devices
-      WHERE device_token_hash = ? AND lifecycle_status = 'active'
+      WHERE device_token_hash = ? AND lifecycle_status = 'enrolled' AND agent_token_version = ?
       LIMIT 1
-    `).get(hashInviteToken(bearer));
+    `).get(hashInviteToken(bearer), tokenVersion);
     if (!device || !device.workspace_id) return res.status(401).json({ error: 'Invalid token' });
     const membership: any = db.prepare(`
       SELECT wm.* FROM workspace_members wm
@@ -2686,8 +2810,8 @@ app.post('/api/devices/claim', auth, requireRole('owner', 'admin', 'operator'), 
           AND (installation_id IS NULL OR installation_id != ?)
       `).run(seenAt, req.user.workspaceId, payload.device_id, installationId);
 
-      const claimed = touchDevice(req.user.userId, payload, { allowCreate: true });
-      deviceToken = issueDeviceToken(Number(claimed.id));
+      const claimed = touchDevice(req.user.userId, payload, { allowCreate: true, mode: 'enroll' });
+      deviceToken = issueDeviceToken(Number(claimed.id), { rotateVersion: true });
       db.prepare(`
         UPDATE device_pairings
         SET consumed_at = ?, consumed_by_user_id = ?, consumed_device_id = ?
@@ -2713,9 +2837,15 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
         code: 'DEVICE_NOT_PAIRED',
       });
     }
-    const device = touchDevice(req.user.userId, req.body);
-    const deviceToken = issueDeviceToken(Number(device.id));
-    res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+    const device = touchDevice(req.user.userId, req.body, { mode: 'register' });
+    // Este endpoint SOLO re-registra dispositivos ya emparejados (si no existe
+    // la fila responde 409 y el emparejamiento real ocurre en /devices/claim).
+    // Nunca rotar el token acá: la app llama a register como "ensure registered"
+    // antes de/durante cada scan (con JWT de usuario o token de dispositivo), y
+    // rotar invalida el token que la tarea remota capturó al reclamar → el POST
+    // final a /social-accounts llega con 401, las cuentas detectadas se pierden
+    // y la tarea queda trabada. La rotación de token vive únicamente en claim.
+    res.status(200).json({ device: deviceView(device) });
   } catch (error: any) {
     res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
       error: error.message || 'device_id required',
@@ -2731,7 +2861,7 @@ app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator
     return res.status(403).json({ error: 'Device token required', code: 'DEVICE_TOKEN_REQUIRED' });
   }
   try {
-    const device = touchDevice(req.user.userId, req.body);
+    const device = touchDevice(req.user.userId, req.body, { mode: 'presence' });
     res.json({
       ok: true,
       server_time: nowIso(),
@@ -2994,7 +3124,8 @@ app.delete('/api/devices/:id', auth, requireRole('owner', 'admin'), (req: any, r
   const now = nowIso();
   const r = db.prepare(`
     UPDATE devices
-    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL
+    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL,
+        agent_token_version = agent_token_version + 1
     WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
   `).run(now, req.params.id, req.user.workspaceId);
   r.changes
@@ -4067,8 +4198,22 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
     if (row.profile_pic_url) previousPicUrls.set(String(row.username), row.profile_pic_url);
   }
 
-  db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
-    .run(dataUserId, numericDeviceId, platform);
+  try {
+    // Desvincular referencias ANTES del borrado: task_runs.social_account_id
+    // apunta a social_accounts y, con foreign_keys=ON, borrar cuentas
+    // referenciadas por tareas (warmups/scan) tira SQLITE_CONSTRAINT.
+    db.prepare(`
+      UPDATE task_runs SET social_account_id = NULL
+      WHERE social_account_id IN (
+        SELECT id FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?
+      )
+    `).run(dataUserId, numericDeviceId, platform);
+    db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
+      .run(dataUserId, numericDeviceId, platform);
+  } catch (error: any) {
+    console.error('[SocialAccounts] replace failed:', error?.code || error?.message);
+    return res.status(500).json({ error: 'Could not replace scanned accounts' });
+  }
   const insert = db.prepare(
     `INSERT OR IGNORE INTO social_accounts
       (user_id, device_id, platform, username, profile_pic_url,
@@ -4570,5 +4715,15 @@ runActivityPlannerStartup({
   deviceIsOnline,
   plannerDateKey,
 } as PlannerDeps);
+
+// Red de seguridad: un rechazo no manejado en un handler async (Express 4 no
+// los captura) NO debe tumbar la API entera con toda la flota colgando de
+// ella. Se registra con stack en stderr y el proceso sigue vivo.
+process.on('unhandledRejection', (reason) => {
+  console.error('[Fatal-guard] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[Fatal-guard] uncaughtException:', error);
+});
 
 app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));
