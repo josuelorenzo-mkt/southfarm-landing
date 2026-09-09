@@ -427,6 +427,15 @@ class ScreenSource {
     clearTimeout(this.idleTimer);
     ws.send(JSON.stringify({ codec: this.codecName || "h264" }), { binary: false });
     for (const chunk of this.gopCache) ws.send(chunk, SEND_OPTS); // replay del GOP: imagen al toque
+    // Espectador nuevo sin GOP cacheado: el capturador actual no está emitiendo
+    // frames (encoder silencioso con pantalla estática — pasa en algunos
+    // Motorola — o teléfono dormido). Respawn: el arranque despierta el
+    // teléfono y el primer GOP siempre se produce.
+    if (this.gopCache.length === 0 && this.status === "live" && !this.tearingDown) {
+      this.log("espectador sin GOP cacheado; respawn del capturador");
+      this.fail("sin GOP cacheado para espectador nuevo", false);
+      return;
+    }
     if (this.status === "idle" || this.status === "error") void this.start();
   }
 
