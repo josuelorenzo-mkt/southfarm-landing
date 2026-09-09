@@ -56,6 +56,13 @@ while ($true) {
     if (![string]::IsNullOrWhiteSpace($ScrcpyJarPath)) { $env:SCREEN_SCRCPY_JAR = $ScrcpyJarPath }
     $env:SCREEN_VIDEO_BITRATE = [string]$Bitrate
     $env:SCREEN_MAX_SIZE = [string]$MaxSize
+    # CORS con allowlist: orígenes web que pueden llamar al bridge (fetch).
+    # Los WebSockets no aplican CORS; esto cubre /api/health, /api/devices y
+    # /api/stream-ticket. Sin la clave en el config se mantiene el modo amplio.
+    $allowedOrigins = @($runtimeConfig.allowed_origins) | Where-Object { ![string]::IsNullOrWhiteSpace($_) }
+    if ($allowedOrigins.Count -gt 0) {
+      $env:SCREEN_ALLOWED_ORIGINS = ($allowedOrigins -join ',')
+    }
     "[$(Get-Date -Format o)] iniciando bridge (puerto $Port, bitrate $Bitrate, maxSize $MaxSize)" | Add-Content -LiteralPath $OutputLog
     Push-Location $BridgePath
     try {
