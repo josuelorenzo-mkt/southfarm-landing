@@ -24,17 +24,26 @@ import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.SCREEN_BRIDGE_PORT || 8100);
-// Auth opt-in para exponer el bridge fuera de la LAN (túnel): si SCREEN_AUTH_TOKEN
-// está definido, HTTP y WebSocket exigen el token (?token=... o Authorization Bearer).
-// Sin la variable, el bridge queda abierto (modo LAN confiable, comportamiento previo).
+// Auth: si SCREEN_AUTH_TOKEN está definido, HTTP exige Authorization Bearer y el
+// WebSocket exige un ticket de un solo uso (o Bearer para clientes no-navegador).
+// El token NUNCA viaja en la query: queda en logs del túnel. Sin la variable el
+// bridge se niega a arrancar, salvo que SCREEN_ALLOW_OPEN=1 (solo LAN confiable).
 const AUTH_TOKEN = process.env.SCREEN_AUTH_TOKEN || "";
+const ALLOW_OPEN = process.env.SCREEN_ALLOW_OPEN === "1";
+if (!AUTH_TOKEN && !ALLOW_OPEN) {
+  console.error(
+    "[auth] SCREEN_AUTH_TOKEN no está definido: el bridge se niega a arrancar abierto aInternet. " +
+      "Definí SCREEN_AUTH_TOKEN, o SCREEN_ALLOW_OPEN=1 si esto es una LAN confiable.",
+  );
+  process.exit(1);
+}
 
 /** Chequeo en tiempo constante para no filtrar el token por timing. */
 function tokenMatches(candidate) {
@@ -44,11 +53,55 @@ function tokenMatches(candidate) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function isAuthorizedRequest(req, url) {
-  if (!AUTH_TOKEN) return true;
-  if (tokenMatches(url.searchParams.get("token"))) return true;
+function bearerAuthorized(req) {
   const header = req.headers.authorization || "";
   return tokenMatches(header.startsWith("Bearer ") ? header.slice(7) : null);
+}
+
+// HTTP (health/devices/stream-ticket): solo header. El navegador puede mandar
+// headers en fetch; el token en query quedaba registrado por el túnel.
+function isAuthorizedRequest(req) {
+  if (!AUTH_TOKEN) return true;
+  return bearerAuthorized(req);
+}
+
+// Tickets de un solo uso para abrir el WebSocket desde el navegador (que no
+// puede mandar headers en un WS). Viven 30s, se consumen al primer uso y
+// quedan atados al serial pedido para que no se redirijan a otro teléfono.
+const STREAM_TICKET_TTL_MS = 30_000;
+const streamTickets = new Map();
+const randomHex = () => randomBytes(24).toString("hex");
+
+function issueStreamTicket(serial) {
+  const ticket = randomHex();
+  streamTickets.set(ticket, { serial: serial || null, expiresAt: Date.now() + STREAM_TICKET_TTL_MS });
+  return ticket;
+}
+
+function consumeStreamTicket(ticket, serial) {
+  const entry = typeof ticket === "string" ? streamTickets.get(ticket) : undefined;
+  if (!entry) return false;
+  streamTickets.delete(ticket);
+  if (Date.now() > entry.expiresAt) return false;
+  if (entry.serial && serial && entry.serial !== serial) return false;
+  return true;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [ticket, entry] of streamTickets) {
+    if (now > entry.expiresAt) streamTickets.delete(ticket);
+  }
+}, 30_000).unref();
+
+// Orígenes del navegador autorizados a llamar al bridge (CORS). Sin la variable
+// se mantiene el comportamiento amplio previo, con aviso en el log.
+const ALLOWED_ORIGINS = (process.env.SCREEN_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+if (AUTH_TOKEN && ALLOWED_ORIGINS.length === 0) {
+  console.warn("[cors] SCREEN_ALLOWED_ORIGINS sin definir: cualquier origen web podrá llamar al bridge.");
 }
 const ADB = process.env.SCREEN_ADB || pickDefaultAdb();
 const SCRCPY_JAR =
@@ -578,10 +631,45 @@ setInterval(() => {
 
 // ------------------------------------------------------------------- http
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+/** Lee un body JSON acotado (los tickets no necesitan más que unos bytes). */
+function readJsonBody(req, limitBytes = 8192) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limitBytes) {
+        reject(new Error("body demasiado grande"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (chunks.length === 0) return resolve(null);
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        resolve(null);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function cors(req, res) {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.length > 0) {
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    }
+    // Origen no permitido: sin header CORS, el navegador bloquea la respuesta.
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
 }
 
 function serialTransport(serial) {
@@ -605,13 +693,13 @@ async function buildDeviceInfo(serial, aliases) {
 }
 
 const server = http.createServer(async (req, res) => {
-  cors(res);
+  cors(req, res);
   if (req.method === "OPTIONS") {
     res.writeHead(204);
     return res.end();
   }
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  if (!isAuthorizedRequest(req, url)) {
+  if (!isAuthorizedRequest(req)) {
     res.writeHead(401, { "Content-Type": "application/json" });
     return res.end(JSON.stringify({ error: "token requerido" }));
   }
@@ -636,6 +724,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ devices }));
     }
+    if (url.pathname === "/api/stream-ticket" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      // Si vienen un serial, el ticket queda atado a él; si no, sirve para cualquier serial.
+      const ticket = issueStreamTicket(typeof body?.serial === "string" ? body.serial : null);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ticket, expires_in: Math.round(STREAM_TICKET_TTL_MS / 1000) }));
+    }
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
   } catch (cause) {
@@ -650,16 +745,24 @@ const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false }); /
 
 server.on("upgrade", (req, socket, head) => {
   const parsed = new URL(req.url, `http://localhost:${PORT}`);
-  const match = parsed.pathname.match(/^\/ws\/stream\/(.+)$/); // pathname: sin query (el token va aparte)
+  const match = parsed.pathname.match(/^\/ws\/stream\/(.+)$/); // pathname: sin query (la credencial va aparte)
   if (!match) {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
     return socket.destroy();
   }
-  if (!isAuthorizedRequest(req, parsed)) {
+  const serial = decodeURIComponent(match[1]);
+  // El navegador no puede mandar headers en un WebSocket: usa un ticket de un
+  // solo uso emitido por /api/stream-ticket. Clientes no-navegador pueden usar
+  // Authorization Bearer. El token compartido nunca viaja en la query.
+  const authorized = !AUTH_TOKEN
+    ? true
+    : parsed.searchParams.has("ticket")
+      ? consumeStreamTicket(parsed.searchParams.get("ticket"), serial)
+      : bearerAuthorized(req);
+  if (!authorized) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     return socket.destroy();
   }
-  const serial = decodeURIComponent(match[1]);
   wss.handleUpgrade(req, socket, head, (ws) => {
     const src = getSource(serial);
     src.addClient(ws);
