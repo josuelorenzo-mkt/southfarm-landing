@@ -113,6 +113,55 @@ if (AUTH_TOKEN && ALLOWED_ORIGINS.length === 0) {
 const BACKEND_URL = (process.env.SCREEN_BACKEND_URL || "").replace(/\/$/, "");
 const BRIDGE_REGISTERED_TOKEN = process.env.SCREEN_BRIDGE_TOKEN || "";
 const REQUIRE_CAPABILITY = process.env.SCREEN_REQUIRE_CAPABILITY === "1";
+// Umbrales del watchdog, configurables con defaults conservadores: nunca se
+// reinicia la captura por "pantalla estática" (el encoder emite cuadros de
+// repetición); solo por falla real de entrega de datos.
+const WD_NET_STALL_MS = Math.max(10_000, Number(process.env.SCREEN_WD_NET_STALL_MS || 30_000));
+const WD_STALL_TICKS = Math.max(2, Number(process.env.SCREEN_WD_STALL_TICKS || 5));
+
+const BRIDGE_TOKEN_PATTERN = /^sfb_[A-Za-z0-9_-]{20,}$/;
+
+function validateConfiguration() {
+  const problems = [];
+  if (REQUIRE_CAPABILITY && !BRIDGE_TOKEN_PATTERN.test(BRIDGE_REGISTERED_TOKEN)) {
+    problems.push("SCREEN_REQUIRE_CAPABILITY=1 exige SCREEN_BRIDGE_TOKEN con formato sfb_ (emitido por el panel). El valor actual está vacío, es un placeholder o tiene formato inválido; el bridge se niega a arrancar en modo estricto.");
+  }
+  if (BRIDGE_REGISTERED_TOKEN && !BRIDGE_TOKEN_PATTERN.test(BRIDGE_REGISTERED_TOKEN)) {
+    problems.push("SCREEN_BRIDGE_TOKEN no cumple el formato sfb_<secreto>: se rechaza por seguridad (los placeholders del paquete no son credenciales válidas).");
+  }
+  if (BACKEND_URL && !/^https?:\/\//.test(BACKEND_URL)) {
+    problems.push("SCREEN_BACKEND_URL debe ser una URL http(s).");
+  }
+  ALLOWED_ORIGINS.forEach((origin, index) => {
+    if (!/^https?:\/\//.test(origin)) problems.push(`SCREEN_ALLOWED_ORIGINS[${index}] no es una URL http(s) válida.`);
+  });
+  return problems;
+}
+
+// Modo de validación: no inicia listener, ADB ni heartbeat; imprime un
+// resumen REDACTADO (nunca los valores de los secretos) y sale 0/1.
+if (process.argv.includes("--validate-config") || process.env.SCREEN_VALIDATE === "1") {
+  const problems = validateConfiguration();
+  console.log(`[validate] auth compartido: ${AUTH_TOKEN ? "definido" : "AUSENTE"} (valor no impreso)`);
+  console.log(`[validate] backend: ${BACKEND_URL ? "configurado" : "no configurado"}; bridge_token: ${BRIDGE_REGISTERED_TOKEN ? "definido" : "no configurado"}; modo estricto: ${REQUIRE_CAPABILITY ? "ON" : "OFF"}`);
+  console.log(`[validate] orígenes web permitidos: ${ALLOWED_ORIGINS.length}`);
+  console.log(`[validate] watchdog: net_stall=${WD_NET_STALL_MS}ms; frame_stall=${WD_STALL_TICKS} ticks`);
+  if (problems.length) {
+    for (const problem of problems) console.error(`[validate] ERROR: ${problem}`);
+    process.exit(1);
+  }
+  console.log("[validate] configuración OK (ningún servicio fue iniciado).");
+  process.exit(0);
+}
+
+// Arranque en modo estricto sin credencial válida: fail-closed.
+if (REQUIRE_CAPABILITY) {
+  const problems = validateConfiguration();
+  if (problems.length) {
+    for (const problem of problems) console.error("[arranque] " + problem);
+    process.exit(1);
+  }
+}
 const usedNonces = new Map(); // nonce → expMs (capabilities de un solo uso)
 
 function verifyCapability(raw, serial) {
@@ -369,6 +418,13 @@ class ScreenSource {
     this.codecSent = false;
     this.metaSent = false;
     try {
+      // Solo capturar si el serial sigue presente y en estado device; un
+      // teléfono que se desconectó no recibe push/reverse/wake.
+      const state = await adb(["-s", this.serial, "get-state"], 8000).catch(() => ({ code: -1, stdout: "" }));
+      if (gen !== this.gen) return;
+      if (String(state.stdout || "").trim() !== "device") {
+        throw new Error(`el serial ${this.serial} no está en estado ADB 'device' (get-state falló); no se inicia captura`);
+      }
       // Limpiar capturadores huérfanos de sesiones anteriores en ESTE teléfono
       // (nunca toca procesos de otras herramientas). Dos patrones: el nombre del
       // jar propio, y la clase real del server (el jar va por CLASSPATH, así que
@@ -391,18 +447,18 @@ class ScreenSource {
       if (gen !== this.gen) return;
       this.log(`reverse code=${rev.code} out=${rev.stdout.trim().slice(0, 80)} err=${rev.stderr.trim().slice(0, 80)}`);
       if (rev.code !== 0) throw new Error(`adb reverse falló: ${rev.stderr || rev.stdout}`);
-      // Despertar el telefono: con la pantalla apagada el encoder no produce
-      // frames y el espectador queda en "Conectando..." para siempre. Si el
-      // wake falla (telefono desconectado) se continua igual.
-      const wake = await adb(["-s", this.serial, "shell", "input keyevent KEYCODE_WAKEUP"], 8000).catch(() => ({ code: -1 }));
-      if (gen !== this.gen) return;
-      this.log(`wake code=${wake.code ?? "?"}`);
+      // El bridge NO altera el estado del teléfono: nada de wake, gestos ni
+      // ajustes para forzar frames. Un teléfono bloqueado transmite negro (con
+      // repeat-previous-frame el encoder igual emite cuadros); SCRN_STAY_AWAKE=1
+      // permite optar por mantener la pantalla encendida MIENTRAS hay captura
+      // (flag de scrcpy, pasivo, nunca un keyevent).
+      const stayAwake = process.env.SCREEN_STAY_AWAKE === "1" ? " stay_awake=true" : "";
       const shellArgs = [
         "-s", this.serial, "shell",
         `CLASSPATH=${DEVICE_JAR_PATH} app_process / com.genymobile.scrcpy.Server ` +
           `${SERVER_VERSION} log_level=info max_size=${MAX_SIZE} max_fps=${MAX_FPS} ` +
           `video_bit_rate=${VIDEO_BIT_RATE} video_codec=h264 video=true audio=false ` +
-          `send_frame_meta=true control=false cleanup=false stay_awake=true` +
+          `send_frame_meta=true control=false cleanup=false${stayAwake}` +
           (CODEC_OPTIONS ? ` video_codec_options=${CODEC_OPTIONS}` : ""),
       ];
       const proc = (this.proc = spawn(ADB, shellArgs, { windowsHide: true }));
@@ -458,24 +514,27 @@ class ScreenSource {
       this.lastWdTick = now;
       this.lastWdFrames = this.frameCount || 0;
       if (this.status !== "live") return;
-      // Red absoluta: >30s sin UN byte con espectadores es un túnel muerto
-      // (en pantalla estática el encoder igual emite IDRs periódicos).
+      // Red absoluta: N segundos sin UN byte con espectadores es un túnel muerto
+      // (en pantalla estática el encoder igual emite IDRs/repeats periódicos, así
+      // que cero BYTES nunca es "pantalla estática": es transporte caído).
       const sinceLastByte = now - this.lastActivity;
-      if (sinceLastByte > 30000 && this.clients.size > 0) {
+      if (sinceLastByte > WD_NET_STALL_MS && this.clients.size > 0) {
         this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
-        this.fail("stall de red: túnel mudo >30s; reconectando", false);
+        this.fail("stall de red: túnel mudo >" + Math.round(WD_NET_STALL_MS / 1000) + "s; reconectando", false);
         return;
       }
-      // Stream ACTIVO (ya emitió >50 frames) sin frames nuevos ~4s: túnel colapsado.
-      // Umbral agresivo a propósito: un stream vivo a 30fps nunca tiene 4s de silencio,
-      // y recuperar rápido vale más que evitar un respawn de más.
+      // Stream ACTIVO (ya emitió >50 frames) sin frames NUEVOS durante
+      // WD_STALL_TICKS ticks consecutivos. Default conservador (10s): el
+      // repeat-previous-frame hace que una captura viva emita cuadros incluso
+      // con pantalla estática, así que ticks sin frames nuevos indican falla
+      // real de captura/transporte, no quietud del usuario.
       if (this.frameCount > 50 && this.frameCount === (this.lastStallFrameCount ?? -1)) {
         this.stallTicks += 1;
       } else {
         this.stallTicks = 0;
       }
       this.lastStallFrameCount = this.frameCount;
-      if (this.stallTicks >= 2 && this.clients.size > 0) {
+      if (this.stallTicks >= WD_STALL_TICKS && this.clients.size > 0) {
         this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
         this.fail("stall de red: el túnel dejó de entregar datos; reconectando", false); // silencioso: se recupera solo
         return;

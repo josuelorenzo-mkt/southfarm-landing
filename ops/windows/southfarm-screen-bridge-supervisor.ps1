@@ -11,6 +11,8 @@ param(
   [string]$RuntimeConfigPath,
   [Parameter(Mandatory = $true)]
   [string]$LogDirectory,
+  # Ruta ADB canónica del host. La config puede sobreescribirla con la clave
+  # adb_path; NUNCA iniciar un segundo daemon ADB con otra copia de platform-tools.
   [string]$AdbPath = "C:\SouthFarm\toolchain\android-sdk\platform-tools\adb.exe",
   [string]$ScrcpyJarPath = "",
   [int]$Bitrate = 2000000,
@@ -76,6 +78,11 @@ while ($true) {
       $env:SCREEN_REQUIRE_CAPABILITY = "1"
     } else {
       Remove-Item Env:SCREEN_REQUIRE_CAPABILITY -ErrorAction SilentlyContinue
+    }
+    # Ruta ADB canónica del host: la config manda sobre el default del script
+    # para no iniciar daemons ADB de rutas alternativas.
+    if (![string]::IsNullOrWhiteSpace([string]$runtimeConfig.adb_path)) {
+      $AdbPath = [string]$runtimeConfig.adb_path
     }
     "[$(Get-Date -Format o)] iniciando bridge (puerto $Port, bitrate $Bitrate, maxSize $MaxSize)" | Add-Content -LiteralPath $OutputLog
     Push-Location $BridgePath
