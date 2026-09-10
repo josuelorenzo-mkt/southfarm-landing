@@ -347,6 +347,55 @@ const workspaceColumns = new Set(db.prepare('PRAGMA table_info(workspaces)').all
 if (!workspaceColumns.has('bridge_url')) {
     db.exec('ALTER TABLE workspaces ADD COLUMN bridge_url TEXT');
 }
+if (!workspaceColumns.has('strict_bridge_mode')) {
+    db.exec('ALTER TABLE workspaces ADD COLUMN strict_bridge_mode INTEGER NOT NULL DEFAULT 0');
+}
+// ─── Screen streaming (Fase 2): registro de bridges, attachments y sesiones ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS screen_bridges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    last_seen_at TEXT,
+    version TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+  );
+  CREATE TABLE IF NOT EXISTS bridge_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bridge_id INTEGER NOT NULL,
+    adb_serial TEXT NOT NULL,
+    device_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'unassigned',
+    last_seen_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (bridge_id) REFERENCES screen_bridges(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    UNIQUE (bridge_id, adb_serial)
+  );
+  CREATE TABLE IF NOT EXISTS screen_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    device_id INTEGER NOT NULL,
+    bridge_id INTEGER NOT NULL,
+    adb_serial TEXT,
+    nonce TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'requested',
+    expires_at TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    FOREIGN KEY (bridge_id) REFERENCES screen_bridges(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_screen_bridges_workspace ON screen_bridges(workspace_id);
+  CREATE INDEX IF NOT EXISTS idx_bridge_attachments_bridge ON bridge_attachments(bridge_id, adb_serial);
+  CREATE INDEX IF NOT EXISTS idx_bridge_attachments_device ON bridge_attachments(device_id);
+  CREATE INDEX IF NOT EXISTS idx_screen_sessions_device ON screen_sessions(device_id, status);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_screen_sessions_nonce ON screen_sessions(nonce);
+`);
 const taskRunColumns = new Set(db.prepare('PRAGMA table_info(task_runs)').all()
     .map((column) => column.name));
 for (const [name, type] of [
@@ -1234,7 +1283,9 @@ function revokeRefreshToken(rawToken) {
 }
 function workspaceMembership(userId) {
     return db.prepare(`
-    SELECT wm.*, w.name AS workspace_name, w.owner_user_id, w.bridge_url AS workspace_bridge_url
+    SELECT wm.*, w.name AS workspace_name, w.owner_user_id,
+           w.bridge_url AS workspace_bridge_url,
+           w.strict_bridge_mode AS workspace_strict_bridge_mode
     FROM workspace_members wm
     JOIN workspaces w ON w.id = wm.workspace_id
     WHERE wm.user_id = ? AND wm.status = 'active'
@@ -2014,6 +2065,7 @@ function authUserView(userId) {
             name: membership.workspace_name,
             owner_user_id: membership.owner_user_id,
             bridge_url: membership.workspace_bridge_url || null,
+            strict_bridge_mode: !!membership.workspace_strict_bridge_mode,
         },
     };
 }
@@ -2136,6 +2188,7 @@ app.get('/api/team/members', auth, (req, res) => {
             id: req.user.workspaceId,
             name: workspaceMembership(req.user.userId)?.workspace_name || 'SouthFarm workspace',
             bridge_url: workspaceMembership(req.user.userId)?.workspace_bridge_url || null,
+            strict_bridge_mode: !!workspaceMembership(req.user.userId)?.workspace_strict_bridge_mode,
         },
         members: members.map(memberUserView),
     });
@@ -2160,8 +2213,224 @@ app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req, res)
         }
         db.prepare('UPDATE workspaces SET bridge_url = ? WHERE id = ?').run(bridgeUrl, membership.workspace_id);
     }
-    const updated = db.prepare('SELECT bridge_url FROM workspaces WHERE id = ?').get(membership.workspace_id);
-    res.json({ workspace: { id: membership.workspace_id, name: membership.workspace_name, bridge_url: updated?.bridge_url || null } });
+    if ('strict_bridge_mode' in req.body) {
+        // Solo el owner enciende el modo estricto: exige bridges registrados y
+        // capabilities firmadas; admins operan, el owner decide la política.
+        if (normalizeRole(membership.role) !== 'owner') {
+            return res.status(403).json({ error: 'Only the workspace owner can change strict_bridge_mode' });
+        }
+        db.prepare('UPDATE workspaces SET strict_bridge_mode = ? WHERE id = ?')
+            .run(req.body.strict_bridge_mode ? 1 : 0, membership.workspace_id);
+    }
+    const updated = db.prepare('SELECT bridge_url, strict_bridge_mode FROM workspaces WHERE id = ?').get(membership.workspace_id);
+    res.json({
+        workspace: {
+            id: membership.workspace_id,
+            name: membership.workspace_name,
+            bridge_url: updated?.bridge_url || null,
+            strict_bridge_mode: !!updated?.strict_bridge_mode,
+        },
+    });
+});
+// ─── Screen bridges (Fase 2): registro, heartbeat, attachments y sesiones ───
+// El token del bridge vive en DB (columna token) porque es la llave HMAC con
+// la que la API firma capabilities de un solo uso que el bridge valida
+// offline. Nunca se devuelve por ninguna ruta de lectura.
+const BRIDGE_CAPABILITY_TTL_SECONDS = Math.min(300, Math.max(30, Number(process.env.SOUTHFARM_BRIDGE_CAPABILITY_TTL_SECONDS || 120)));
+function screenBridgeAuth(req) {
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer '))
+        return null;
+    const bridge = db.prepare('SELECT * FROM screen_bridges WHERE token_hash = ? LIMIT 1').get(hashInviteToken(header.slice(7)));
+    return bridge || null;
+}
+function bridgeView(bridge) {
+    const online = typeof bridge.last_seen_at === 'string'
+        && Date.now() - Date.parse(bridge.last_seen_at) <= 120000;
+    const attachments = db.prepare(`
+    SELECT ba.id, ba.adb_serial, ba.device_id, ba.status, ba.last_seen_at,
+           COALESCE(d.device_alias, d.device_name) AS device_alias
+    FROM bridge_attachments ba
+    LEFT JOIN devices d ON d.id = ba.device_id
+    WHERE ba.bridge_id = ?
+    ORDER BY ba.adb_serial
+  `).all(bridge.id);
+    return {
+        id: bridge.id,
+        workspace_id: bridge.workspace_id,
+        name: bridge.name,
+        online,
+        last_seen_at: bridge.last_seen_at || null,
+        version: bridge.version || null,
+        attachments,
+    };
+}
+app.get('/api/bridges', auth, requireRole('owner', 'admin'), (req, res) => {
+    const bridges = db.prepare('SELECT * FROM screen_bridges WHERE workspace_id = ? ORDER BY id').all(req.user.workspaceId);
+    res.json({ bridges: bridges.map(bridgeView) });
+});
+app.post('/api/bridges', auth, requireRole('owner', 'admin'), (req, res) => {
+    const name = stringValue(req.body.name)?.trim() || 'Screen Bridge';
+    const rawToken = `sfb_${randomBytes(32).toString('base64url')}`;
+    const result = db.prepare('INSERT INTO screen_bridges (workspace_id, name, token, token_hash) VALUES (?, ?, ?, ?)').run(req.user.workspaceId, name, rawToken, hashInviteToken(rawToken));
+    res.status(201).json({
+        bridge: { id: Number(result.lastInsertRowid), workspace_id: req.user.workspaceId, name },
+        // El token se muestra UNA vez: se pega en la config del runtime del bridge.
+        token: rawToken,
+    });
+});
+app.delete('/api/bridges/:id', auth, requireRole('owner', 'admin'), (req, res) => {
+    const bridge = db.prepare('SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?').get(req.params.id, req.user.workspaceId);
+    if (!bridge)
+        return res.status(404).json({ error: 'Bridge not found' });
+    db.transaction(() => {
+        db.prepare('DELETE FROM bridge_attachments WHERE bridge_id = ?').run(bridge.id);
+        db.prepare(`
+      UPDATE screen_sessions SET status = 'ended', ended_at = ?
+      WHERE bridge_id = ? AND status IN ('requested', 'live')
+    `).run(nowIso(), bridge.id);
+        db.prepare('DELETE FROM screen_bridges WHERE id = ?').run(bridge.id);
+    })();
+    res.json({ ok: true });
+});
+app.post('/api/bridges/:id/rotate-token', auth, requireRole('owner', 'admin'), (req, res) => {
+    const bridge = db.prepare('SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?').get(req.params.id, req.user.workspaceId);
+    if (!bridge)
+        return res.status(404).json({ error: 'Bridge not found' });
+    const rawToken = `sfb_${randomBytes(32).toString('base64url')}`;
+    db.prepare('UPDATE screen_bridges SET token = ?, token_hash = ? WHERE id = ?')
+        .run(rawToken, hashInviteToken(rawToken), bridge.id);
+    res.json({ token: rawToken });
+});
+app.patch('/api/bridges/:id/attachments', auth, requireRole('owner', 'admin'), (req, res) => {
+    const bridge = db.prepare('SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?').get(req.params.id, req.user.workspaceId);
+    if (!bridge)
+        return res.status(404).json({ error: 'Bridge not found' });
+    const serial = stringValue(req.body.serial);
+    if (!serial)
+        return res.status(400).json({ error: 'serial is required' });
+    const attachment = db.prepare('SELECT * FROM bridge_attachments WHERE bridge_id = ? AND adb_serial = ?').get(bridge.id, serial);
+    if (!attachment)
+        return res.status(404).json({ error: 'Attachment not reported by this bridge yet' });
+    if (req.body.device_id === null || req.body.device_id === '') {
+        db.prepare("UPDATE bridge_attachments SET device_id = NULL, status = 'unassigned' WHERE id = ?")
+            .run(attachment.id);
+        return res.json({ ok: true, attachment: bridgeView(bridge).attachments.find((a) => a.id === attachment.id) });
+    }
+    const device = db.prepare(`
+    SELECT * FROM devices WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+  `).get(Number(req.body.device_id), req.user.workspaceId);
+    if (!device)
+        return res.status(404).json({ error: 'Device not found in this workspace' });
+    // Un device solo puede estar pegado a un serial por bridge: despejo otros.
+    db.prepare('UPDATE bridge_attachments SET device_id = NULL, status = ? WHERE bridge_id = ? AND device_id = ?')
+        .run('unassigned', bridge.id, device.id);
+    db.prepare("UPDATE bridge_attachments SET device_id = ?, status = 'assigned' WHERE id = ?")
+        .run(device.id, attachment.id);
+    res.json({ ok: true, attachment: bridgeView(bridge).attachments.find((a) => a.id === attachment.id) });
+});
+app.post('/api/bridges/heartbeat', (req, res) => {
+    const bridge = screenBridgeAuth(req);
+    if (!bridge)
+        return res.status(401).json({ error: 'Invalid bridge token' });
+    const now = nowIso();
+    const serials = req.body?.serials;
+    const list = Array.isArray(serials) ? serials.map(s => stringValue(s)).filter(Boolean) : [];
+    db.transaction(() => {
+        db.prepare('UPDATE screen_bridges SET last_seen_at = ?, version = ? WHERE id = ?')
+            .run(now, stringValue(req.body?.version), bridge.id);
+        const insert = db.prepare(`
+      INSERT INTO bridge_attachments (bridge_id, adb_serial, status, last_seen_at)
+      VALUES (?, ?, 'unassigned', ?)
+      ON CONFLICT(bridge_id, adb_serial) DO UPDATE SET last_seen_at = excluded.last_seen_at
+    `);
+        for (const serial of list)
+            insert.run(bridge.id, serial, now);
+        db.prepare(`
+      UPDATE bridge_attachments SET status =
+        CASE WHEN device_id IS NOT NULL THEN 'assigned' ELSE 'unassigned' END
+      WHERE bridge_id = ? AND last_seen_at < ?
+    `).run(bridge.id, now);
+    })();
+    res.json({ ok: true, now });
+});
+app.get('/api/bridges/session-check', (req, res) => {
+    const bridge = screenBridgeAuth(req);
+    if (!bridge)
+        return res.status(401).json({ error: 'Invalid bridge token' });
+    const sessionId = Number(req.query.session_id);
+    const session = db.prepare('SELECT * FROM screen_sessions WHERE id = ? AND bridge_id = ?').get(sessionId, bridge.id);
+    if (!session)
+        return res.json({ status: 'unknown' });
+    if (session.status === 'requested' && Date.parse(session.expires_at) > Date.now()) {
+        db.prepare("UPDATE screen_sessions SET status = 'live' WHERE id = ?").run(session.id);
+        return res.json({ status: 'live' });
+    }
+    res.json({ status: session.status });
+});
+function signScreenCapability(payload, bridgeToken) {
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = createHmac('sha256', bridgeToken).update(body).digest('base64url');
+    return `${body}.${sig}`;
+}
+app.post('/api/devices/:id/screen-session', auth, requireRole('owner', 'admin', 'operator'), (req, res) => {
+    const device = db.prepare(`
+    SELECT * FROM devices WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+  `).get(req.params.id, req.user.workspaceId);
+    if (!device)
+        return res.status(404).json({ error: 'Device not found' });
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.user.workspaceId);
+    if (!workspace?.strict_bridge_mode) {
+        return res.status(409).json({
+            error: 'Strict bridge mode is disabled for this workspace',
+            code: 'STRICT_MODE_DISABLED',
+        });
+    }
+    const attachment = db.prepare(`
+    SELECT ba.*, sb.token AS bridge_token
+    FROM bridge_attachments ba
+    JOIN screen_bridges sb ON sb.id = ba.bridge_id
+    WHERE ba.device_id = ? AND sb.workspace_id = ?
+    ORDER BY ba.last_seen_at DESC LIMIT 1
+  `).get(device.id, req.user.workspaceId);
+    if (!attachment) {
+        return res.status(409).json({
+            error: 'Device is not attached to any registered bridge',
+            code: 'NO_ACTIVE_ATTACHMENT',
+        });
+    }
+    const nonce = randomBytes(16).toString('hex');
+    const expiresAt = new Date(Date.now() + BRIDGE_CAPABILITY_TTL_SECONDS * 1000);
+    const sessionResult = db.prepare(`
+    INSERT INTO screen_sessions (workspace_id, device_id, bridge_id, adb_serial, nonce, status, expires_at)
+    VALUES (?, ?, ?, ?, ?, 'requested', ?)
+  `).run(req.user.workspaceId, device.id, attachment.bridge_id, attachment.adb_serial, nonce, expiresAt.toISOString());
+    const sessionId = Number(sessionResult.lastInsertRowid);
+    const capability = signScreenCapability({
+        v: 1,
+        aud: 'screen-bridge',
+        session: sessionId,
+        ws: req.user.workspaceId,
+        dev: device.id,
+        br: attachment.bridge_id,
+        serial: attachment.adb_serial,
+        exp: Math.floor(expiresAt.getTime() / 1000),
+        nonce,
+    }, attachment.bridge_token);
+    const bridgeHost = String(workspace.bridge_url || '')
+        .replace(/\/$/, '')
+        .replace(/^http/i, 'ws');
+    if (!bridgeHost) {
+        return res.status(409).json({
+            error: 'Workspace has no bridge_url configured',
+            code: 'NO_BRIDGE_URL',
+        });
+    }
+    res.status(201).json({
+        session_id: sessionId,
+        expires_at: expiresAt.toISOString(),
+        stream_url: `${bridgeHost}/ws/stream/${encodeURIComponent(attachment.adb_serial)}?cap=${encodeURIComponent(capability)}`,
+    });
 });
 // ─── App móvil: descarga autenticada (el APK NO es público) ───
 function signAppDownloadLink(expiresAtEpoch) {
@@ -2621,12 +2890,28 @@ app.patch('/api/devices/:id', auth, requireRole('owner', 'admin'), (req, res) =>
 });
 app.delete('/api/devices/:id', auth, requireRole('owner', 'admin'), (req, res) => {
     const now = nowIso();
-    const r = db.prepare(`
-    UPDATE devices
-    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL,
-        agent_token_version = agent_token_version + 1
-    WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
-  `).run(now, req.params.id, req.user.workspaceId);
+    const r = db.transaction(() => {
+        const update = db.prepare(`
+      UPDATE devices
+      SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL,
+          agent_token_version = agent_token_version + 1
+      WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+    `).run(now, req.params.id, req.user.workspaceId);
+        if (update.changes > 0) {
+            // Cascada de streaming: las sesiones activas pasan a 'revoked' (el bridge
+            // las corta en su próximo session-check, ≤ 30 s) y el serial queda
+            // desasignado hasta que un admin lo mapee de nuevo.
+            db.prepare(`
+        UPDATE screen_sessions SET status = 'revoked', ended_at = ?
+        WHERE device_id = ? AND status IN ('requested', 'live')
+      `).run(now, req.params.id);
+            db.prepare(`
+        UPDATE bridge_attachments SET device_id = NULL, status = 'unassigned'
+        WHERE device_id = ?
+      `).run(req.params.id);
+        }
+        return update;
+    })();
     r.changes
         ? res.json({ ok: true, status: 'revoked' })
         : res.status(404).json({ error: 'Device not found' });
