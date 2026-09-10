@@ -118,8 +118,20 @@ const REQUIRE_CAPABILITY = process.env.SCREEN_REQUIRE_CAPABILITY === "1";
 // repetición); solo por falla real de entrega de datos.
 const WD_NET_STALL_MS = Math.max(10_000, Number(process.env.SCREEN_WD_NET_STALL_MS || 30_000));
 const WD_STALL_TICKS = Math.max(2, Number(process.env.SCREEN_WD_STALL_TICKS || 5));
+const WD_TICK_MS = Math.max(1_000, Number(process.env.SCREEN_WD_TICK_MS || 2_000));
 
 const BRIDGE_TOKEN_PATTERN = /^sfb_[A-Za-z0-9_-]{20,}$/;
+
+/** Estado de pantalla del teléfono: 'ON' | 'OFF' | null (desconocido). */
+async function getPhoneScreenState(serial) {
+  try {
+    const r = await adb(["-s", serial, "shell", "dumpsys display"], 6000);
+    const match = String(r.stdout || "").match(/mScreenState=(\w+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 function validateConfiguration() {
   const problems = [];
@@ -507,44 +519,14 @@ class ScreenSource {
     this.startTimeout = null;
     this.lastActivity = Date.now();
     this.totalBytes = 0;
+    this.stallRestarts = 0; // reinicios de stall consecutivos que no restauraron el flujo
+    this.darkNotified = false; // ya avisamos "waiting" por pantalla apagada
+    this.wdBusy = false; // un tick del watchdog pendiente a la vez
     this.watchdog = setInterval(() => {
-      const now = Date.now();
-      const elapsedSec = Math.max(0.001, (now - (this.lastWdTick || now - 2000)) / 1000);
-      this.fpsMeasured = Math.round(((this.frameCount || 0) - ((this.lastWdFrames ?? this.frameCount) || 0)) / elapsedSec);
-      this.lastWdTick = now;
-      this.lastWdFrames = this.frameCount || 0;
-      if (this.status !== "live") return;
-      // Red absoluta: N segundos sin UN byte con espectadores es un túnel muerto
-      // (en pantalla estática el encoder igual emite IDRs/repeats periódicos, así
-      // que cero BYTES nunca es "pantalla estática": es transporte caído).
-      const sinceLastByte = now - this.lastActivity;
-      if (sinceLastByte > WD_NET_STALL_MS && this.clients.size > 0) {
-        this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
-        this.fail("stall de red: túnel mudo >" + Math.round(WD_NET_STALL_MS / 1000) + "s; reconectando", false);
-        return;
-      }
-      // Stream ACTIVO (ya emitió >50 frames) sin frames NUEVOS durante
-      // WD_STALL_TICKS ticks consecutivos. Default conservador (10s): el
-      // repeat-previous-frame hace que una captura viva emita cuadros incluso
-      // con pantalla estática, así que ticks sin frames nuevos indican falla
-      // real de captura/transporte, no quietud del usuario.
-      if (this.frameCount > 50 && this.frameCount === (this.lastStallFrameCount ?? -1)) {
-        this.stallTicks += 1;
-      } else {
-        this.stallTicks = 0;
-      }
-      this.lastStallFrameCount = this.frameCount;
-      if (this.stallTicks >= WD_STALL_TICKS && this.clients.size > 0) {
-        this.broadcastText(JSON.stringify({ type: "waiting" })); // aviso: entra el ciclo de reconexión
-        this.fail("stall de red: el túnel dejó de entregar datos; reconectando", false); // silencioso: se recupera solo
-        return;
-      }
-      if (!this.metaSent && this.buffer.length > 4096) {
-        this.fail(`stall: protocolo desincronizado (bufLen=${this.buffer.length} sin metadata)`);
-        return;
-      }
-      this.log(`wd fps=${this.fpsMeasured} bytes=${this.totalBytes} bufLen=${this.buffer.length} clients=${this.clients.size}`);
-    }, 2000);
+      if (this.wdBusy || this.status !== "live") return;
+      this.wdBusy = true;
+      void this.watchdogTick().finally(() => { this.wdBusy = false; });
+    }, WD_TICK_MS);
     this.log("server conectado, transmitiendo");
     sock.on("data", (chunk) => this.consume(chunk));
     sock.on("error", (e) => this.fail(`socket: ${e.message}`, false));
@@ -553,6 +535,75 @@ class ScreenSource {
       if (this.tearingDown || this.mediaSock !== sock || this.status === "idle") return;
       this.fail("El teléfono dejó de enviar video.", false); // recuperable: respawn silencioso
     });
+  }
+
+  /** Tick del watchdog: distingue pantalla estática / apagada de falla real. */
+  async watchdogTick() {
+    const now = Date.now();
+    const elapsedSec = Math.max(0.001, (now - (this.lastWdTick || now - 2000)) / 1000);
+    this.fpsMeasured = Math.round(((this.frameCount || 0) - ((this.lastWdFrames ?? this.frameCount) || 0)) / elapsedSec);
+    this.lastWdTick = now;
+    this.lastWdFrames = this.frameCount || 0;
+    if (this.status !== "live") return;
+
+    // Red absoluta: muchos segundos sin UN byte. Puede ser túnel muerto o
+    // teléfono con pantalla apagada: handleStall lo distingue antes de restart.
+    const sinceLastByte = now - this.lastActivity;
+    if (sinceLastByte > WD_NET_STALL_MS && this.clients.size > 0) {
+      await this.handleStall("stall de red: túnel mudo >" + Math.round(WD_NET_STALL_MS / 1000) + "s");
+      return;
+    }
+
+    // Stream ACTIVO (ya emitió >50 frames) sin frames NUEVOS durante el límite
+    // de ticks (con backoff progresivo si los reinicios no restauran el flujo).
+    if (this.frameCount > 50 && this.frameCount === (this.lastStallFrameCount ?? -1)) {
+      this.stallTicks += 1;
+    } else {
+      this.stallTicks = 0;
+      this.stallRestarts = 0; // frames fluyendo otra vez: backoff a cero
+      this.darkNotified = false;
+    }
+    this.lastStallFrameCount = this.frameCount;
+    const limit = WD_STALL_TICKS * Math.min(4, 2 ** (this.stallRestarts || 0));
+    if (this.stallTicks >= limit && this.clients.size > 0) {
+      await this.handleStall("stall: sin frames nuevos");
+      return;
+    }
+    if (!this.metaSent && this.buffer.length > 4096) {
+      this.fail(`stall: protocolo desincronizado (bufLen=${this.buffer.length} sin metadata)`);
+      return;
+    }
+    this.log(`wd fps=${this.fpsMeasured} bytes=${this.totalBytes} bufLen=${this.buffer.length} clients=${this.clients.size}`);
+  }
+
+  /**
+   * Ciclo de recuperación de un stall. REGLA: si la pantalla del teléfono está
+   * apagada NO se reinicia la captura (no hay nada que capturar y reiniciar
+   * sería tocar el teléfono en vano): se marca "waiting" y se espera a que
+   * despierte, momento en que el encoder retoma solo. Con pantalla encendida,
+   * se reinicia; si varios reinicios no restauran el flujo (pantalla estática
+   * que el encoder no repite), el backoff progresivo espacia los reinicios
+   * en lugar de martillar el teléfono cada pocos segundos.
+   */
+  async handleStall(reason) {
+    this.broadcastText(JSON.stringify({ type: "waiting" })); // señal explícita ANTES de cualquier restart
+    const screen = await getPhoneScreenState(this.serial);
+    if (screen === "OFF") {
+      if (!this.darkNotified) {
+        this.log("pantalla del teléfono apagada con espectadores: en espera, sin reiniciar captura");
+        this.darkNotified = true;
+      }
+      this.stallTicks = 0;
+      this.lastStallFrameCount = this.frameCount;
+      return;
+    }
+    this.darkNotified = false;
+    if (this.totalBytesAtLastStallRestart !== undefined && this.totalBytes === this.totalBytesAtLastStallRestart) {
+      this.stallRestarts = Math.min(3, (this.stallRestarts || 0) + 1);
+      this.log(`stall persistente tras reinicio (${reason}); backoff a ${WD_STALL_TICKS * Math.min(4, 2 ** this.stallRestarts)} ticks`);
+    }
+    this.totalBytesAtLastStallRestart = this.totalBytes;
+    this.fail(`${reason}; reconectando`, false); // silencioso: se recupera solo
   }
 
   /** Parser: [64B name][4B codec][12B metadata][paquetes de 12B header + payload Annex B] */
