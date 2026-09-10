@@ -417,6 +417,7 @@ db.exec(`
     name TEXT NOT NULL,
     token TEXT NOT NULL,
     token_hash TEXT NOT NULL,
+    public_url TEXT,
     last_seen_at TEXT,
     version TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -455,6 +456,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_screen_sessions_device ON screen_sessions(device_id, status);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_screen_sessions_nonce ON screen_sessions(nonce);
 `);
+
+// Migración aditiva para bases ya creadas con la versión previa de Fase 2.
+const screenBridgeColumns = new Set(
+  (db.prepare('PRAGMA table_info(screen_bridges)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!screenBridgeColumns.has('public_url')) {
+  db.exec('ALTER TABLE screen_bridges ADD COLUMN public_url TEXT');
+}
 
 const taskRunColumns = new Set(
   (db.prepare('PRAGMA table_info(task_runs)').all() as Array<{ name: string }>)
@@ -2727,6 +2737,10 @@ function bridgeView(bridge: any): any {
     online,
     last_seen_at: bridge.last_seen_at || null,
     version: bridge.version || null,
+    // URL pública por bridge (ej. screen-us.southfarm.tech): un workspace puede
+    // tener varias computadoras con teléfonos y cada bridge sirve su propio
+    // host de streaming.
+    public_url: bridge.public_url || null,
     attachments,
   };
 }
@@ -2740,15 +2754,53 @@ app.get('/api/bridges', auth, requireRole('owner', 'admin'), (req: any, res) => 
 
 app.post('/api/bridges', auth, requireRole('owner', 'admin'), (req: any, res) => {
   const name = stringValue(req.body.name)?.trim() || 'Screen Bridge';
+  let publicUrl: string | null = null;
+  if (stringValue(req.body.public_url)) {
+    try {
+      const parsed = new URL(String(req.body.public_url));
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+      publicUrl = parsed.toString().replace(/\/$/, '');
+    } catch {
+      return res.status(400).json({ error: 'public_url must be a valid http(s) URL' });
+    }
+  }
   const rawToken = `sfb_${randomBytes(32).toString('base64url')}`;
   const result = db.prepare(
-    'INSERT INTO screen_bridges (workspace_id, name, token, token_hash) VALUES (?, ?, ?, ?)',
-  ).run(req.user.workspaceId, name, rawToken, hashInviteToken(rawToken));
+    'INSERT INTO screen_bridges (workspace_id, name, token, token_hash, public_url) VALUES (?, ?, ?, ?, ?)',
+  ).run(req.user.workspaceId, name, rawToken, hashInviteToken(rawToken), publicUrl);
   res.status(201).json({
-    bridge: { id: Number(result.lastInsertRowid), workspace_id: req.user.workspaceId, name },
+    bridge: { id: Number(result.lastInsertRowid), workspace_id: req.user.workspaceId, name, public_url: publicUrl },
     // El token se muestra UNA vez: se pega en la config del runtime del bridge.
     token: rawToken,
   });
+});
+
+app.patch('/api/bridges/:id', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?',
+  ).get(req.params.id, req.user.workspaceId) as any;
+  if (!bridge) return res.status(404).json({ error: 'Bridge not found' });
+
+  if ('name' in req.body) {
+    const name = stringValue(req.body.name)?.trim();
+    if (name) db.prepare('UPDATE screen_bridges SET name = ? WHERE id = ?').run(name, bridge.id);
+  }
+  if ('public_url' in req.body) {
+    const raw = stringValue(req.body.public_url);
+    let publicUrl: string | null = null;
+    if (raw) {
+      try {
+        const parsed = new URL(raw);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        publicUrl = parsed.toString().replace(/\/$/, '');
+      } catch {
+        return res.status(400).json({ error: 'public_url must be a valid http(s) URL' });
+      }
+    }
+    db.prepare('UPDATE screen_bridges SET public_url = ? WHERE id = ?').run(publicUrl, bridge.id);
+  }
+  const updated = db.prepare('SELECT * FROM screen_bridges WHERE id = ?').get(bridge.id) as any;
+  res.json({ bridge: bridgeView(updated) });
 });
 
 app.delete('/api/bridges/:id', auth, requireRole('owner', 'admin'), (req: any, res) => {
@@ -2871,7 +2923,7 @@ app.post('/api/devices/:id/screen-session', auth, requireRole('owner', 'admin', 
   }
 
   const attachment = db.prepare(`
-    SELECT ba.*, sb.token AS bridge_token
+    SELECT ba.*, sb.token AS bridge_token, sb.public_url AS bridge_public_url
     FROM bridge_attachments ba
     JOIN screen_bridges sb ON sb.id = ba.bridge_id
     WHERE ba.device_id = ? AND sb.workspace_id = ?
@@ -2904,12 +2956,15 @@ app.post('/api/devices/:id/screen-session', auth, requireRole('owner', 'admin', 
     nonce,
   }, attachment.bridge_token);
 
-  const bridgeHost = String(workspace.bridge_url || '')
+  // Host de streaming: primero la URL pública del bridge dueño del attachment
+  // (soporta varias computadoras por workspace), con fallback al bridge_url
+  // del workspace para el caso de un solo bridge.
+  const bridgeHost = String(attachment.bridge_public_url || workspace.bridge_url || '')
     .replace(/\/$/, '')
     .replace(/^http/i, 'ws');
   if (!bridgeHost) {
     return res.status(409).json({
-      error: 'Workspace has no bridge_url configured',
+      error: 'Bridge has no public URL and workspace has no bridge_url configured',
       code: 'NO_BRIDGE_URL',
     });
   }
