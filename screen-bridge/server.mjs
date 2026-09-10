@@ -21,10 +21,11 @@
  */
 
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
@@ -103,6 +104,120 @@ const ALLOWED_ORIGINS = (process.env.SCREEN_ALLOWED_ORIGINS || "")
 if (AUTH_TOKEN && ALLOWED_ORIGINS.length === 0) {
   console.warn("[cors] SCREEN_ALLOWED_ORIGINS sin definir: cualquier origen web podrá llamar al bridge.");
 }
+
+// ─── Registro en el backend (Fase 2) + capabilities firmadas ───
+// SCREEN_BACKEND_URL + SCREEN_BRIDGE_TOKEN (token sfb_ emitido por la web)
+// habilitan: (a) reporte periódico de seriales attached, (b) validación
+// offline de capabilities HMAC y (c) corte de sesiones revocadas.
+// SCREEN_REQUIRE_CAPABILITY=1 = modo estricto: el WS solo acepta capabilities.
+const BACKEND_URL = (process.env.SCREEN_BACKEND_URL || "").replace(/\/$/, "");
+const BRIDGE_REGISTERED_TOKEN = process.env.SCREEN_BRIDGE_TOKEN || "";
+const REQUIRE_CAPABILITY = process.env.SCREEN_REQUIRE_CAPABILITY === "1";
+const usedNonces = new Map(); // nonce → expMs (capabilities de un solo uso)
+
+function verifyCapability(raw, serial) {
+  if (typeof raw !== "string" || !raw.includes(".")) return null;
+  const cut = raw.lastIndexOf(".");
+  const body = raw.slice(0, cut);
+  const sig = raw.slice(cut + 1);
+  const expected = createHmac("sha256", BRIDGE_REGISTERED_TOKEN).update(body).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (payload?.aud !== "screen-bridge" || !Number.isInteger(payload?.exp)) return null;
+  if (payload.exp * 1000 < Date.now()) return null;
+  if (serial && payload.serial && payload.serial !== serial) return null;
+  if (!Number.isInteger(payload.session)) return null;
+  return payload;
+}
+
+function consumeCapabilityNonce(payload) {
+  if (!payload?.nonce) return true;
+  if (usedNonces.has(payload.nonce)) return false;
+  usedNonces.set(payload.nonce, payload.exp * 1000);
+  const now = Date.now();
+  for (const [nonce, exp] of usedNonces) if (exp < now) usedNonces.delete(nonce);
+  return true;
+}
+
+function backendRequest(method, path, body) {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL(BACKEND_URL + path);
+      const isHttps = u.protocol === "https:";
+      const req = (isHttps ? https : http).request(
+        {
+          hostname: u.hostname,
+          port: u.port || (isHttps ? 443 : 80),
+          path: u.pathname + u.search,
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${BRIDGE_REGISTERED_TOKEN}`,
+          },
+          timeout: 8000,
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => (data += chunk));
+          res.on("end", () => resolve({ status: res.statusCode, body: data }));
+        },
+      );
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(null);
+      });
+      req.end(body ? JSON.stringify(body) : undefined);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function reportAttachments() {
+  if (!BACKEND_URL || !BRIDGE_REGISTERED_TOKEN) return;
+  try {
+    const serials = await listDeviceSerials();
+    const res = await backendRequest("POST", "/api/bridges/heartbeat", {
+      serials,
+      version: `screen-bridge/${SERVER_VERSION}`,
+    });
+    if (!res || res.status !== 200) {
+      console.warn(`[report] heartbeat con backend falló: ${res ? `HTTP ${res.status}` : "sin conexión"}`);
+    }
+  } catch (cause) {
+    console.warn(`[report] error: ${cause?.message || cause}`);
+  }
+}
+
+async function checkActiveSessions() {
+  if (!BACKEND_URL || !BRIDGE_REGISTERED_TOKEN) return;
+  for (const [, src] of sources) {
+    if (!src.sessionId || src.status !== "live") continue;
+    const res = await backendRequest("GET", `/api/bridges/session-check?session_id=${src.sessionId}`);
+    let status = null;
+    try {
+      status = res?.body ? JSON.parse(res.body).status : null;
+    } catch {
+      status = null;
+    }
+    if (status && status !== "live") src.stop(`sesión ${status}`);
+  }
+}
+
+setInterval(reportAttachments, 45_000).unref();
+if (BACKEND_URL && BRIDGE_REGISTERED_TOKEN) {
+  setTimeout(reportAttachments, 4_000).unref();
+  console.log(`[report] registrando attachments en ${BACKEND_URL}`);
+}
+setInterval(checkActiveSessions, 30_000).unref();
 const ADB = process.env.SCREEN_ADB || pickDefaultAdb();
 const SCRCPY_JAR =
   process.env.SCREEN_SCRCPY_JAR ||
@@ -751,20 +866,33 @@ server.on("upgrade", (req, socket, head) => {
     return socket.destroy();
   }
   const serial = decodeURIComponent(match[1]);
-  // El navegador no puede mandar headers en un WebSocket: usa un ticket de un
-  // solo uso emitido por /api/stream-ticket. Clientes no-navegador pueden usar
-  // Authorization Bearer. El token compartido nunca viaja en la query.
-  const authorized = !AUTH_TOKEN
-    ? true
-    : parsed.searchParams.has("ticket")
+  let sessionMeta = null;
+  // Modo estricto (SCREEN_REQUIRE_CAPABILITY=1): solo capabilities HMAC
+  // emitidas por el backend para esta sesión, atadas a este serial y de un
+  // solo uso. Fuera del modo estricto se mantiene el flujo legado
+  // (ticket de /api/stream-ticket o Bearer) para no romper el corte.
+  const authorized = (() => {
+    if (REQUIRE_CAPABILITY) {
+      const payload = verifyCapability(parsed.searchParams.get("cap"), serial);
+      if (!payload || !consumeCapabilityNonce(payload)) return false;
+      sessionMeta = payload;
+      return true;
+    }
+    if (!AUTH_TOKEN) return true;
+    // El navegador no puede mandar headers en un WebSocket: usa un ticket de
+    // un solo uso emitido por /api/stream-ticket. Clientes no-navegador pueden
+    // usar Authorization Bearer. El token compartido nunca viaja en la query.
+    return parsed.searchParams.has("ticket")
       ? consumeStreamTicket(parsed.searchParams.get("ticket"), serial)
       : bearerAuthorized(req);
+  })();
   if (!authorized) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     return socket.destroy();
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     const src = getSource(serial);
+    if (sessionMeta?.session) src.sessionId = sessionMeta.session;
     src.addClient(ws);
     ws.on("close", () => src.removeClient(ws));
     ws.on("error", () => src.removeClient(ws));

@@ -63,6 +63,20 @@ while ($true) {
     if ($allowedOrigins.Count -gt 0) {
       $env:SCREEN_ALLOWED_ORIGINS = ($allowedOrigins -join ',')
     }
+    # Fase 2: registro en el backend + capabilities firmadas. bridge_token es
+    # el sfb_ generado desde la web (distinto de auth_token); require_capability
+    # enciende el modo estricto del WS solo cuando el workspace ya lo decidió.
+    if (![string]::IsNullOrWhiteSpace([string]$runtimeConfig.backend_url)) {
+      $env:SCREEN_BACKEND_URL = [string]$runtimeConfig.backend_url
+    }
+    if (![string]::IsNullOrWhiteSpace([string]$runtimeConfig.bridge_token)) {
+      $env:SCREEN_BRIDGE_TOKEN = [string]$runtimeConfig.bridge_token
+    }
+    if ([bool]$runtimeConfig.require_capability) {
+      $env:SCREEN_REQUIRE_CAPABILITY = "1"
+    } else {
+      Remove-Item Env:SCREEN_REQUIRE_CAPABILITY -ErrorAction SilentlyContinue
+    }
     "[$(Get-Date -Format o)] iniciando bridge (puerto $Port, bitrate $Bitrate, maxSize $MaxSize)" | Add-Content -LiteralPath $OutputLog
     Push-Location $BridgePath
     try {
