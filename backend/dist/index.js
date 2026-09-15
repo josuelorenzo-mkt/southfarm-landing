@@ -403,6 +403,35 @@ const screenBridgeColumns = new Set(db.prepare('PRAGMA table_info(screen_bridges
 if (!screenBridgeColumns.has('public_url')) {
     db.exec('ALTER TABLE screen_bridges ADD COLUMN public_url TEXT');
 }
+// ─── Fase 5: reconciliación y alertas ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reconciliation_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'warn',
+    device_id INTEGER,
+    bridge_id INTEGER,
+    adb_serial TEXT,
+    detail TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_recon_alerts_workspace ON reconciliation_alerts(workspace_id, status);
+  CREATE INDEX IF NOT EXISTS idx_recon_alerts_key ON reconciliation_alerts(workspace_id, kind, device_id, adb_serial);
+`);
+// Contador de fallos de autenticación reportados por cada bridge (heartbeat).
+const screenBridgeAuditColumns = new Set(db.prepare('PRAGMA table_info(screen_bridges)').all()
+    .map((column) => column.name));
+if (!screenBridgeAuditColumns.has('auth_failures')) {
+    db.exec('ALTER TABLE screen_bridges ADD COLUMN auth_failures INTEGER NOT NULL DEFAULT 0');
+}
 const taskRunColumns = new Set(db.prepare('PRAGMA table_info(task_runs)').all()
     .map((column) => column.name));
 for (const [name, type] of [
@@ -2426,8 +2455,8 @@ app.post('/api/bridges/heartbeat', (req, res) => {
     const serials = req.body?.serials;
     const list = Array.isArray(serials) ? serials.map(s => stringValue(s)).filter(Boolean) : [];
     db.transaction(() => {
-        db.prepare('UPDATE screen_bridges SET last_seen_at = ?, version = ? WHERE id = ?')
-            .run(now, stringValue(req.body?.version), bridge.id);
+        db.prepare('UPDATE screen_bridges SET last_seen_at = ?, version = ?, auth_failures = ? WHERE id = ?')
+            .run(now, stringValue(req.body?.version), Math.max(0, Number(req.body?.auth_failures || 0)), bridge.id);
         const insert = db.prepare(`
       INSERT INTO bridge_attachments (bridge_id, adb_serial, status, last_seen_at)
       VALUES (?, ?, 'unassigned', ?)
@@ -3010,6 +3039,214 @@ app.delete('/api/devices/:id', auth, requireRole('owner', 'admin'), (req, res) =
         ? res.json({ ok: true, status: 'revoked' })
         : res.status(404).json({ error: 'Device not found' });
 });
+// ─── Fase 5: reconciliador de la flota (detección de contradicciones) ───
+// Corre dentro del proceso del API: compara los tres planos (API, bridges,
+// teléfonos) y levanta/resuelve alertas. Nunca borra ni corrige datos por su
+// cuenta: las correcciones conflictivas quedan para resolución manual.
+const RECONCILER_INTERVAL_MS = Math.max(1000, Number(process.env.SOUTHFARM_RECONCILER_INTERVAL_MS || 60000));
+const RECON_BRIDGE_OFFLINE_MS = Math.max(5000, Number(process.env.SOUTHFARM_RECON_BRIDGE_OFFLINE_MS || 300000));
+const RECON_ATTACHMENT_STALE_MS = Math.max(5000, Number(process.env.SOUTHFARM_RECON_ATTACHMENT_STALE_MS || 300000));
+const RECON_REVOKED_ACTIVITY_MS = Math.max(5000, Number(process.env.SOUTHFARM_RECON_REVOKED_ACTIVITY_MS || 120000));
+const reconKey = (refs) => `${refs.device_id ?? ''}|${refs.adb_serial ?? ''}|${refs.bridge_id ?? ''}`;
+function raiseReconciliationAlert(workspaceId, kind, severity, detail, refs) {
+    const now = nowIso();
+    const existing = db.prepare(`
+    SELECT id, occurrences FROM reconciliation_alerts
+    WHERE workspace_id = ? AND kind = ? AND status = 'open'
+      AND device_id IS ? AND bridge_id IS ? AND adb_serial IS ?
+    LIMIT 1
+  `).get(workspaceId, kind, refs.device_id ?? null, refs.bridge_id ?? null, refs.adb_serial ?? null);
+    if (existing) {
+        db.prepare(`
+      UPDATE reconciliation_alerts
+      SET occurrences = occurrences + 1, last_seen_at = ?, detail = ?, severity = ?
+      WHERE id = ?
+    `).run(now, detail, severity, existing.id);
+    }
+    else {
+        db.prepare(`
+      INSERT INTO reconciliation_alerts
+        (workspace_id, kind, severity, device_id, bridge_id, adb_serial, detail, first_seen_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(workspaceId, kind, severity, refs.device_id ?? null, refs.bridge_id ?? null, refs.adb_serial ?? null, detail, now, now);
+        console.warn(`[Reconciler] alerta ${kind} (${severity}) ws=${workspaceId}: ${detail}`);
+    }
+}
+function resolveStaleReconciliationAlerts(workspaceId, kind, keepKeys) {
+    const open = db.prepare(`
+    SELECT id, device_id, adb_serial, bridge_id FROM reconciliation_alerts
+    WHERE workspace_id = ? AND kind = ? AND status = 'open'
+  `).all(workspaceId, kind);
+    for (const alert of open) {
+        const key = reconKey({ device_id: alert.device_id, adb_serial: alert.adb_serial, bridge_id: alert.bridge_id });
+        if (!keepKeys.has(key)) {
+            db.prepare(`
+        UPDATE reconciliation_alerts SET status = 'resolved', resolved_at = ?, resolved_by = 'reconciliador'
+        WHERE id = ? AND status = 'open'
+      `).run(nowIso(), alert.id);
+        }
+    }
+}
+function runReconciliation() {
+    const now = nowIso();
+    const workspaces = db.prepare('SELECT id FROM workspaces ORDER BY id').all();
+    for (const ws of workspaces) {
+        const wid = Number(ws.id);
+        // Regla 1: un dispositivo mapeado en más de un bridge o con más de un serial.
+        const conflicts = db.prepare(`
+      SELECT ba.device_id,
+             COUNT(DISTINCT ba.bridge_id) AS bridges,
+             COUNT(DISTINCT ba.adb_serial) AS serials,
+             GROUP_CONCAT(DISTINCT sb.name) AS bridge_names,
+             GROUP_CONCAT(DISTINCT ba.adb_serial) AS serial_list
+      FROM bridge_attachments ba
+      JOIN screen_bridges sb ON sb.id = ba.bridge_id
+      WHERE ba.device_id IS NOT NULL AND sb.workspace_id = ?
+      GROUP BY ba.device_id
+      HAVING COUNT(DISTINCT ba.bridge_id) > 1 OR COUNT(DISTINCT ba.adb_serial) > 1
+    `).all(wid);
+        const conflictKeys = new Set();
+        for (const conflict of conflicts) {
+            conflictKeys.add(reconKey({ device_id: Number(conflict.device_id) }));
+            raiseReconciliationAlert(wid, 'serial_conflict', 'critical', `Dispositivo mapeado en ${conflict.bridges} bridge(s) (${conflict.bridge_names}) y ${conflict.serials} serial(es): ${conflict.serial_list}. Resolver manualmente desde el panel.`, { device_id: Number(conflict.device_id), adb_serial: conflict.serial_list });
+        }
+        resolveStaleReconciliationAlerts(wid, 'serial_conflict', conflictKeys);
+        // Regla 2: bridge sin reportar dentro de la ventana (offline).
+        const bridges = db.prepare(`
+      SELECT id, name, last_seen_at, auth_failures FROM screen_bridges WHERE workspace_id = ?
+    `).all(wid);
+        const offlineKeys = new Set();
+        for (const bridge of bridges) {
+            const seenMs = bridge.last_seen_at ? Date.now() - Date.parse(bridge.last_seen_at) : Number.POSITIVE_INFINITY;
+            if (seenMs > RECON_BRIDGE_OFFLINE_MS) {
+                offlineKeys.add(reconKey({ bridge_id: Number(bridge.id) }));
+                raiseReconciliationAlert(wid, 'bridge_offline', 'warn', `El bridge «${bridge.name}» no reporta desde ${bridge.last_seen_at || 'nunca'}.`, { bridge_id: Number(bridge.id) });
+            }
+        }
+        resolveStaleReconciliationAlerts(wid, 'bridge_offline', offlineKeys);
+        // Regla 3: attachment asignado cuyo bridge dejó de verlo (stale).
+        const staleAttachments = db.prepare(`
+      SELECT ba.id, ba.device_id, ba.adb_serial, ba.last_seen_at, sb.name AS bridge_name, sb.id AS bridge_id
+      FROM bridge_attachments ba
+      JOIN screen_bridges sb ON sb.id = ba.bridge_id
+      WHERE sb.workspace_id = ? AND ba.device_id IS NOT NULL
+    `).all(wid); // el filtro por antigüedad se hace en JS (compara timestamps ISO)
+        const staleKeys = new Set();
+        for (const att of staleAttachments) {
+            const seenMs = att.last_seen_at ? Date.now() - Date.parse(att.last_seen_at) : Number.POSITIVE_INFINITY;
+            if (seenMs <= RECON_ATTACHMENT_STALE_MS)
+                continue;
+            staleKeys.add(reconKey({ device_id: Number(att.device_id), adb_serial: att.adb_serial, bridge_id: Number(att.bridge_id) }));
+            raiseReconciliationAlert(wid, 'attachment_stale', 'info', `El serial ${att.adb_serial} (asignado) no es visto por «${att.bridge_name}» desde ${att.last_seen_at || 'nunca'}.`, { device_id: Number(att.device_id), adb_serial: att.adb_serial, bridge_id: Number(att.bridge_id) });
+        }
+        resolveStaleReconciliationAlerts(wid, 'attachment_stale', staleKeys);
+        // Regla 4: dispositivo revocado con señal reciente (anomalía de seguridad).
+        const revokedCutoff = new Date(Date.now() - RECON_REVOKED_ACTIVITY_MS).toISOString();
+        const revokedActive = db.prepare(`
+      SELECT id, device_alias, device_name, last_seen_at FROM devices
+      WHERE workspace_id = ? AND lifecycle_status = 'revoked'
+        AND last_seen_at IS NOT NULL AND last_seen_at > ?
+    `).all(wid, revokedCutoff);
+        const revokedKeys = new Set();
+        for (const device of revokedActive) {
+            revokedKeys.add(reconKey({ device_id: Number(device.id) }));
+            raiseReconciliationAlert(wid, 'revoked_activity', 'critical', `El dispositivo revocado «${device.device_alias || device.device_name || device.id}» tiene señal de heartbeat reciente (${device.last_seen_at}). Investigar.`, { device_id: Number(device.id) });
+        }
+        resolveStaleReconciliationAlerts(wid, 'revoked_activity', revokedKeys);
+        // Regla 5: el bridge reportó rechazos de autenticación en su último ciclo.
+        const authFailKeys = new Set();
+        for (const bridge of bridges) {
+            const failures = Number(bridge.auth_failures || 0);
+            if (failures > 0) {
+                authFailKeys.add(reconKey({ bridge_id: Number(bridge.id) }));
+                raiseReconciliationAlert(wid, 'auth_failures', 'warn', `«${bridge.name}» reportó ${failures} rechazo(s) de autenticación desde su último reporte (token o capability inválidos).`, { bridge_id: Number(bridge.id) });
+            }
+        }
+        resolveStaleReconciliationAlerts(wid, 'auth_failures', authFailKeys);
+        // Limpieza silenciosa: sesiones de pantalla vencidas que quedaron abiertas.
+        db.prepare(`
+      UPDATE screen_sessions SET status = 'ended', ended_at = ?
+      WHERE workspace_id = ? AND status IN ('requested', 'live') AND expires_at <= ?
+    `).run(now, wid, now);
+    }
+}
+app.get('/api/reconciliation/alerts', auth, requireRole('owner', 'admin'), (req, res) => {
+    const alerts = db.prepare(`
+    SELECT * FROM reconciliation_alerts
+    WHERE workspace_id = ? AND status = 'open'
+    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, last_seen_at DESC
+  `).all(req.user.workspaceId);
+    res.json({ alerts });
+});
+app.post('/api/reconciliation/alerts/:id/resolve', auth, requireRole('owner', 'admin'), (req, res) => {
+    const alert = db.prepare('SELECT * FROM reconciliation_alerts WHERE id = ? AND workspace_id = ? AND status = ?').get(req.params.id, req.user.workspaceId, 'open');
+    if (!alert)
+        return res.status(404).json({ error: 'Alert not found' });
+    db.prepare(`
+    UPDATE reconciliation_alerts SET status = 'resolved', resolved_at = ?, resolved_by = ?
+    WHERE id = ?
+  `).run(nowIso(), req.user.email || 'owner', alert.id);
+    res.json({ ok: true });
+});
+app.get('/api/reconciliation/overview', auth, requireRole('owner', 'admin'), (req, res) => {
+    const wid = req.user.workspaceId;
+    const devices = db.prepare(`
+    SELECT lifecycle_status, last_seen_at FROM devices WHERE workspace_id = ?
+  `).all(wid);
+    const onlineCutoff = new Date(Date.now() - DEVICE_ONLINE_WINDOW_SECONDS * 1000).toISOString();
+    res.json({
+        devices: {
+            total: devices.length,
+            enrolled: devices.filter(d => d.lifecycle_status === 'enrolled' || d.lifecycle_status === 'active').length,
+            revoked: devices.filter(d => d.lifecycle_status === 'revoked').length,
+            agents_online: devices.filter(d => d.lifecycle_status !== 'revoked' && d.last_seen_at && d.last_seen_at > onlineCutoff).length,
+        },
+        bridges: {
+            total: Number(db.prepare('SELECT COUNT(*) AS n FROM screen_bridges WHERE workspace_id = ?').get(wid).n),
+            online: Number(db.prepare(`
+        SELECT COUNT(*) AS n FROM screen_bridges
+        WHERE workspace_id = ? AND last_seen_at IS NOT NULL AND last_seen_at > ?
+      `).get(wid, new Date(Date.now() - 120000).toISOString()).n),
+            auth_failures_last_report: Number(db.prepare('SELECT COALESCE(SUM(auth_failures), 0) AS n FROM screen_bridges WHERE workspace_id = ?').get(wid).n),
+        },
+        attachments: {
+            assigned: Number(db.prepare(`
+        SELECT COUNT(*) AS n FROM bridge_attachments ba JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE sb.workspace_id = ? AND ba.device_id IS NOT NULL
+      `).get(wid).n),
+            unassigned: Number(db.prepare(`
+        SELECT COUNT(*) AS n FROM bridge_attachments ba JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE sb.workspace_id = ? AND ba.device_id IS NULL
+      `).get(wid).n),
+        },
+        sessions_live: Number(db.prepare(`
+      SELECT COUNT(*) AS n FROM screen_sessions WHERE workspace_id = ? AND status = 'live'
+    `).get(wid).n),
+        open_alerts: db.prepare(`
+      SELECT severity, COUNT(*) AS n FROM reconciliation_alerts
+      WHERE workspace_id = ? AND status = 'open' GROUP BY severity
+    `).all(wid),
+    });
+});
+// Agenda el reconciliador: primera corrida temprana tras el arranque.
+let reconciliationTimer = setInterval(() => {
+    try {
+        runReconciliation();
+    }
+    catch (error) {
+        console.error('[Reconciler] corrida falló:', error instanceof Error ? error.message : error);
+    }
+}, RECONCILER_INTERVAL_MS);
+if (typeof reconciliationTimer.unref === 'function')
+    reconciliationTimer.unref();
+setTimeout(() => {
+    try {
+        runReconciliation();
+    }
+    catch (error) {
+        console.error('[Reconciler] corrida inicial falló:', error instanceof Error ? error.message : error);
+    }
+}, 8000).unref();
 // ─── Tasks ───
 app.get('/api/tasks', (_req, res) => {
     res.json({ tasks: [
