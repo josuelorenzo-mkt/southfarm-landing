@@ -1652,6 +1652,16 @@ function scopedUsers(userId: number): { ids: number[]; placeholders: string } {
   return { ids, placeholders: ids.map(() => '?').join(', ') };
 }
 
+// Un token de dispositivo (authType 'device') solo debe ver el historial que
+// ESE teléfono generó en su workspace; los JWT de usuario (command center)
+// siguen viendo todo el workspace. Devuelve el devices.id propio del token,
+// o null si el llamante es un usuario.
+function deviceScopedId(req: any): number | null {
+  return req.user?.authType === 'device' && Number.isInteger(Number(req.user.deviceId))
+    ? Number(req.user.deviceId)
+    : null;
+}
+
 type SchedulerControlMode = 'normal' | 'manual_only' | 'paused';
 
 function normalizeSchedulerControlMode(value: unknown): SchedulerControlMode {
@@ -3553,7 +3563,17 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
   const { task_type, device_id, params } = req.body;
   if (!task_type || typeof task_type !== 'string') return res.status(400).json({ error: 'task_type required' });
   if (!SUPPORTED_TASK_TYPES.has(task_type)) return res.status(400).json({ error: 'Unsupported task_type' });
-  const device = findDeviceForWorkspace(req.user.userId, device_id);
+  // Un token de dispositivo solo puede crear runs para SU teléfono.
+  const runCreateDeviceScope = deviceScopedId(req);
+  let device: any;
+  if (runCreateDeviceScope !== null) {
+    device = db.prepare("SELECT * FROM devices WHERE id = ? AND lifecycle_status != 'revoked'").get(runCreateDeviceScope);
+    if (device && device_id && stringValue(device_id) && String(device_id) !== String(device.device_id)) {
+      return res.status(403).json({ error: 'A device token can only create runs for its own device' });
+    }
+  } else {
+    device = findDeviceForWorkspace(req.user.userId, device_id);
+  }
   if (!device) return res.status(404).json({ error: 'Assigned device not found' });
 
   // Normalize account in params: strip leading @
@@ -3944,11 +3964,17 @@ app.get('/api/tasks/runs', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const runDeviceScope = deviceScopedId(req);
+  if (runDeviceScope !== null) {
+    // Token de dispositivo: SOLO el historial de ese teléfono.
+    where.push('device_id = ?');
+    values.push(runDeviceScope);
+  }
   if (status) {
     where.push('status = ?');
     values.push(status);
   }
-  if (req.query.device_id !== undefined) {
+  if (runDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id, true, req.query.installation_id);
     if (!device) return res.json({ runs: [] });
     where.push('device_id = ?');
@@ -3985,6 +4011,11 @@ app.get('/api/tasks/runs/:id', auth, (req: any, res) => {
   const run = db.prepare(`SELECT * FROM task_runs WHERE id = ? AND user_id IN (${placeholders})`)
     .get(req.params.id, ...ids);
   if (!run) return res.status(404).json({ error: 'Run not found' });
+  // Un token de dispositivo solo consulta runs de SU teléfono.
+  const runDeviceScope = deviceScopedId(req);
+  if (runDeviceScope !== null && Number((run as any).device_id) !== runDeviceScope) {
+    return res.status(404).json({ error: 'Run not found' });
+  }
   const safeRun = { ...(run as any) };
   delete safeRun.claim_token;
   res.json({ run: safeRun });
@@ -4514,11 +4545,23 @@ app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), as
   const { device_id, usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
   const numericDeviceId = resolveSocialDeviceId(req.user.userId, device_id);
-  if (!numericDeviceId) return res.status(400).json({ error: 'device_id required' });
-  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
+  // Token de dispositivo: las cuentas se atribuyen SIEMPRE a ese teléfono;
+  // si el payload apunta a otro dispositivo, se rechaza.
+  const socialWriteScope = deviceScopedId(req);
+  if (socialWriteScope !== null) {
+    if (numericDeviceId !== null && numericDeviceId !== socialWriteScope) {
+      return res.status(403).json({ error: 'A device token can only write accounts for its own device' });
+    }
+    if (!numericDeviceId && !db.prepare('SELECT id FROM devices WHERE id = ?').get(socialWriteScope)) {
+      return res.status(403).json({ error: 'Device token has no valid device row' });
+    }
+  }
+  const effectiveDeviceId = socialWriteScope !== null ? socialWriteScope : numericDeviceId;
+  if (!effectiveDeviceId) return res.status(400).json({ error: 'device_id required' });
+  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(effectiveDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
   // Replace all accounts for this user+device
-  db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(dataUserId, numericDeviceId);
+  db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(dataUserId, effectiveDeviceId);
   const insert = db.prepare('INSERT OR IGNORE INTO ig_accounts (user_id, device_id, username, profile_pic_url) VALUES (?, ?, ?, ?)');
   let insertedCount = 0;
   // Insert immediately so mobile clients do not wait on Instagram HTML.
@@ -4526,14 +4569,14 @@ app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), as
   for (const u of usernames) {
     const username = String(u || '').replace(/^@+/, '').trim();
     if (!username) continue;
-    insertedCount += Number(insert.run(dataUserId, numericDeviceId, username, '').changes || 0);
+    insertedCount += Number(insert.run(dataUserId, effectiveDeviceId, username, '').changes || 0);
     void fetchProfilePicUrl(username).then((picUrl) => {
       if (!picUrl) return;
       db.prepare('UPDATE ig_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND username = ?')
-        .run(picUrl, dataUserId, numericDeviceId, username);
+        .run(picUrl, dataUserId, effectiveDeviceId, username);
     }).catch(() => {});
   }
-  const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), 'instagram', {
+  const scanSession = recordScanSession(dataUserId, Number(effectiveDeviceId), 'instagram', {
     accountsFound: insertedCount,
     status: req.body.scan_status,
     startedAt: req.body.scan_started_at,
@@ -4587,8 +4630,20 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   }
 
   const numericDeviceId = resolveSocialDeviceId(req.user.userId, device_id);
-  if (!numericDeviceId) return res.status(400).json({ error: 'device_id required' });
-  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
+  // Token de dispositivo: las cuentas se atribuyen SIEMPRE a ese teléfono;
+  // si el payload apunta a otro dispositivo, se rechaza.
+  const socialWriteScope = deviceScopedId(req);
+  if (socialWriteScope !== null) {
+    if (numericDeviceId !== null && numericDeviceId !== socialWriteScope) {
+      return res.status(403).json({ error: 'A device token can only write accounts for its own device' });
+    }
+    if (!numericDeviceId && !db.prepare('SELECT id FROM devices WHERE id = ?').get(socialWriteScope)) {
+      return res.status(403).json({ error: 'Device token has no valid device row' });
+    }
+  }
+  const effectiveDeviceId = socialWriteScope !== null ? socialWriteScope : numericDeviceId;
+  if (!effectiveDeviceId) return res.status(400).json({ error: 'device_id required' });
+  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(effectiveDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
 
   // Snapshot the photo pointers of the rows about to be wiped by the DELETE
@@ -4597,7 +4652,7 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   const previousPicUrls = new Map<string, string>();
   for (const row of db.prepare(
     'SELECT username, profile_pic_url FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?'
-  ).all(dataUserId, numericDeviceId, platform) as Array<{ username: string; profile_pic_url: string }>) {
+  ).all(dataUserId, effectiveDeviceId, platform) as Array<{ username: string; profile_pic_url: string }>) {
     if (row.profile_pic_url) previousPicUrls.set(String(row.username), row.profile_pic_url);
   }
 
@@ -4610,9 +4665,9 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
       WHERE social_account_id IN (
         SELECT id FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?
       )
-    `).run(dataUserId, numericDeviceId, platform);
+    `).run(dataUserId, effectiveDeviceId, platform);
     db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
-      .run(dataUserId, numericDeviceId, platform);
+      .run(dataUserId, effectiveDeviceId, platform);
   } catch (error: any) {
     console.error('[SocialAccounts] replace failed:', error?.code || error?.message);
     return res.status(500).json({ error: 'Could not replace scanned accounts' });
@@ -4637,7 +4692,7 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
     const picUrl = String(account.profile_pic_url || '');
     insertedCount += Number(insert.run(
       dataUserId,
-      numericDeviceId,
+      effectiveDeviceId,
       platform,
       username,
       picUrl,
@@ -4654,7 +4709,7 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   const accountsStillWithoutPic = [...accountsWithoutPic].filter((username) => {
     const previous = previousPicUrls.get(username);
     if (!previous) return true;
-    updatePicUrl.run(previous, dataUserId, numericDeviceId, platform, username);
+    updatePicUrl.run(previous, dataUserId, effectiveDeviceId, platform, username);
     return false;
   });
   // Best-effort avatar pipeline for everything still without a photo, now for
@@ -4667,13 +4722,13 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
       try {
         const storedUrl = await ensureAvatarStored(platform, username);
         if (!storedUrl) continue;
-        updatePicUrl.run(storedUrl, dataUserId, numericDeviceId, platform, username);
+        updatePicUrl.run(storedUrl, dataUserId, effectiveDeviceId, platform, username);
       } catch {
         // Best-effort: leave profile_pic_url empty and move on.
       }
     }
   })();
-  const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), platform, {
+  const scanSession = recordScanSession(dataUserId, Number(effectiveDeviceId), platform, {
     accountsFound: insertedCount,
     status: req.body.scan_status,
     startedAt: req.body.scan_started_at,
@@ -4690,8 +4745,14 @@ app.get('/api/social-accounts', auth, (req: any, res) => {
   }
 
   const deviceStrId = req.query.device_id as string | undefined;
+  const accountsDeviceScope = deviceScopedId(req);
   let accounts: any[];
-  if (deviceStrId) {
+  if (accountsDeviceScope !== null) {
+    // Token de dispositivo: solo las cuentas detectadas por ESE teléfono.
+    accounts = platform === 'all'
+      ? db.prepare('SELECT * FROM social_accounts WHERE device_id = ? ORDER BY platform, username').all(accountsDeviceScope)
+      : db.prepare('SELECT * FROM social_accounts WHERE device_id = ? AND platform = ? ORDER BY username').all(accountsDeviceScope, platform);
+  } else if (deviceStrId) {
     const device = findDeviceForWorkspace(req.user.userId, deviceStrId);
     if (!device) {
       accounts = [];
@@ -4775,7 +4836,21 @@ app.post('/api/scan-sessions', auth, requireRole('owner', 'admin', 'operator'), 
   }
   let deviceId: number | null = null;
   let dataUserId = req.user.userId;
-  if (req.body.device_id !== undefined && req.body.device_id !== null) {
+  const writeDeviceScope = deviceScopedId(req);
+  if (writeDeviceScope !== null) {
+    // Token de dispositivo: la sesión se atribuye SIEMPRE a ese teléfono,
+    // aunque el payload no traiga device_id (sesiones generadas en la app).
+    const own = db.prepare('SELECT * FROM devices WHERE id = ?').get(writeDeviceScope) as any;
+    if (!own) return res.status(403).json({ error: 'Device token has no valid device row' });
+    if (req.body.device_id !== undefined && req.body.device_id !== null) {
+      const claimed = findDeviceForWorkspace(req.user.userId, req.body.device_id);
+      if (!claimed || Number(claimed.id) !== writeDeviceScope) {
+        return res.status(403).json({ error: 'A device token can only write sessions for its own device' });
+      }
+    }
+    deviceId = writeDeviceScope;
+    dataUserId = Number(own.user_id);
+  } else if (req.body.device_id !== undefined && req.body.device_id !== null) {
     const device = findDeviceForWorkspace(req.user.userId, req.body.device_id);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     deviceId = Number(device.id);
@@ -4802,6 +4877,12 @@ app.get('/api/scan-sessions', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`ss.user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const scanDeviceScope = deviceScopedId(req);
+  if (scanDeviceScope !== null) {
+    // Token de dispositivo: SOLO los scans de ese teléfono.
+    where.push('ss.device_id = ?');
+    values.push(scanDeviceScope);
+  }
   if (platform !== 'all') {
     where.push('ss.platform = ?');
     values.push(platform);
@@ -4810,7 +4891,7 @@ app.get('/api/scan-sessions', auth, (req: any, res) => {
     where.push('ss.status = ?');
     values.push(String(req.query.status));
   }
-  if (req.query.device_id !== undefined) {
+  if (scanDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id);
     if (!device) return res.json({ sessions: [] });
     where.push('ss.device_id = ?');
@@ -4838,7 +4919,21 @@ app.post('/api/warmup-sessions', auth, requireRole('owner', 'admin', 'operator')
 
   let deviceId: number | null = null;
   let dataUserId = req.user.userId;
-  if (req.body.device_id !== undefined && req.body.device_id !== null) {
+  const writeDeviceScope = deviceScopedId(req);
+  if (writeDeviceScope !== null) {
+    // Token de dispositivo: la sesión se atribuye SIEMPRE a ese teléfono,
+    // aunque el payload no traiga device_id (sesiones generadas en la app).
+    const own = db.prepare('SELECT * FROM devices WHERE id = ?').get(writeDeviceScope) as any;
+    if (!own) return res.status(403).json({ error: 'Device token has no valid device row' });
+    if (req.body.device_id !== undefined && req.body.device_id !== null) {
+      const claimed = findDeviceForWorkspace(req.user.userId, req.body.device_id);
+      if (!claimed || Number(claimed.id) !== writeDeviceScope) {
+        return res.status(403).json({ error: 'A device token can only write sessions for its own device' });
+      }
+    }
+    deviceId = writeDeviceScope;
+    dataUserId = Number(own.user_id);
+  } else if (req.body.device_id !== undefined && req.body.device_id !== null) {
     const device = findDeviceForWorkspace(req.user.userId, req.body.device_id);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     deviceId = Number(device.id);
@@ -4942,6 +5037,12 @@ app.get('/api/warmup-sessions', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`ws.user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const warmupDeviceScope = deviceScopedId(req);
+  if (warmupDeviceScope !== null) {
+    // Token de dispositivo: SOLO las sesiones de ese teléfono.
+    where.push('ws.device_id = ?');
+    values.push(warmupDeviceScope);
+  }
   if (platform !== 'all') {
     where.push('ws.platform = ?');
     values.push(platform);
@@ -4950,7 +5051,7 @@ app.get('/api/warmup-sessions', auth, (req: any, res) => {
     where.push('ws.status = ?');
     values.push(String(req.query.status));
   }
-  if (req.query.device_id !== undefined) {
+  if (warmupDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id);
     if (!device) return res.json({ sessions: [] });
     where.push('ws.device_id = ?');
@@ -4973,8 +5074,13 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
     return res.status(400).json({ error: 'platform must be all, instagram, tiktok, or youtube' });
   }
   const { ids, placeholders } = scopedUsers(req.user.userId);
+  // Token de dispositivo: las estadísticas cubren SOLO ese teléfono.
+  const statsDeviceScope = deviceScopedId(req);
+  const deviceFilter = statsDeviceScope !== null ? ' AND device_id = ?' : '';
   const platformFilter = platform === 'all' ? '' : ' AND platform = ?';
-  const filterArgs = platform === 'all' ? [...ids] : [...ids, platform];
+  const filterArgs = statsDeviceScope !== null
+    ? (platform === 'all' ? [...ids, statsDeviceScope] : [...ids, platform, statsDeviceScope])
+    : (platform === 'all' ? [...ids] : [...ids, platform]);
   const totals: any = db.prepare(`
     SELECT
       COUNT(*) AS total_sessions,
@@ -4986,7 +5092,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(saves), 0) AS saves,
       COALESCE(SUM(elapsed_sec), 0) AS elapsed_sec
     FROM warmup_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
   `).get(...filterArgs);
   const byPlatform = db.prepare(`
     SELECT platform, COUNT(*) AS sessions,
@@ -4996,7 +5102,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(likes), 0) AS likes,
       COALESCE(SUM(saves), 0) AS saves
     FROM warmup_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
     GROUP BY platform
     ORDER BY platform
   `).all(...filterArgs);
@@ -5005,7 +5111,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(accounts_found), 0) AS accounts_found,
       MAX(completed_at) AS last_completed_at
     FROM scan_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
     GROUP BY platform
     ORDER BY platform
   `).all(...filterArgs);
