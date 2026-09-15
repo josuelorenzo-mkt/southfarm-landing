@@ -522,6 +522,35 @@ function deviceView(device) {
             online,
             app_version: device.app_version || null,
         },
+        // Señal USB: el attachment vigente en algún bridge registrado del workspace.
+        attachment: (() => {
+            const att = db.prepare(`
+        SELECT ba.adb_serial, ba.last_seen_at, sb.id AS bridge_id, sb.name AS bridge_name
+        FROM bridge_attachments ba
+        JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE ba.device_id = ? AND sb.workspace_id = ?
+        ORDER BY ba.last_seen_at DESC LIMIT 1
+      `).get(device.id, device.workspace_id);
+            return att ? {
+                bridge_id: att.bridge_id,
+                bridge_name: att.bridge_name,
+                adb_serial: att.adb_serial,
+                last_seen_at: att.last_seen_at || null,
+            } : null;
+        })(),
+        // Señal pantalla: sesión de visualización activa (requested/live) si la hay.
+        screen: (() => {
+            const session = db.prepare(`
+        SELECT id, status, created_at FROM screen_sessions
+        WHERE device_id = ? AND status IN ('requested', 'live')
+        ORDER BY id DESC LIMIT 1
+      `).get(device.id);
+            return session ? {
+                session_id: session.id,
+                status: session.status,
+                created_at: session.created_at,
+            } : null;
+        })(),
         current_task: currentTask ? {
             id: currentTask.id,
             task_type: currentTask.task_type,
@@ -2727,10 +2756,12 @@ app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator
     }
 });
 app.get('/api/devices', auth, (req, res) => {
+    // Incluye revocados al final: la flota debe poder mostrarlos como estado
+    // (Fase 4); los consumidores que ejecutan acciones ya filtran lifecycle.
     const devices = db.prepare(`
     SELECT * FROM devices
-    WHERE workspace_id = ? AND lifecycle_status != 'revoked'
-    ORDER BY id
+    WHERE workspace_id = ?
+    ORDER BY (lifecycle_status = 'revoked') ASC, id
   `).all(req.user.workspaceId);
     res.json({ devices: devices.map(deviceView) });
 });
