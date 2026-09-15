@@ -113,6 +113,9 @@ if (AUTH_TOKEN && ALLOWED_ORIGINS.length === 0) {
 const BACKEND_URL = (process.env.SCREEN_BACKEND_URL || "").replace(/\/$/, "");
 const BRIDGE_REGISTERED_TOKEN = process.env.SCREEN_BRIDGE_TOKEN || "";
 const REQUIRE_CAPABILITY = process.env.SCREEN_REQUIRE_CAPABILITY === "1";
+// Rechazos de autenticación observados (WS con cap/ticket inválidos) desde el
+// último heartbeat exitoso: el reconciliador del backend los convierte en alerta.
+let wsAuthFailures = 0;
 // Umbrales del watchdog, configurables con defaults conservadores: nunca se
 // reinicia la captura por "pantalla estática" (el encoder emite cuadros de
 // repetición); solo por falla real de entrega de datos.
@@ -249,8 +252,11 @@ async function reportAttachments() {
     const res = await backendRequest("POST", "/api/bridges/heartbeat", {
       serials,
       version: `screen-bridge/${SERVER_VERSION}`,
+      auth_failures: wsAuthFailures,
     });
-    if (!res || res.status !== 200) {
+    if (res && res.status === 200) {
+      wsAuthFailures = 0; // reportado: el backend hace el seguimiento
+    } else {
       console.warn(`[report] heartbeat con backend falló: ${res ? `HTTP ${res.status}` : "sin conexión"}`);
     }
   } catch (cause) {
@@ -997,6 +1003,7 @@ server.on("upgrade", (req, socket, head) => {
       : bearerAuthorized(req);
   })();
   if (!authorized) {
+    wsAuthFailures += 1; // el reconciliador lo reporta como alerta
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     return socket.destroy();
   }
