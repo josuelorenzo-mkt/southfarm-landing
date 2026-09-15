@@ -1181,6 +1181,18 @@ class AuthService {
 
   static Future<String?> getToken() => getValidAuthToken();
 
+  /// Token para los endpoints que el backend filtra POR TELÉFONO (historial,
+  /// sesiones, cuentas): prioriza el device_token; el token de usuario solo es
+  /// fallback para un teléfono aún no vinculado. Con el token de usuario el
+  /// backend devuelve el historial de todo el workspace, que no es lo que la
+  /// app debe mostrar.
+  static Future<String?> getDeviceScopedToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final deviceToken = prefs.getString('device_token');
+    if (deviceToken != null && deviceToken.isNotEmpty) return deviceToken;
+    return getValidAuthToken();
+  }
+
   static bool _tokenNeedsRefresh(String token) {
     try {
       final parts = token.split('.');
@@ -1484,7 +1496,7 @@ class AuthService {
 
   static Future<Map<String, dynamic>?> checkPendingTasks() async {
     try {
-      final token = await AuthService.getValidAuthToken();
+      final token = await AuthService.getDeviceScopedToken();
       if (token == null) return null;
 
       final res = await http.get(
@@ -3247,7 +3259,7 @@ class _WarmupScreenState extends State<WarmupScreen> {
         'Session saved: ${session['account']} | ${session['reels_viewed']} reels | ${session['likes']} likes | ${session['saves']} saves',
       );
 
-      final token = await AuthService.getValidAuthToken();
+      final token = await AuthService.getDeviceScopedToken();
       if (token == null) return;
 
       if (!_isLocalWarmup && _activeRemoteTaskId != null) {
@@ -4357,7 +4369,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       // Fetch backend sessions
       List<Map<String, dynamic>> backend = [];
       bool backendLoaded = false;
-      final token = await AuthService.getValidAuthToken();
+      final token = await AuthService.getDeviceScopedToken();
       if (token != null) {
         final res = await http.get(
           Uri.parse('$API_BASE/warmup-sessions'),
@@ -4457,7 +4469,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   Future<void> _syncToBackend() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final token = await AuthService.getValidAuthToken();
+      final token = await AuthService.getDeviceScopedToken();
       if (token == null) return;
       final sessionsJson = prefs.getString('warmup_sessions') ?? '[]';
       final List<dynamic> sessions = jsonDecode(sessionsJson);
