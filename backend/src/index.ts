@@ -3268,11 +3268,19 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
     const device = touchDevice(req.user.userId, req.body, { mode: 'register' });
     // Este endpoint SOLO re-registra dispositivos ya emparejados (si no existe
     // la fila responde 409 y el emparejamiento real ocurre en /devices/claim).
-    // Nunca rotar el token acá: la app llama a register como "ensure registered"
-    // antes de/durante cada scan (con JWT de usuario o token de dispositivo), y
-    // rotar invalida el token que la tarea remota capturó al reclamar → el POST
-    // final a /social-accounts llega con 401, las cuentas detectadas se pierden
-    // y la tarea queda trabada. La rotación de token vive únicamente en claim.
+    //
+    // Cuándo devolver device_token:
+    // - JWT de USUARIO → SÍ: el teléfono puede haber perdido su device_token
+    //   (reinstalación borra SharedPreferences) y necesita uno para que el
+    //   servicio de accesibilidad pueda hacer heartbeat. Es seguro: el register
+    //   corre al inicio de la app, no durante tareas.
+    // - Token de DISPOSITIVO → NO: rotar invalidaría el token que la tarea
+    //   remota capturó al reclamar, rompiendo tareas en curso.
+    if (req.user.authType === 'user') {
+      const deviceToken = issueDeviceToken(Number(device.id));
+      return res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+    }
+    // Llamada con token de dispositivo: solo refresh de presencia.
     res.status(200).json({ device: deviceView(device) });
   } catch (error: any) {
     res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
