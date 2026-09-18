@@ -4333,6 +4333,50 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// ─── Error handling middleware ───
+// Registered after every route so that errors thrown by body parsers, multer
+// or route handlers land here instead of reaching Express' default finalhandler
+// (which logs the full stack and, for clients that already cut the connection,
+// can leave the error unhandled and kill the process).
+//
+// Clients behind Cloudflare routinely abort uploads mid-body (flaky tunnels,
+// cancelled uploads). raw-body surfaces those as "request aborted"
+// (type "request.aborted", code "ECONNABORTED"); sockets reset by the tunnel
+// arrive as ECONNRESET. These are client-side conditions: the correct response
+// is a safe 400 envelope when nothing was sent yet, and a silent socket destroy
+// otherwise — never a rethrow.
+function isClientDisconnectError(error: any): boolean {
+  const message = String(error?.message || '').toLowerCase();
+  return Boolean(
+    error
+    && (error.type === 'request.aborted'
+      || error.code === 'ECONNABORTED'
+      || error.code === 'ECONNRESET'
+      || error.code === 'EPIPE'
+      // raw-body's exact phrases. The bare word "aborted" is intentionally
+      // excluded: it would also match legitimate errors such as "transaction
+      // aborted", which must NOT be absorbed as a client disconnect.
+      || message.includes('request aborted')
+      || message.includes('client closed request')),
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((error: any, req: any, res: any, _next: any) => {
+  if (isClientDisconnectError(error)) {
+    // The peer is gone; if we already sent headers there is nothing left to
+    // write, and writing would only re-trigger the error on the socket.
+    if (res.headersSent) { res.destroy(); return; }
+    res.status(400).json({ error_code: 'REQUEST_ABORTED', error: 'Request was aborted by the client' });
+    return;
+  }
+  // Known application errors already mapped by routes (PublicationRouteError
+  // etc.) never reach this middleware; anything that does is a genuine 500.
+  console.error('[API] Unhandled request error:', error);
+  if (res.headersSent) { res.destroy(); return; }
+  res.status(500).json({ error_code: 'INTERNAL_ERROR', error: 'Internal server error' });
+});
+
 const SCHEDULER_LIFECYCLE_TICK_MS = Math.max(
   15_000,
   Number(process.env.SOUTHFARM_SCHEDULER_TICK_SECONDS || 60) * 1000,
@@ -4363,4 +4407,34 @@ if (AUTO_PLANNER_ENABLED) {
   );
 }
 
-app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));
+// ─── Process-level safety net for the residual window ───
+// The Express middleware above only sees errors that travel through next(err).
+// A socket destroyed mid-upload can surface an error in a later tick (stream
+// callbacks, raw-body timers, multer cleanup) with no request in flight, and
+// an uncaughtException there would kill the process (crash observed
+// 2026-08-20 08:42 with "BadRequestError: request aborted").
+//
+// Policy: client disconnects are a known, benign class of failure (Cloudflare
+// tunnels cut flaky uploads routinely) — absorb them with a single forensic
+// line and keep serving. Everything else is a symptom of corrupted state we
+// cannot reason about from here: log the full stack and exit(1) so the Windows
+// watchdog restarts the service (fail-closed, never mask a poisoned process).
+function handleProcessLevelError(source: 'uncaughtException' | 'unhandledRejection', error: unknown): void {
+  if (isClientDisconnectError(error)) {
+    console.error(`[API] absorbed client disconnect (${source}): ${String((error as any)?.message || error)}`);
+    return;
+  }
+  console.error(`[API] FATAL ${source}:`, error);
+  process.exit(1);
+}
+
+process.on('uncaughtException', (error) => handleProcessLevelError('uncaughtException', error));
+process.on('unhandledRejection', (reason) => handleProcessLevelError('unhandledRejection', reason));
+
+const server = app.listen(PORT, () => console.log(`🚀 SouthFarm API on :${PORT}`));
+// Node >= 18 defaults `requestTimeout` to 300000 ms (5 min) and silently resets
+// any request whose body is still streaming after that. Slow uploads through
+// the Cloudflare tunnel (25-45 MB videos at ~1 Mbps take ~28 min) would be cut
+// mid-body without any error reaching the client. The largest allowed video is
+// 200 MiB; 1 hour gives comfortable headroom for the slowest viable tunnel.
+server.requestTimeout = 3_600_000;

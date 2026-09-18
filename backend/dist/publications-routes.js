@@ -23,6 +23,11 @@ export function mediaSupportedForPlatform(platform, metadata) {
     return { supported: true };
 }
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+// Retry window for content-based upload deduplication. The client re-sends the
+// same video when the 201 response is lost on the wire; a job that was created
+// within the last 15 minutes (any status, including already completed) is
+// treated as the same publication instead of enqueueing a duplicate.
+const PUBLICATION_DEDUP_WINDOW_MS = 15 * 60 * 1000;
 const MIME_EXTENSIONS = {
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
@@ -258,6 +263,33 @@ function mediaForJob(db, job) {
         return null;
     return db.prepare('SELECT * FROM publication_media WHERE id = ? AND workspace_id = ?').get(job.media_id, job.workspace_id) || null;
 }
+// Content-based deduplication for POST /api/publications: if a job for the
+// same video bytes (sha256), social account, platform AND caption was created
+// within the retry window, treat the upload as a client retry of a lost 201
+// response and return the existing publication instead of inserting media +
+// job again. The caption must match because re-publishing the same video with
+// a different caption is a legitimate new publication, not a retry.
+// Any job status qualifies (even final) because the lost-response window
+// covers retries after the worker already completed the job.
+function findDuplicatePublication(db, workspaceId, socialAccountId, platform, sha256, caption) {
+    const windowStart = new Date(Date.now() - PUBLICATION_DEDUP_WINDOW_MS).toISOString();
+    const job = db.prepare(`
+    SELECT job.*, media.sha256 AS media_sha256
+    FROM publication_jobs job
+    JOIN publication_media media ON media.id = job.media_id
+    WHERE job.workspace_id = ?
+      AND job.social_account_id = ?
+      AND job.platform = ?
+      AND media.sha256 = ?
+      AND job.caption = ?
+      AND job.created_at >= ?
+    ORDER BY job.created_at DESC, job.id DESC
+    LIMIT 1
+  `).get(workspaceId, socialAccountId, platform, sha256, caption, windowStart);
+    if (!job)
+        return null;
+    return { job, media: mediaForJob(db, job) };
+}
 export function registerPublicationRoutes({ app, db, store, auth, requireRole, mediaRoot, workerTokenHash, testHooks, inspectVideo = inspectPublicationVideo, }) {
     const root = path.resolve(mediaRoot);
     const tempRoot = path.join(root, '.tmp');
@@ -373,6 +405,15 @@ export function registerPublicationRoutes({ app, db, store, auth, requireRole, m
                 }
                 if (state.aborted || req.aborted)
                     routeError(400, 'REQUEST_ABORTED', 'Upload request was aborted');
+                const duplicate = findDuplicatePublication(db, workspaceId, accountId, input.platform, sha256, input.caption);
+                if (duplicate) {
+                    // Client retry of a lost 201: compensate the freshly uploaded file
+                    // (nothing was inserted yet) and echo the existing publication.
+                    console.log(`[API] publication dedup hit sha256=${sha256.slice(0, 12)} existing_job=${duplicate.job.id}`);
+                    compensateUpload(db, req, state);
+                    state.committed = true;
+                    return res.status(200).json({ duplicate: true, publication: safePublication(duplicate.job, duplicate.media, undefined, isManagingRole(req.user?.role)) });
+                }
                 const mediaInsert = db.prepare(`INSERT INTO publication_media
           (workspace_id, created_by_user_id, original_filename, private_path, mime_type, file_extension, size_bytes, sha256, duration_seconds, width, height, video_codec, audio_codec, upload_status, created_at, updated_at)
           VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?)`)

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import express from 'express';
 import { PublicationStore } from '../dist/publications-domain.js';
@@ -46,6 +46,16 @@ async function stopBackend() {
 startBackend();
 
 const mp4Header = fs.readFileSync('C:\\Users\\josu_\\Downloads\\Videos to test\\MP-V-2.mp4');
+// Distinct real video bytes for the successive successful uploads below: with
+// content-based dedup active, re-uploading the SAME bytes to the same account
+// within 15 minutes returns 200 + duplicate:true instead of creating a job,
+// so every 201 assertion needs a unique fixture.
+const ffmpegDir = 'C:\\Users\\josu_\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg.Essentials_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-essentials_build\\bin';
+const distinctVideos = ['testsrc', 'testsrc2', 'smptebars', 'gradients', 'rgbtestsrc'].map((source, index) => {
+  const file = path.join(tempDir, `distinct-${index}.mp4`);
+  execFileSync(path.join(ffmpegDir, 'ffmpeg.exe'), ['-y', '-v', 'error', '-f', 'lavfi', '-i', `${source}=duration=2:size=320x240:rate=24`, '-t', '2', '-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-preset', 'ultrafast', '-movflags', '+faststart', file]);
+  return file;
+});
 const quicktimeHeader = Buffer.from('0000001466747970717420200000020071742020', 'hex');
 const webmHeader = Buffer.from('1a45dfa3874282847765626d', 'hex');
 const futureIso = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -274,7 +284,7 @@ try {
   const abortServer = await new Promise((resolve) => { const server = abortApp.listen(abortPort, () => resolve(server)); });
   const abortBoundary = `abort-${crypto.randomUUID()}`;
   const abortBody = Buffer.concat([
-    Buffer.from(`--${abortBoundary}\r\nContent-Disposition: form-data; name="video"; filename="abort.mp4"\r\nContent-Type: video/mp4\r\n\r\n`), mp4Header,
+    Buffer.from(`--${abortBoundary}\r\nContent-Disposition: form-data; name="video"; filename="abort.mp4"\r\nContent-Type: video/mp4\r\n\r\n`), fs.readFileSync(distinctVideos[4]),
     Buffer.from(`\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="platform"\r\n\r\nyoutube\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="device_id"\r\n\r\n${deviceId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="social_account_id"\r\n\r\n${accountId}\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\nAbort cleanup proves no publication survives\r\n--${abortBoundary}\r\nContent-Disposition: form-data; name="scheduled_for"\r\n\r\n${futureIso}\r\n--${abortBoundary}--\r\n`),
   ]);
   const abortRequest = http.request({ hostname: '127.0.0.1', port: abortPort, path: '/api/publications', method: 'POST', headers: { Authorization: `Bearer ${owner.token}`, 'Content-Type': `multipart/form-data; boundary=${abortBoundary}`, 'Content-Length': abortBody.length } });
@@ -290,9 +300,9 @@ try {
   await new Promise((resolve) => abortServer.close(resolve));
 
   const racePort = port + 2;
-  const raceScheduleJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  const raceScheduleJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, contents: fs.readFileSync(distinctVideos[0]) }) });
   assert.equal(raceScheduleJob.response.status, 201, JSON.stringify(raceScheduleJob.body));
-  const raceCancelJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  const raceCancelJob = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, contents: fs.readFileSync(distinctVideos[1]) }) });
   assert.equal(raceCancelJob.response.status, 201, JSON.stringify(raceCancelJob.body));
   const raceApp = express();
   raceApp.use(express.json());
@@ -418,7 +428,7 @@ try {
   assert.equal(confirmEvent.to_status, 'completed');
   assert.equal(confirmEvent.actor_type, 'user');
   assert.equal(confirmEvent.payload.action, 'completed');
-  const unblockedAfterConfirm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  const unblockedAfterConfirm = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, contents: fs.readFileSync(distinctVideos[2]) }) });
   assert.equal(unblockedAfterConfirm.response.status, 201, `account can publish again after confirm: ${JSON.stringify(unblockedAfterConfirm.body)}`);
   const confirmAgain = await request(`/api/publications/${reviewJobId}/review`, { method: 'POST', headers: { ...ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'confirm' }) });
   assert.equal(confirmAgain.response.status, 409, 'resolved jobs cannot be resolved twice');
@@ -444,7 +454,7 @@ try {
   assert.equal(dismissEvent.to_status, 'failed');
   assert.equal(dismissEvent.payload.action, 'failed');
   assert.equal(dismissEvent.payload.error_code, 'REVIEW_DISMISSED');
-  const unblockedAfterDismiss = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId }) });
+  const unblockedAfterDismiss = await request('/api/publications', { method: 'POST', headers: ownerHeaders, body: publicationForm({ deviceId, accountId, contents: fs.readFileSync(distinctVideos[3]) }) });
   assert.equal(unblockedAfterDismiss.response.status, 201, `account can publish again after dismiss: ${JSON.stringify(unblockedAfterDismiss.body)}`);
 
   const orphanTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();

@@ -192,8 +192,65 @@ class YouTubeShortPublisher(GuardedPublisher):
     def _require_identity(self, nodes: list[dict[str, str]]) -> None:
         """The You screen must show exactly the publication '@handle'."""
         if self._identity_node(nodes) is None:
-            # Account switching is deliberately not automated: fail closed.
             raise PublisherError("ACCOUNT_MISMATCH", "YouTube active account does not match the publication account")
+
+    def _accounts_entry(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        return next((node for node in nodes if (node.get("content-desc") or "").strip() == "Accounts"), None)
+
+    def _account_list_open(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        if any((node.get("resource-id") or "").endswith("account_list") for node in nodes):
+            return node
+        return next((node for node in nodes if (node.get("text") or "") == "Accounts"), None)
+
+    def _selected_handle(self, nodes: list[dict[str, str]]) -> str | None:
+        """The current channel's row carries a 'selected account' description."""
+        for node in nodes:
+            desc = (node.get("content-desc") or "").lower()
+            match = re.search(r"@([a-zA-Z0-9._]+)", desc)
+            if match and "selected account" in desc:
+                return match.group(1)
+        return None
+
+    def _target_channel_row(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        expected = "@" + self.expected_account
+        return next((node for node in nodes if expected in (node.get("text") or "") or expected in (node.get("content-desc") or "")), None)
+
+    def _switch_to_expected_channel(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Switch the active YouTube channel like the app's warmup
+        (ensureCorrectYouTubeChannel): You tab → 'Accounts' control → account
+        list popup → tap the target channel row → verify the '@handle' label.
+        Fail-closed ACCOUNT_MISMATCH afterwards."""
+        for _ in range(2):
+            entry = self._accounts_entry(nodes)
+            if entry is None:
+                break
+            self._tap(device, entry)
+            try:
+                if self.wait_for(device, error="ACCOUNT_LIST", predicate=self._account_list_open) is None:
+                    break
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+                break
+            fresh = self._nodes(device)
+            if self._selected_handle(fresh) == self.expected_account:
+                self._back(device)
+                return self._navigate_you(device)
+            row = self._target_channel_row(fresh)
+            if row is None:
+                self._back(device)
+                break
+            self._tap(device, row)
+            self._back(device)
+            try:
+                switched = self._navigate_you(device)
+                if self._identity_node(switched) is not None:
+                    return switched
+            except PublisherError as error:
+                if error.code not in ("YOU_TAB", "YOU_ACCOUNT", "UI_TIMEOUT"):
+                    raise
+            nodes = self._nodes(device)
+        raise PublisherError("ACCOUNT_MISMATCH", "YouTube active channel could not be switched to the publication account")
 
     @classmethod
     def _is_short_tile(cls, node: dict[str, str]) -> bool:
@@ -284,8 +341,11 @@ class YouTubeShortPublisher(GuardedPublisher):
         # sheet Delete, never through blind repeated backs.
         self._normalize_to_main(device)
         nodes = self._navigate_you(device)
-        # Identity: the You tab shows the '@handle' label; a missing or
-        # different account fails closed (account switching is never automated).
+        # Identity: the You tab shows the '@handle' label. Owner decision
+        # 2026-08-21: switch the channel like the warmup instead of failing
+        # closed when another channel is active.
+        if self._identity_node(nodes) is None:
+            nodes = self._switch_to_expected_channel(device, nodes)
         self._require_identity(nodes)
         nodes = self._open_channel(device)
         # Baseline: the ordered content-desc list of the Shorts grid tiles

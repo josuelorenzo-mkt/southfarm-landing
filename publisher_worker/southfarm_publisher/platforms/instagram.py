@@ -28,6 +28,7 @@ class InstagramPublisher(GuardedPublisher):
     package = _PACKAGE
 
     _TITLE = "com.instagram.android:id/action_bar_title"
+    _USERNAME_HEADER = "com.instagram.android:id/action_bar_username_container"
     _GALLERY_TITLE = "com.instagram.android:id/gallery_title_text"
     _THUMBNAIL = "com.instagram.android:id/gallery_grid_item_thumbnail"
     _LABEL = "com.instagram.android:id/gallery_grid_item_label"
@@ -176,6 +177,53 @@ class InstagramPublisher(GuardedPublisher):
                 return self._last_nodes
         raise PublisherError("PROFILE_ACCOUNT", "Instagram own profile could not be reached", retryable=True)
 
+    def _account_row(self, nodes: list[dict[str, str]]) -> dict[str, str] | None:
+        """The switcher row for the expected account (exact username; "Add
+        Instagram account" and other rows must never match)."""
+        return next((node for node in nodes if (node.get("text", "").strip() == self.expected_account or node.get("content-desc", "").strip() == self.expected_account)), None)
+
+    def _switch_to_expected_account(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Switch the active Instagram account to the publication account via
+        the profile account switcher — the same flow the app's warmup uses
+        (ensureCorrectAccount): tap the profile username header, pick the
+        expected account in the switcher, then verify by re-reading the header.
+        One full retry covers a slow switcher render. Fail-closed is kept: if
+        the header or the target account never appear, the run aborts with
+        ACCOUNT_MISMATCH instead of posting into the wrong account."""
+        for _ in range(2):
+            header = next((node for node in nodes if node.get("resource-id") == self._USERNAME_HEADER), None)
+            if header is None:
+                break
+            self._tap(device, header)
+            try:
+                row = self.wait_for(device, error="ACCOUNT_SWITCHER", predicate=self._account_row)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+                break
+            self._tap(device, row)
+            try:
+                if self.wait_for(device, error="ACCOUNT_SWITCH", predicate=self._on_our_profile) is not None:
+                    return self._last_nodes if self._on_our_profile(self._last_nodes) else self._nodes(device)
+            except PublisherError as error:
+                if error.code != "UI_TIMEOUT":
+                    raise
+            # Back to our own profile surface before retrying the switcher.
+            try:
+                nodes = self._return_to_profile(device)
+            except PublisherError as profile_error:
+                if profile_error.code not in ("PROFILE_ACCOUNT", "UI_TIMEOUT"):
+                    raise
+                break
+        raise PublisherError("ACCOUNT_MISMATCH", "Instagram active account could not be switched to the publication account")
+
+    def _prepare_active_account(self, device: Any, nodes: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Guarantee the active profile matches the publication account,
+        switching accounts when needed (owner decision 2026-08-21)."""
+        if self._on_our_profile(nodes):
+            return nodes
+        return self._switch_to_expected_account(device, nodes)
+
     def _post_counts(self, nodes: list[dict[str, str]]) -> set[int]:
         values: set[int] = set()
         for node in nodes:
@@ -189,24 +237,48 @@ class InstagramPublisher(GuardedPublisher):
     def _count_matches(self, nodes: list[dict[str, str]], expected: int) -> dict[str, str] | None:
         return next((node for node in nodes if node.get("resource-id") == self._POST_COUNT and (node.get("content-desc") or "").strip() == f"{expected}posts"), None)
 
+    def _baseline_ready(self, nodes: list[dict[str, str]]) -> list[dict[str, str]] | None:
+        """The profile is baseline-ready when exactly one post count AND at
+        least one reel tile have rendered. Both load asynchronously after the
+        account switch / profile landing: a single early dump races the grid
+        (the 2026-08-21 TILE_BASELINE_INVALID false failure), so poll."""
+        counts = self._post_counts(nodes)
+        if len(counts) != 1:
+            return None
+        if not self._tile_signatures(nodes):
+            return None
+        return nodes
+
     def prepare(self, job: Any, device: Any) -> None:
         self.selected_account_username(job)
         self._launch(device); nodes = self._navigate_profile(device)
+        # Owner decision 2026-08-21: switch accounts like the app's warmup
+        # (ensureCorrectAccount) instead of failing closed when another
+        # account is active on the phone.
+        nodes = self._prepare_active_account(device, nodes)
         title = self.account_control(nodes, resource_id=self._TITLE, error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
-            # Account switching is deliberately not automated: fail closed instead.
             raise PublisherError("ACCOUNT_MISMATCH", "Instagram active profile account does not match the publication account")
+        try:
+            # wait_for returns the nodes only once _baseline_ready accepted
+            # them (exactly one post count AND at least one reel tile).
+            nodes = self.wait_for(device, error="PROFILE_BASELINE", predicate=self._baseline_ready)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+            # Fail-closed after the full polling window, with a precise code.
+            late_nodes = self._nodes(device)
+            counts = self._post_counts(late_nodes)
+            if not counts or len(counts) != 1:
+                raise PublisherError("POST_COUNT_INVALID", "Instagram profile post count never rendered") from None
+            raise PublisherError("TILE_BASELINE_INVALID", "Instagram profile grid exposes no Reel tiles to baseline against") from None
         counts = self._post_counts(nodes)
-        if len(counts) != 1:
-            raise PublisherError("POST_COUNT_INVALID", "Instagram profile post count is absent or ambiguous")
         # Baseline evidence is the post count plus the visible grid tile
         # signatures, captured BEFORE publishing: the delta phase proves the
         # new reel by a tile description that did not exist in this baseline
         # (the count reaching baseline+1 remains a complementary signal).
         self._baseline_posts = counts.pop()
         tiles = self._tile_signatures(nodes)
-        if not tiles:
-            raise PublisherError("TILE_BASELINE_INVALID", "Instagram profile grid exposes no Reel tiles to baseline against")
         self._baseline_tiles = tiles
         self._capture_baseline(nodes)
 
@@ -267,12 +339,42 @@ class InstagramPublisher(GuardedPublisher):
             if error.code != "UI_TIMEOUT": raise
             raise PublisherError("CAPTION_DIVERGED", "Caption text diverged before publishing") from None
 
+    def _goto_caption_field(self, device: Any, editor: dict[str, str]) -> dict[str, str]:
+        """Tap the editor's Next and land on the caption screen. Some builds
+        and states (leftover draft promo) redirect Next into Google Play's
+        'Edits' sheet instead: dismiss it and retry once; a second redirect is
+        terminal EDITS_HANDOFF (clearly diagnosable, vs UI_TIMEOUT)."""
+        self._tap(device, editor)
+        try:
+            return self.wait_for(device, error="CAPTION_FIELD", predicate=self._caption_field)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+        nodes = self._nodes(device)
+        edits_redirect = any(node.get("package") == "com.android.vending" or "Edits" in (node.get("text") or "") for node in nodes)
+        if not edits_redirect:
+            raise PublisherError("CAPTION_FIELD", "Caption field did not appear after the editor Next tap")
+        self._back(device)
+        self._tap(device, editor)
+        try:
+            return self.wait_for(device, error="CAPTION_FIELD", predicate=self._caption_field)
+        except PublisherError as error:
+            if error.code != "UI_TIMEOUT":
+                raise
+            raise PublisherError("EDITS_HANDOFF", "Instagram kept redirecting the editor Next into the Edits app") from None
+
     def publish(self, job: Any, device: Any, checkpoint: Callable[..., None]) -> None:
         self._require_prepared(); validate_caption(job.caption)
         duration = job.media.get("duration_seconds") if isinstance(job.media, dict) else None
         if type(duration) is not int or duration <= 0:
             raise PublisherError("MEDIA_METADATA_INVALID", "Instagram requires verified video duration metadata")
         nodes = self._nodes(device)
+        # A leftover draft surfaces a 'Keep editing your draft?' dialog on the
+        # way in; discard it so publishing starts clean.
+        discard = next((node for node in nodes if (node.get("text") or "") == "Discard"), None)
+        if discard is not None:
+            self._tap(device, discard)
+            nodes = self._nodes(device)
         if any(node.get("resource-id") == self._SHARE for node in nodes):
             raise PublisherError("MID_FLOW_ABORT", "Instagram was already in a publish flow; refusing to resume")
         create = self._one(nodes, error="CREATE_CONTROL", content_desc="Create New", required=False) or self._one(nodes, error="CREATE_CONTROL", text="Create New", required=False)
@@ -280,7 +382,7 @@ class InstagramPublisher(GuardedPublisher):
         reel = self.tap_and_wait(device, create, error="REEL_SELECTOR", content_desc="Create new reel")
         self.tap_and_wait(device, reel, error="GALLERY_MEDIA", predicate=self._gallery_arrival); checkpoint("selecting_media", 25, evidence={"platform": "instagram", "stage": "gallery", "duration_label": next(iter(self._duration_formats(duration)))})
         editor = self._select_video(device, duration); checkpoint("editing", 45, evidence={"platform": "instagram", "stage": "editor"})
-        field = self.tap_and_wait(device, editor, error="CAPTION_FIELD", predicate=self._caption_field)
+        field = self._goto_caption_field(device, editor)
         self._write_caption(device, field, job.caption); checkpoint("captioning", 65, evidence={"platform": "instagram", "caption_words": len(job.caption.split())})
         # The IME covers Share after typing: back closes only the keyboard.
         self._back(device)
@@ -528,6 +630,7 @@ class InstagramPublisher(GuardedPublisher):
             raise PublisherError("CLEANUP_IDENTITY_MISMATCH", "Cleanup identity must be a new verified item")
         posts = self._cleanup_count(baseline)
         nodes = self._return_to_profile(device)
+        nodes = self._prepare_active_account(device, nodes)
         title = self.account_control(nodes, resource_id=self._TITLE, error="Instagram active profile account")
         if title.get("text") != self.expected_account and title.get("content-desc") != self.expected_account:
             raise PublisherError("ACCOUNT_MISMATCH", "Instagram active profile account does not match the cleanup account")
