@@ -1,0 +1,14 @@
+{
+  "name": "southfarm-screen-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Puente de video en vivo: espeja pantallas Android (vía scrcpy-server sobre ADB WiFi) y las sirve por WebSocket para la vista en vivo de Device Fleet.",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
