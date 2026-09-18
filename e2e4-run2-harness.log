@@ -1,0 +1,99 @@
+[harness] reusing --keep state at C:\Users\josu_\AppData\Local\Temp\southfarm-local-pub-e2e
+[harness] backend healthy at http://127.0.0.1:3325 (media root C:\Users\josu_\AppData\Local\Temp\southfarm-local-pub-e2e\private-media)
+[harness] seeded device row 10 (device_id=aaa9c7a1f6cdb7a1) + accounts {"instagram":28,"tiktok":29,"youtube":30}
+[harness] publication job 10 created: status=queued step=queued platform=instagram caption="Stay present, tomorrow is not promised"
+
+==============================================================================
+JOB 10 | device row 10 | video MP-V-2.mp4 (14.9s)
+owner token (for webapp/API queries): eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEwLCJpYXQiOjE3ODY5NzQ5OTIsImV4cCI6MTc4Njk3NTg5Mn0.BE9FLJGdWhEol9pytTowZ6Swf_7Eh76lrtDAwwaoR0M
+==============================================================================
+--- Windows cmd ---
+set SOUTHFARM_API_URL=http://127.0.0.1:3325
+set SOUTHFARM_PUBLISHER_WORKER_TOKEN=token-test-local
+set SOUTHFARM_PUBLISHER_WORKER_ID=local-e2e-worker
+set SOUTHFARM_PUBLISHER_DEVICE_ID=10
+set SOUTHFARM_ADB=C:/SouthFarm/toolchain/android-sdk/platform-tools/adb.exe
+set SOUTHFARM_ADB_SERIAL=863d00583048313238510ca492874c
+set SOUTHFARM_EXPECTED_ANDROID_ID=aaa9c7a1f6cdb7a1
+set SOUTHFARM_BACKEND_DEVICE_ID=aaa9c7a1f6cdb7a1
+set SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS=
+
+--- git bash ---
+export SOUTHFARM_API_URL="http://127.0.0.1:3325"
+export SOUTHFARM_PUBLISHER_WORKER_TOKEN="token-test-local"
+export SOUTHFARM_PUBLISHER_WORKER_ID="local-e2e-worker"
+export SOUTHFARM_PUBLISHER_DEVICE_ID="10"
+export SOUTHFARM_ADB="C:/SouthFarm/toolchain/android-sdk/platform-tools/adb.exe"
+export SOUTHFARM_ADB_SERIAL="863d00583048313238510ca492874c"
+export SOUTHFARM_EXPECTED_ANDROID_ID="aaa9c7a1f6cdb7a1"
+export SOUTHFARM_BACKEND_DEVICE_ID="aaa9c7a1f6cdb7a1"
+export SOUTHFARM_FORBIDDEN_INSTAGRAM_ACCOUNTS=""
+
+then run the worker from the repo root: python -m southfarm_publisher.runner (cwd publisher_worker/)
+==============================================================================
+
+[harness] monitoring job (poll 2s, timeout 10 min)...
+2026-08-17T13:56:32.427Z status=queued step=queued progress=0%
+2026-08-17T13:56:34.438Z status=queued step=queued progress=0%
+2026-08-17T13:56:36.456Z status=queued step=queued progress=0%
+2026-08-17T13:56:38.465Z status=queued step=queued progress=0%
+2026-08-17T13:56:40.483Z status=queued step=queued progress=0%
+2026-08-17T13:56:42.493Z status=queued step=queued progress=0%
+2026-08-17T13:56:44.499Z status=queued step=queued progress=0%
+2026-08-17T13:56:46.505Z status=queued step=queued progress=0%
+2026-08-17T13:56:48.518Z status=queued step=queued progress=0%
+2026-08-17T13:56:50.521Z status=queued step=queued progress=0%
+2026-08-17T13:56:52.532Z status=queued step=queued progress=0%
+2026-08-17T13:56:54.544Z status=queued step=queued progress=0%
+2026-08-17T13:56:56.559Z status=queued step=queued progress=0%
+2026-08-17T13:56:58.580Z status=queued step=queued progress=0%
+2026-08-17T13:57:00.587Z status=queued step=queued progress=0%
+2026-08-17T13:57:02.599Z status=queued step=queued progress=0%
+2026-08-17T13:57:04.612Z status=queued step=queued progress=0%
+2026-08-17T13:57:06.615Z status=queued step=queued progress=0%
+2026-08-17T13:57:08.625Z status=claimed step=claimed progress=0%
+2026-08-17T13:57:10.640Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:12.646Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:14.651Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:16.666Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:18.681Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:20.693Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:22.697Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:24.708Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:26.728Z status=preparing step=preparing progress=1%
+2026-08-17T13:57:28.733Z status=transferring step=transferring progress=5%
+2026-08-17T13:57:30.746Z status=transferring step=transferring progress=5%
+2026-08-17T13:57:32.764Z status=transferring step=transferring progress=5%
+2026-08-17T13:57:34.770Z status=transferring step=transferring progress=5%
+2026-08-17T13:57:36.777Z status=selecting_media step=selecting_media progress=25%
+2026-08-17T13:57:38.781Z status=selecting_media step=selecting_media progress=25%
+2026-08-17T13:57:40.794Z status=editing step=editing progress=45%
+2026-08-17T13:57:42.803Z status=editing step=editing progress=45%
+2026-08-17T13:57:44.823Z status=editing step=editing progress=45%
+2026-08-17T13:57:46.829Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:48.842Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:50.860Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:52.876Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:54.888Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:56.905Z status=verifying step=verifying progress=95%
+2026-08-17T13:57:58.912Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:00.931Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:02.941Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:04.954Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:06.962Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:08.976Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:10.982Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:13.000Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:15.009Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:17.027Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:19.036Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:21.062Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:23.070Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:25.087Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:27.098Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:29.114Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:31.124Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:33.131Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:35.140Z status=verifying step=verifying progress=95%
+2026-08-17T13:58:37.146Z status=completed step=completed progress=95%
+[harness] terminal status reached: completed

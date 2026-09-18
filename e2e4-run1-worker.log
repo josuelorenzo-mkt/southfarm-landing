@@ -1,0 +1,191 @@
+[worker] config ok: api=http://127.0.0.1:3325 device_row=9 forbidden=[]
+[worker] run_once claimed=True elapsed=102.3s
+[worker] final status: {
+  "id": 9,
+  "workspace_id": 9,
+  "device_id": 9,
+  "social_account_id": 25,
+  "platform": "instagram",
+  "caption": "Stay present, tomorrow is not promised",
+  "word_count": 6,
+  "scheduled_for": "2026-08-17T13:43:49.905Z",
+  "status": "review_required",
+  "current_step": "review_required",
+  "progress_percent": 95,
+  "attempt_count": 1,
+  "final_action_at": "2026-08-17T13:45:05.258Z",
+  "published_at": null,
+  "verified_at": null,
+  "remote_post_identity": null,
+  "error_code": "VERIFICATION_NO_DELTA",
+  "error_message": null,
+  "cancel_requested_at": null,
+  "created_at": "2026-08-17T13:43:51.035Z",
+  "updated_at": "2026-08-17T13:46:08.221Z",
+  "completed_at": "2026-08-17T13:46:08.221Z",
+  "media": {
+    "id": 9,
+    "media_key": "9.mp4",
+    "original_filename": "MP-V-2.mp4",
+    "mime_type": "video/mp4",
+    "file_extension": "mp4",
+    "size_bytes": 14368435,
+    "sha256": "56b65a3ca93ad088230e8d38f4c569c0c7237938535b75972f5ef3b1bda3de57"
+  },
+  "events": [
+    {
+      "id": 62,
+      "from_status": null,
+      "to_status": "queued",
+      "current_step": "queued",
+      "message": null,
+      "actor_type": "user",
+      "created_at": "2026-08-17T13:43:51.035Z",
+      "payload": null
+    },
+    {
+      "id": 63,
+      "from_status": "queued",
+      "to_status": "claimed",
+      "current_step": "claimed",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:44:26.071Z",
+      "payload": null
+    },
+    {
+      "id": 64,
+      "from_status": "claimed",
+      "to_status": "preparing",
+      "current_step": "preparing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:44:26.295Z",
+      "payload": {
+        "progress_percent": 1
+      }
+    },
+    {
+      "id": 65,
+      "from_status": "preparing",
+      "to_status": "transferring",
+      "current_step": "transferring",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:44:46.617Z",
+      "payload": {
+        "progress_percent": 5
+      }
+    },
+    {
+      "id": 66,
+      "from_status": "transferring",
+      "to_status": "selecting_media",
+      "current_step": "selecting_media",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:44:54.090Z",
+      "payload": {
+        "progress_percent": 25,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "gallery",
+          "duration_label": "0:15"
+        }
+      }
+    },
+    {
+      "id": 67,
+      "from_status": "selecting_media",
+      "to_status": "editing",
+      "current_step": "editing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:44:57.140Z",
+      "payload": {
+        "progress_percent": 45,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "editor"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "from_status": "editing",
+      "to_status": "captioning",
+      "current_step": "captioning",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:45:03.636Z",
+      "payload": {
+        "progress_percent": 65,
+        "evidence": {
+          "platform": "instagram",
+          "caption_words": 6
+        }
+      }
+    },
+    {
+      "id": 69,
+      "from_status": "captioning",
+      "to_status": "ready_to_publish",
+      "current_step": "ready_to_publish",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:45:04.500Z",
+      "payload": {
+        "progress_percent": 80,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "share"
+        }
+      }
+    },
+    {
+      "id": 70,
+      "from_status": "ready_to_publish",
+      "to_status": "publishing",
+      "current_step": "publishing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:45:05.258Z",
+      "payload": {
+        "progress_percent": 90,
+        "evidence": {
+          "platform": "instagram",
+          "final": "share"
+        }
+      }
+    },
+    {
+      "id": 71,
+      "from_status": "publishing",
+      "to_status": "verifying",
+      "current_step": "verifying",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:45:05.610Z",
+      "payload": {
+        "progress_percent": 95
+      }
+    },
+    {
+      "id": 72,
+      "from_status": "verifying",
+      "to_status": "review_required",
+      "current_step": "review_required",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:46:08.221Z",
+      "payload": {
+        "result": null,
+        "errorCode": "VERIFICATION_NO_DELTA",
+        "errorMessage": null,
+        "remotePostIdentity": null,
+        "publishedAt": null,
+        "verifiedAt": null
+      }
+    }
+  ]
+}

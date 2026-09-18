@@ -1,0 +1,79 @@
+17:15:48 ig-verify-live5 start: serial=863d00583048313238510ca492874c account=marczell.vibes video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-4.mp4
+17:15:48 caption (9 words): 'Fall in love with the process and trust it'
+17:15:49 PRE-CHECK probe wall=17:15:49.466: accessibility service answered a fresh dump on first try (1.0s)
+17:15:50 PRE-CHECK RESULT: VIVO wall=17:15:50.122 (ensure_accessibility_healthy healthy no-op path in 0.7s)
+17:16:08   [tap #1] center=(648,1500) wall=17:16:08.863
+17:16:10 prepare OK: baseline_posts=11 baseline_tiles=6 wall=17:16:10.823
+17:16:11   evidence saved: igverify5-baseline.xml + .png
+17:16:13 media pushed -> /sdcard/Movies/SouthFarm/igverify-live5.mp4 wall=17:16:13.491
+17:16:16   [tap #2] center=(48,124) wall=17:16:16.018
+17:16:18   [tap #3] center=(360,734) wall=17:16:18.241
+17:16:20   [gallery dump #11] 8 thumbs bounds=[(243, 402, 477, 818), (482, 402, 716, 818), (4, 822, 238, 1238), (243, 822, 477, 1238), (482, 822, 716, 1238), (4, 1242, 238, 1544), (243, 1242, 477, 1544), (482, 1242, 716, 1544)]
+17:16:20 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'instagram', 'stage': 'gallery', 'duration_label': '0:17'} wall=17:16:20.471
+17:16:20 SELECT VIDEO: start wall=17:16:20.471 duration=17s expected_label=0:17
+17:16:20   [candidate #1] cd='Unselected Video thumbnail created on August 17, 2026 5:16 PM' arrival_bounds=(243, 402, 477, 818) in_viewport=True -> re-dumping fresh (up to 2)
+17:16:21   [gallery dump #12] 8 thumbs bounds=[(243, 402, 477, 818), (482, 402, 716, 818), (4, 822, 238, 1238), (243, 822, 477, 1238), (482, 822, 716, 1238), (4, 1242, 238, 1544), (243, 1242, 477, 1544), (482, 1242, 716, 1544)]
+17:16:21   [candidate #1] ACCEPTED after 1 fresh dump(s): fresh_bounds=(243, 402, 477, 818) in_viewport=True
+17:16:21   [tap #4] center=(360,610) wall=17:16:21.231
+17:16:24 SELECT VIDEO: done wall=17:16:24.275 in 3.8s
+17:16:24 checkpoint editing progress=45 final_action=False evidence={'platform': 'instagram', 'stage': 'editor'} wall=17:16:24.275
+17:16:25   [tap #5] center=(618,1498) wall=17:16:25.021
+17:16:27   [tap #6] center=(360,849) wall=17:16:27.706
+17:16:31 checkpoint captioning progress=65 final_action=False evidence={'platform': 'instagram', 'caption_words': 9} wall=17:16:31.324
+17:16:32 checkpoint ready_to_publish progress=80 final_action=False evidence={'platform': 'instagram', 'stage': 'share'} wall=17:16:32.172
+17:16:32 checkpoint publishing progress=90 final_action=True evidence={'platform': 'instagram', 'final': 'share'} wall=17:16:32.918
+17:16:33   evidence saved: igverify5-share-screen.xml + .png
+17:16:33   SHARE TAP at t=433646.156 wall=17:16:33.600
+17:16:33   [tap #7] center=(532,1460) wall=17:16:33.600
+17:16:33 publish OK: Share tapped; propagation begins (t_share=433646.156 wall=17:16:33.943)
+17:16:53 TAB-CYCLE [verify-cycle(3s)]: start wall=17:16:53.945 (20.4s after Share)
+17:16:55   [verify dump #22] wall=17:16:55.737 22.1s after Share posts=[11] tiles=0
+17:16:55   [tap #8] center=(648,1500) wall=17:16:55.737
+17:17:00   [verify dump #23] wall=17:17:00.565 27.0s after Share posts=[12] tiles=6
+17:17:00   DELTA DETECTED at dump #23 wall=17:17:00.567: new_tiles=[] count_ok=True tiles 6->6 (27.0s after Share)
+17:17:01   evidence saved: igverify5-verify-delta.xml + .png
+17:17:01   [tap #9] center=(72,1500) wall=17:17:01.449
+17:17:06   [verify dump #24] wall=17:17:06.310 32.7s after Share posts=[12] tiles=0
+17:17:06   [tap #10] center=(648,1500) wall=17:17:06.312
+17:17:10   [swipe-bezier motionevent verify-refresh] 360,350 -> 360,1000 400ms wall=17:17:10.644
+17:17:10 TAB-CYCLE [verify-cycle(3s)]: done wall=17:17:10.644 in 16.7s
+17:17:10 VERIFY CHECK 1: start wall=17:17:10.646 (37.0s after Share)
+17:17:11   [verify dump #25] wall=17:17:11.771 38.2s after Share posts=[12] tiles=6
+17:17:11 TAB-CYCLE [pre-identity(1.0s)]: start wall=17:17:11.773 (38.2s after Share)
+17:17:12   [verify dump #26] wall=17:17:12.555 39.0s after Share posts=[12] tiles=6
+17:17:12   [tap #11] center=(648,1500) wall=17:17:12.557
+17:17:15   [verify dump #27] wall=17:17:15.047 41.5s after Share posts=[12] tiles=6
+17:17:15   [tap #12] center=(72,1500) wall=17:17:15.047
+17:17:17   [verify dump #28] wall=17:17:17.891 44.3s after Share posts=[12] tiles=0
+17:17:17   [tap #13] center=(648,1500) wall=17:17:17.897
+17:17:21   [swipe-bezier motionevent verify-refresh] 360,350 -> 360,1000 400ms wall=17:17:21.916
+17:17:21 TAB-CYCLE [pre-identity(1.0s)]: done wall=17:17:21.916 in 10.1s
+17:17:21 IDENTITY CONFIRM: start wall=17:17:21.918 (48.3s after Share)
+17:17:21   grid before identity tap (last verify dump): tiles=[] new=[]
+17:17:23   [verify dump #29] wall=17:17:23.036 49.4s after Share posts=[12] tiles=6
+17:17:23   [tap #14] center=(119,992) wall=17:17:23.038
+17:17:24   [verify dump #30] wall=17:17:24.541 51.0s after Share posts=[] tiles=0
+17:17:24   evidence saved: igverify5-verify-030.xml
+17:17:26   [verify dump #31] wall=17:17:26.321 52.7s after Share posts=[] tiles=0
+17:17:27   [verify dump #32] wall=17:17:27.598 54.0s after Share posts=[] tiles=0
+17:17:28   [verify dump #33] wall=17:17:28.875 55.3s after Share posts=[] tiles=0
+17:17:30   [verify dump #34] wall=17:17:30.160 56.6s after Share posts=[] tiles=0
+17:17:31   [verify dump #35] wall=17:17:31.513 57.9s after Share posts=[] tiles=0
+17:17:32   [verify dump #36] wall=17:17:32.800 59.2s after Share posts=[] tiles=0
+17:17:34   [verify dump #37] wall=17:17:34.082 60.5s after Share posts=[] tiles=0
+17:17:35   [verify dump #38] wall=17:17:35.397 61.8s after Share posts=[] tiles=0
+17:17:36   [verify dump #39] wall=17:17:36.701 63.1s after Share posts=[] tiles=0
+17:17:37   [verify dump #40] wall=17:17:37.999 64.4s after Share posts=[] tiles=0
+17:17:38   evidence saved: igverify5-verify-040.xml + .png
+17:17:40   [verify dump #41] wall=17:17:40.996 67.4s after Share posts=[12] tiles=6
+17:17:41   [tap #15] center=(119,992) wall=17:17:41.001
+17:17:42   [verify dump #42] wall=17:17:42.499 68.9s after Share posts=[] tiles=0
+17:17:42 IDENTITY CONFIRM: CONFIRMED wall=17:17:42.499 in 20.6s -> 'marczell.vibes Fall in love with the process and trust it'
+17:17:42 VERIFY CHECK 1: CONFIRMED wall=17:17:42.499 in 31.9s -> identity='marczell.vibes Fall in love with the process and trust it'
+17:17:42 verify OK wall=17:17:42.499: identity='marczell.vibes Fall in love with the process and trust it' verify_elapsed=68.6s (confirmed at check 1)
+17:17:43   evidence saved: igverify5-verified.xml + .png
+17:17:43 DELTA RESULT: dump #23 of verify, 27.0s after Share, tiles 6->6
+17:17:43 swipe log: [('bezier', 433679.234, (360, 350, 360, 1000, 400)), ('bezier', 433690.828, (360, 350, 360, 1000, 400))]
+17:17:43 tap count total: 15
+17:17:43 RESULT: SUCCESS
+17:17:43 cleaned pushed media file from device (post itself is NOT deleted)

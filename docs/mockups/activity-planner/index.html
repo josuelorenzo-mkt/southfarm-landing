@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Activity Planner · Propuesta de rediseño · SouthFarm</title>
+<link rel="stylesheet" href="planner.css">
+<style>
+  body { overflow-x: hidden; }
+
+  .hub-shell { max-width: 1060px; margin: 0 auto; padding: 40px 28px 80px; display: flex; flex-direction: column; gap: 30px; }
+
+  .hub-hero {
+    position: relative; overflow: hidden;
+    padding: 34px 36px;
+    border: 1px solid rgba(34, 197, 94, 0.16);
+    border-radius: 18px;
+    background: linear-gradient(120deg, rgba(34, 197, 94, 0.09), rgba(16, 24, 20, 0.78) 55%, rgba(16, 24, 20, 0.45));
+  }
+  .hub-hero::after {
+    width: 420px; height: 220px; content: "";
+    position: absolute; right: 90px; top: -170px;
+    border: 1px solid rgba(34, 197, 94, 0.15); border-radius: 50%;
+    box-shadow: 0 0 0 26px rgba(34, 197, 94, 0.025), 0 0 0 54px rgba(34, 197, 94, 0.02);
+    transform: rotate(-14deg);
+    pointer-events: none;
+  }
+  .hub-hero h1 { margin: 10px 0 10px; font-size: clamp(28px, 4vw, 40px); line-height: 1.04; letter-spacing: -0.055em; }
+  .hub-hero h1 em { color: var(--accent); font-style: normal; }
+  .hub-hero p { max-width: 560px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+  .hub-brand { display: flex; align-items: center; gap: 11px; }
+  .hub-hero-meta { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+
+  /* grilla de pantallas */
+  .hub-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .hub-screen {
+    position: relative;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 20px 22px;
+    border: 1px solid var(--border-subtle); border-radius: 15px;
+    background: rgba(15, 15, 18, 0.84);
+    transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  }
+  .hub-screen:hover { border-color: rgba(34, 197, 94, 0.3); transform: translateY(-3px); box-shadow: var(--shadow-md); }
+  .hub-screen-num {
+    width: 30px; height: 30px; flex: 0 0 30px;
+    display: grid; place-items: center;
+    color: var(--accent); font-size: 12px; font-weight: 800;
+    border: 1px solid rgba(34, 197, 94, 0.28); border-radius: 9px;
+    background: var(--accent-dim);
+  }
+  .hub-screen-head { display: flex; align-items: center; gap: 11px; }
+  .hub-screen-head h3 { margin: 0; font-size: 15px; letter-spacing: -0.03em; }
+  .hub-screen > p { color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+  .hub-screen-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: auto; }
+  .hub-screen-cta { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .hub-screen-cta .ap-btn { flex: 1; }
+
+  /* secciones del racional */
+  .hub-section { display: flex; flex-direction: column; gap: 14px; }
+  .hub-section > h2 { font-size: 19px; letter-spacing: -0.04em; display: flex; align-items: center; gap: 10px; }
+  .hub-section > h2::before { content: ""; width: 22px; height: 2px; border-radius: 2px; background: var(--accent); }
+
+  .hub-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .hub-box {
+    padding: 18px 20px;
+    border: 1px solid var(--border-subtle); border-radius: 13px;
+    background: rgba(15, 15, 18, 0.84);
+  }
+  .hub-box h4 { margin: 0 0 10px; font-size: 12px; color: var(--text-primary); letter-spacing: -0.02em; }
+  .hub-box p, .hub-box li { color: var(--text-muted); font-size: 11px; line-height: 1.65; }
+  .hub-box ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .hub-box strong { color: var(--text-secondary); }
+
+  /* sistema de color por tipo */
+  .hub-type-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 12px; margin-bottom: 8px;
+    border: 1px solid var(--border-subtle); border-radius: 10px;
+    background: rgba(255, 255, 255, 0.015);
+  }
+  .hub-type-row:last-child { margin-bottom: 0; }
+  .hub-type-swatch { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 9px; display: grid; place-items: center; border: 1px solid; }
+  .hub-type-row > div { min-width: 0; flex: 1; }
+  .hub-type-row strong { display: block; font-size: 12px; color: var(--text-primary); }
+  .hub-type-row span { display: block; margin-top: 3px; font-size: 10px; color: var(--text-muted); }
+  .hub-type-row code { color: var(--accent); font-size: 10px; background: rgba(34, 197, 94, 0.08); padding: 2px 6px; border-radius: 5px; }
+
+  /* escala tipográfica */
+  .hub-scale { display: flex; flex-direction: column; gap: 8px; }
+  .hub-scale-row { display: flex; align-items: baseline; gap: 14px; border-bottom: 1px solid rgba(63, 63, 70, 0.25); padding-bottom: 8px; }
+  .hub-scale-row:last-child { border-bottom: 0; }
+  .hub-scale-row span { width: 120px; flex: 0 0 120px; color: var(--text-dim); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+
+  /* open questions */
+  .hub-q { display: flex; gap: 11px; padding: 12px 14px; border: 1px solid rgba(251, 191, 36, 0.22); border-radius: 11px; background: rgba(245, 158, 11, 0.045); }
+  .hub-q + .hub-q { margin-top: 9px; }
+  .hub-q svg { flex: 0 0 auto; color: #fbbf24; margin-top: 2px; }
+  .hub-q div { min-width: 0; }
+  .hub-q strong { display: block; color: #fde68a; font-size: 11px; }
+  .hub-q span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 10px; line-height: 1.55; }
+
+  .hub-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; color: var(--text-dim); font-size: 10px; padding-top: 8px; border-top: 1px solid var(--border-subtle); flex-wrap: wrap; }
+
+  @media (max-width: 860px) {
+    .hub-grid, .hub-cols { grid-template-columns: 1fr; }
+    .hub-hero { padding: 24px 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="hub-shell">
+
+  <!-- ============ Hero ============ -->
+  <header class="hub-hero">
+    <div class="hub-brand">
+      <div class="ap-brand-mark">SF</div>
+      <div><strong style="display:block;font-size:15px;letter-spacing:-.4px">SouthFarm</strong><small style="display:block;color:var(--text-muted);font-size:10px;letter-spacing:.11em;text-transform:uppercase">propuesta de rediseño</small></div>
+    </div>
+    <h1>Activity Planner.<br>La semana, <em>de una mirada.</em></h1>
+    <p>Propuesta para la sección que reemplaza al Warmup planner: un solo lugar para planificar warmups, scans y publicaciones de todas las marcas, con el design system <strong style="color:var(--text-secondary)">Granja Sur</strong> de la app actual.</p>
+    <div class="hub-hero-meta">
+      <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Mockups navegables</span>
+      <span class="ap-badge ap-badge-neutral">Semana actual: lun 17 – dom 23 ago</span>
+      <span class="ap-badge ap-badge-neutral">Hora Buenos Aires</span>
+      <span class="ap-badge ap-badge-neutral">4 pantallas</span>
+    </div>
+  </header>
+
+  <!-- ============ Pantallas ============ -->
+  <section class="hub-section">
+    <h2>Pantallas</h2>
+    <div class="hub-grid">
+
+      <a class="hub-screen" href="planner-week.html">
+        <div class="hub-screen-head">
+          <span class="hub-screen-num">1</span>
+          <h3>Semana · vista principal</h3>
+        </div>
+        <p>Clusters apilados por fila: card de marca con burbujas de cuentas + chart histórico hacia la derecha + selector de métrica. Hover sobre el chart = columnas por día con liquid glass.</p>
+        <div class="hub-screen-tags">
+          <span class="ap-chip ap-chip-warmup">warmup</span>
+          <span class="ap-chip ap-chip-scan">scan</span>
+          <span class="ap-chip ap-chip-publish">publish</span>
+          <span class="ap-chip ap-chip-neutral">liquid glass</span>
+        </div>
+        <div class="hub-screen-cta">
+          <span class="ap-btn ap-btn-primary">Abrir pantalla</span>
+          <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Interactiva</span>
+        </div>
+      </a>
+
+      <a class="hub-screen" href="cluster-detail.html">
+        <div class="hub-screen-head">
+          <span class="hub-screen-num">2</span>
+          <h3>Cluster expandido</h3>
+        </div>
+        <p>La card que pasa a dominar la pantalla: nombre editable, cuentas grandes por plataforma, historial de publicaciones con miniatura, warmup por cuenta y rutinas activas.</p>
+        <div class="hub-screen-tags">
+          <span class="ap-chip ap-chip-neutral">nombre editable</span>
+          <span class="ap-chip ap-chip-neutral">views próximamente</span>
+          <span class="ap-chip ap-chip-neutral">prev / siguiente</span>
+        </div>
+        <div class="hub-screen-cta">
+          <span class="ap-btn ap-btn-primary">Abrir pantalla</span>
+          <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Interactiva</span>
+        </div>
+      </a>
+
+      <a class="hub-screen" href="routine-editor.html">
+        <div class="hub-screen-head">
+          <span class="hub-screen-num">3</span>
+          <h3>Editor de rutinas</h3>
+        </div>
+        <p>Warmup ≥ 40 min/cuenta/día, scan ×2/día con ≥ 9 h de separación, posts ≥ 2/semana y publicación de cluster (un video + título para todas). Cada rutina tiene un estado — Aprobado / Editando / Pausado — y el preview de la semana se recalcula en vivo.</p>
+        <div class="hub-screen-tags">
+          <span class="ap-chip ap-chip-warmup">≥ 40 min</span>
+          <span class="ap-chip ap-chip-scan">×2 · 9 h</span>
+          <span class="ap-chip ap-chip-publish">≥ 2 videos</span>
+          <span class="ap-chip ap-chip-neutral">autoplan</span>
+          <span class="ap-chip ap-chip-neutral">estado por rutina</span>
+        </div>
+        <div class="hub-screen-cta">
+          <span class="ap-btn ap-btn-primary">Abrir pantalla</span>
+          <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Interactiva</span>
+        </div>
+      </a>
+
+      <a class="hub-screen" href="day-view.html">
+        <div class="hub-screen-head">
+          <span class="hub-screen-num">4</span>
+          <h3>Vista de día</h3>
+        </div>
+        <p>Timeline 12:00–22:00 con cada tarea: hora, tipo, cluster, @cuenta, celular asignado y estado. Bloques en ejecución con pulso en vivo + semáforo de carga por hora.</p>
+        <div class="hub-screen-tags">
+          <span class="ap-chip ap-chip-neutral">12:00–22:00</span>
+          <span class="ap-chip ap-chip-neutral">n9 · n07 · n08…</span>
+          <span class="ap-chip ap-chip-neutral">señal live</span>
+        </div>
+        <div class="hub-screen-cta">
+          <span class="ap-btn ap-btn-primary">Abrir pantalla</span>
+          <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>Interactiva</span>
+        </div>
+      </a>
+
+    </div>
+  </section>
+
+  <!-- ============ Racional ============ -->
+  <section class="hub-section">
+    <h2>Decisiones de diseño</h2>
+    <div class="hub-cols">
+      <div class="hub-box">
+        <h4>Dirección de arte</h4>
+        <ul>
+          <li><strong>Continuidad Granja Sur:</strong> mismos tokens de la app real (fondo #09090b, verde #22c55e, glass con bordes rgba). Cero ruptura de familiaridad: quien usa el Command center hoy, entra y sabe dónde está parado.</li>
+          <li><strong>Una acción primaria por vista:</strong> en la semana es "Ver día de hoy"; en rutinas, "Aplicar y replanificar"; en el cluster, "Nueva publicación de cluster". Todo lo demás es secundario o ghost.</li>
+          <li><strong>Chart en reposo = limpio:</strong> el gráfico se domina por la línea de área y los eventos; la retícula de días aparece solo en hover (liquid glass), como pidió el dueño. El "ahora" siempre visible con línea punteada animada.</li>
+          <li><strong>Dashboard sin_dashboard:</strong> evité filas de cards idénticas: cada fila de cluster es una composición card+chart con estados distintos (ok / déficit / pausado / sugerido) para que la pantalla cuente una historia de un vistazo.</li>
+        </ul>
+      </div>
+      <div class="hub-box">
+        <h4>Código de color por tipo de tarea</h4>
+        <div class="hub-type-row">
+          <span class="hub-type-swatch" style="color:#4ade80;border-color:rgba(34,197,94,.3);background:var(--success-dim)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l3.5-3.5"/><circle cx="12" cy="15" r="1.6"/></svg>
+          </span>
+          <div><strong>Warmup · verde</strong><span>El verde es el color de marca: la actividad "de mantenimiento" diaria comparte identidad con SouthFarm.</span></div>
+          <code>#22c55e</code>
+        </div>
+        <div class="hub-type-row">
+          <span class="hub-type-swatch" style="color:#93c5fd;border-color:rgba(59,130,246,.3);background:var(--info-dim)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg>
+          </span>
+          <div><strong>Scan · azul</strong><span>Información/detección: el azul info ya existe en el sistema (estados, badges) y no compite con el accent.</span></div>
+          <code>#3b82f6</code>
+        </div>
+        <div class="hub-type-row">
+          <span class="hub-type-swatch" style="color:#e879f9;border-color:rgba(192,38,211,.32);background:var(--purple-dim)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="m10.5 9.5 5 3-5 3z"/></svg>
+          </span>
+          <div><strong>Publish · magenta</strong><span>El contenido es el producto: se lleva el tono más expresivo del sistema, distinguishable del verde y del azul en charts, chips y bordes.</span></div>
+          <code>#c026d3</code>
+        </div>
+        <p style="margin-top:10px">Plataformas: IG rosa <code style="color:var(--plat-ig)">#f472b6</code>, TT cian <code style="color:var(--plat-tt)">#67e8f9</code>, YT coral <code style="color:var(--plat-yt)">#fb7185</code> — los mismos tonos de la app actual. Estados: ejecutando = verde pulsante, en cola = neutral, atrasada = ámbar, error = rojo.</p>
+      </div>
+    </div>
+
+    <div class="hub-cols">
+      <div class="hub-box">
+        <h4>Tipografía y ritmo</h4>
+        <div class="hub-scale">
+          <div class="hub-scale-row"><span>Página / hero</span><strong style="font-size:32px;letter-spacing:-.055em">La semana de tus marcas.</strong></div>
+          <div class="hub-scale-row"><span>Título topbar</span><strong style="font-size:20px;letter-spacing:-.04em">Activity Planner</strong></div>
+          <div class="hub-scale-row"><span>Card / cluster</span><strong style="font-size:15px;letter-spacing:-.03em">Marczell Clips</strong></div>
+          <div class="hub-scale-row"><span>Dato fuerte</span><strong style="font-size:28px;letter-spacing:-.07em">31,5 h</strong></div>
+          <div class="hub-scale-row"><span>Cuerpo</span><span style="font-size:12px;color:var(--text-secondary)">Descripciones y metadatos de tarea.</span></div>
+          <div class="hub-scale-row"><span>Eyebrow / micro</span><span style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim)">SEMANA ACTUAL</span></div>
+        </div>
+        <p style="margin-top:12px">Inter con fallback system-ui (misma pila de la app). Escala compacta 9→32px: es una superficie operativa de monitoreo, la densidad es parte de la función. Espaciado en pasos de 8/14/22px.</p>
+      </div>
+      <div class="hub-box">
+        <h4>Interacción clave: liquid glass</h4>
+        <ul>
+          <li><strong>Reposo:</strong> solo línea de área + eventos + now line. La retícula de días está apagada (opacity 0).</li>
+          <li><strong>Hover:</strong> aparecen 7 columnas glass — relleno blanco 3%, borde sutil, highlight especular arriba y división central luminosa — con entrada en cascada (45ms por columna) y easing expo.</li>
+          <li><strong>Movimiento del mouse:</strong> tooltip glass por día con métrica + eventos del día.</li>
+          <li><strong>Implementación:</strong> SVG inline (rects + line + gradiente especular) + CSS transitions + JS vanilla para el tooltip. Sin dependencias, funciona con file://.</li>
+          <li><strong>Accesibilidad:</strong> la información del hover no es la única vía: cada día tiene su valor en el tooltip y estados con color + texto, nunca color solo.</li>
+        </ul>
+      </div>
+      <div class="hub-box">
+        <h4>Patrón: estado de rutina (Aprobado / Editando / Pausado)</h4>
+        <ul>
+          <li><strong>Tres posiciones, una fuente de verdad:</strong> segmented control arriba a la derecha de cada card. <strong>Aprobado</strong> (verde) = la regla aplica y el sistema planifica con ella; <strong>Editando</strong> (ámbar) = hay cambios sin aplicar, la regla nueva todavía NO entra al plan; <strong>Pausado</strong> (neutro) = la rutina no genera tareas.</li>
+          <li><strong>Editando es un estado derivado, no un botón:</strong> no se clickea. Al mover cualquier parámetro de la card (slider, día, cuenta) el segmented salta solo a Editando y aparece el hint "Cambios sin aplicar — pasá a Aprobado para que el sistema replanifique". Esto evita replanificaciones accidentales mientras se tantean valores.</li>
+          <li><strong>Aprobar es explícito y con feedback:</strong> el hint se colapsa con micro-animación, la card hace un flash verde sutil y aparece el toast "Rutina aplicada — replanificando la semana…". El preview semanal recalcula en vivo.</li>
+          <li><strong>Pausa visible y reversible:</strong> la card se atenúa, los inputs quedan disabled (visualmente apagados, no solo opacos) y el segmented queda fuera del atenuado — es la única salida del estado y siempre operable. Reactivar vuelve directo a Aprobado: una rutina no se guarda a medias.</li>
+          <li><strong>Coherencia con el preview:</strong> las tareas de una rutina en edición se muestran atenuadas (borde punteado) en la grilla semanal; una rutina pausada no genera tareas y su check de regla lo dice con texto, no solo con color.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ A definir ============ -->
+  <section class="hub-section">
+    <h2>A definir con tu feedback</h2>
+    <div class="hub-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+      <div>
+        <strong>Alcance del chart por fila</strong>
+        <span>El boceto muestra un selector por fila (views / posts / warmup). ¿Querés un selector global arriba (una métrica para todos los clusters) + override por fila, o siempre por fila como está ahora?</span>
+      </div>
+    </div>
+    <div class="hub-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+      <div>
+        <strong>Cluster sugerido en la semana</strong>
+        <span>¿Confirmás la interacción de acciones inline (Confirmar / Revisar) dentro de la fila, o preferís que el click siempre abra el detalle y se confirme desde ahí?</span>
+      </div>
+    </div>
+    <div class="hub-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+      <div>
+        <strong>Expansión del cluster: overlay vs página</strong>
+        <span>La spec habla de "la card se expande a un elemento grande". Mockupeé la versión página (más simple y profunda). ¿O imaginás una transición in-place tipo FLIP sobre la vista semanal?</span>
+      </div>
+    </div>
+    <div class="hub-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+      <div>
+        <strong>Vista de día: entrada principal</strong>
+        <span>Desde la semana se llega con "Ver día de hoy". ¿Sumamos click en cualquier día del chart (columna → día) como entrada directa? Lo dejé preparado en el hover del chart.</span>
+      </div>
+    </div>
+    <div class="hub-q">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+      <div>
+        <strong>Orden de clusters</strong>
+        <span>Hoy: por cumplimiento (con déficit primero). Alternativas: alfabético, por actividad en vivo, o manual (drag & drop). ¿Qué refleja mejor tu operación?</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Footer ============ -->
+  <footer class="hub-footer">
+    <span>SouthFarm · Activity Planner · Fase 1: mockups para feedback · 2026-08-19</span>
+    <span>Abrí cualquier pantalla con doble click — todo es HTML autocontenido, sin build ni CDN.</span>
+  </footer>
+
+</div>
+</body>
+</html>

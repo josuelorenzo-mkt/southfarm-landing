@@ -1,0 +1,81 @@
+00:06:21 yt-verify-live1 start: serial=863d00583048313238510ca492874c account=@MarczellWisdom video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-1.mp4
+00:06:21 caption: 9 words / 44 chars (limits: 10 words, 100 chars): 'Push yourself because no one else will do it'
+00:06:22 PRE-CHECK probe wall=00:06:22.471: accessibility service answered a fresh dump on first try (1.0s)
+00:06:23 PRE-CHECK RESULT: VIVO wall=00:06:23.143 (ensure_accessibility_healthy healthy no-op path in 0.7s)
+00:06:24 NETWORK CHECK RESULT: OK wall=00:06:24.261 (ping/dumpsys probe in 1.1s)
+00:06:40   cold-start: dump #1 lacks com.google.android.youtube (only system UI rendered); waiting for the app tree (elapsed=0.0s)...
+00:06:44   [tap #1] center=(648,1496) wall=00:06:44.378
+00:06:45   [tap #2] center=(192,400) wall=00:06:45.907
+00:06:48 prepare OK: identity=@MarczellWisdom baseline_tiles=6 tiles wall=00:06:48.626
+00:06:48   baseline: ['Marczell Klein is the N1 American hypnotist, trainer and success coach known for mindset, 23 views - play Short', 'Learn to value your health. Never take it for granted, you have to develop it..., 942 views - play Short', 'Be confident that you will achieve it. Confidence is the key to unlocking the door to success..., 898 views - play Short', 'Fear only holds you back. Imagine how far you could go without fear... #wisdom #motivation #miami, 1.1 thousand views - play Short', "One of the best pieces of advice you'll ever hear...#motivation #inspiration #wisdom #podcast #miami, 1.3 thousand views - play Short", 'Use your words to your advantage., 1.2 thousand views - play Short']
+00:06:49   evidence saved: ytverify1-baseline.xml + .png
+00:06:51 media pushed -> /sdcard/Movies/SouthFarm/publication-999001-999001.mp4 wall=00:06:51.842
+00:06:54   [tap #3] center=(360,1496) wall=00:06:54.146
+00:06:59   [tap #4] center=(72,1192) wall=00:06:59.685
+00:07:00 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'youtube', 'remote_name': 'publication-999001-999001.mp4'} wall=00:07:00.671
+00:07:00 SELECT THUMBNAIL: start wall=00:07:00.673 expected_remote='publication-999001-999001.mp4' (exact pushed file name)
+00:07:00   [tap #5] center=(119,1067) wall=00:07:00.673
+00:07:01 SELECT THUMBNAIL: done wall=00:07:01.637 in 1.0s (selected_state badge accepted)
+00:07:02   [tap #6] center=(528,1468) wall=00:07:02.280
+00:07:04   [tap #7] center=(623,1472) wall=00:07:04.064
+00:07:05 checkpoint editing progress=45 final_action=False evidence={'platform': 'youtube', 'stage': 'editor'} wall=00:07:05.434
+00:07:05   [tap #8] center=(530,1446) wall=00:07:05.434
+00:07:09   [explicit dump #22 source=uiautomator] 45 nodes wall=00:07:09.391
+00:07:09   [tap #9] center=(458,244) wall=00:07:09.391
+00:07:09   [caption write] 'Push yourself because no one else will do it' wall=00:07:09.832
+00:07:15   [explicit dump #23 source=uiautomator] 57 nodes wall=00:07:15.420
+00:07:15   [back keyevent] wall=00:07:15.423
+00:07:15 checkpoint captioning progress=65 final_action=False evidence={'platform': 'youtube', 'caption_words': 9} wall=00:07:15.555
+00:07:15 checkpoint ready_to_publish progress=80 final_action=False evidence={'platform': 'youtube', 'stage': 'details'} wall=00:07:15.558
+00:07:18   [explicit dump #24 source=uiautomator] 57 nodes wall=00:07:18.289
+00:07:18 checkpoint publishing progress=90 final_action=True evidence={'platform': 'youtube', 'final': 'upload_short', 'dump_source': 'uiautomator'} wall=00:07:18.291
+00:07:19   evidence saved: ytverify1-upload-screen.xml + .png
+00:07:19   UPLOAD TAP at t=458291.062 wall=00:07:19.005 (single irreversible publish tap; no re-tap ever)
+00:07:19   [tap #10] center=(534,1480) wall=00:07:19.010
+00:07:19 UPLOAD CONFIRMATION WAIT: start wall=00:07:19.359 (up to 90s; Upload never re-tapped)
+00:07:20   cold-start: dump #25 lacks com.google.android.youtube (only system UI rendered); waiting for the app tree (elapsed=0.0s)...
+00:07:22   UPLOAD FINISHED (main screen restored, no upload UI) wall=00:07:22.025 (3.0s after Upload)
+00:07:22 UPLOAD CONFIRMATION WAIT: confirmed wall=00:07:22.030 in 2.7s (3.0s after Upload)
+00:07:22 publish OK: Upload Short tapped; propagation begins (t_upload=458291.062 wall=00:07:22.030)
+00:07:42 RE-SYNC [verify-cycle(3s)]: start wall=00:07:42.033 (23.0s after Upload)
+00:07:43   [verify dump #27] wall=00:07:43.140 24.1s after Upload tiles=6 channel=True handle=True
+00:07:43   [tap #11] center=(72,1496) wall=00:07:43.142
+00:07:47   [verify dump #28] wall=00:07:47.673 28.7s after Upload tiles=2 channel=True handle=False
+00:07:47   [tap #12] center=(648,1522) wall=00:07:47.673
+00:07:52   [verify dump #29] wall=00:07:52.196 33.2s after Upload tiles=7 channel=True handle=True interesting=['Push yourself because no one else will do it, No views - play Short']
+00:07:52   DELTA DETECTED at dump #29 wall=00:07:52.196: new grid tile 'Push yourself because no one else will do it, No views - play Short' (prefix + 'No views', absent from baseline) (33.2s after Upload)
+00:07:53   evidence saved: ytverify1-verify-delta.xml + .png
+00:07:53 ABORTED (fail-closed, no retry):
+00:07:53 Traceback (most recent call last):
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\yt-verify-live1.py", line 619, in main
+    identity = adapter.verify(job, device)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\youtube.py", line 643, in verify
+    self._tab_cycle_resync(device, self._VERIFY_TAB_WAIT)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\yt-verify-live1.py", line 491, in traced_resync
+    original_resync(device, tab_wait)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\youtube.py", line 597, in _tab_cycle_resync
+    self._tap_view_channel(device)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\youtube.py", line 602, in _tap_view_channel
+    self._tap(device, self._view_channel_control(nodes))
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\youtube.py", line 159, in _view_channel_control
+    raise PublisherError("CHANNEL_NAVIGATION", "YouTube View channel control is absent")
+southfarm_publisher.models.PublisherError: YouTube View channel control is absent
+
+00:07:53 ABORT DIAGNOSTIC [CHANNEL_NAVIGATION]: read-only screen state at abort
+00:07:53   bottom-bar tab: text='' cd='Shorts' bounds='[32,468][128,564]' clickable='true'
+00:07:53   bottom-bar tab: text='Shorts' cd='' bounds='[32,468][128,564]' clickable='false'
+00:07:53   bottom-bar tab: text='' cd='Home' bounds='[0,1448][144,1544]' clickable='true'
+00:07:53   bottom-bar tab: text='Home' cd='' bounds='[43,1510][101,1534]' clickable='false'
+00:07:53   bottom-bar tab: text='' cd='Shorts' bounds='[144,1448][288,1544]' clickable='true'
+00:07:53   bottom-bar tab: text='Shorts' cd='' bounds='[185,1510][248,1534]' clickable='false'
+00:07:53   bottom-bar tab: text='' cd='Create' bounds='[288,1448][432,1544]' clickable='true'
+00:07:53   Create control: text='' cd='Create' bounds='[288,1448][432,1544]'
+00:07:53   bottom-bar tab: text='Subscriptions' cd='' bounds='[442,1510][567,1534]' clickable='false'
+00:07:53   bottom-bar tab: text='' cd='You' bounds='[576,1448][720,1544]' clickable='true'
+00:07:53   bottom-bar tab: text='You' cd='' bounds='[629,1510][667,1534]' clickable='false'
+00:07:53   markers: handle=True upload_marker=True percent=None overlay=None tiles=7
+00:07:54   evidence saved: ytverify1-aborted.xml + .png
+00:07:54 RESULT: FAILURE
+00:07:54 cleaned pushed media file from device (post itself is NOT deleted)

@@ -1,0 +1,46 @@
+13:18:09 probe-gallery start: serial=863d00583048313238510ca492874c account=marczell.vibes
+13:18:09 phase 0: initial state snapshot (leftover flow expected)
+13:18:10   evidence 01: probe-01-initial.xml/.png
+13:18:10 phase 1: back out of any leftover flow to the profile
+13:18:11 back_to_profile: arrived at profile after 0 iterations
+13:18:11 phase 2: identity check
+13:18:12 phase 2 OK: active profile is 'marczell.vibes'
+13:18:12 phase 3: push + scan_media + sleep 10s
+13:18:15 pushed MP-V-2.mp4 -> /sdcard/Movies/SouthFarm/probe.mp4; sleeping 10s
+13:18:25 phase 4: navigate Create New -> Create new reel -> gallery
+13:18:26   Create New bounds=[0,68][96,180]
+13:18:27   evidence 02: probe-02-profile-verified.xml/.png
+13:18:31   reel selector reached: bounds=[0,680][720,788]
+13:18:33   gallery arrived
+13:18:34   evidence 03: probe-03-gallery-arrived.xml/.png
+13:18:35 today tile: desc='Unselected Video thumbnail created on August 17, 2026 1:18 PM' bounds=(243, 402, 477, 818) labels=['0:27']
+13:18:35 phase 5: selection variants (never Next/Share)
+13:18:36   evidence 04: probe-04-a-before.xml/.png
+13:18:37   variant a: tile desc='Unselected Video thumbnail created on August 17, 2026 1:18 PM' bounds=(243, 402, 477, 818) labels=['0:27']
+13:18:37   TAP[a] center=(360, 610) bounds=(243, 402, 477, 818)
+13:18:49   evidence 05: probe-05-a-after.xml/.png
+13:18:49   variant a: RESULT=none selected='' editor=False next=No
+13:18:53   evidence 06: probe-06-b-before.xml/.png
+13:18:53   variant b: tile desc='Unselected Video thumbnail created on August 17, 2026 1:18 PM' bounds=(243, 402, 477, 818) labels=['0:27']
+13:18:54   TAP[b] center=(360, 610) bounds=(243, 402, 477, 818)
+13:19:06   evidence 07: probe-07-b-after.xml/.png
+13:19:06   variant b: RESULT=none selected='' editor=False next=No
+13:19:10   evidence 08: probe-08-c-before.xml/.png
+13:19:11   variant c: tile desc='Unselected Video thumbnail created on August 17, 2026 1:18 PM' bounds=(243, 402, 477, 818) labels=['0:27']
+13:19:11   TAP[c] center=(360, 752) bounds=(243, 686, 477, 818)
+13:19:23   evidence 09: probe-09-c-after.xml/.png
+13:19:23   variant c: RESULT=none selected='' editor=False next=No
+13:19:27   evidence 10: probe-10-d-before.xml/.png
+13:19:28   variant d: tile desc='Unselected Video thumbnail created on August 17, 2026 1:18 PM' bounds=(243, 402, 477, 818) labels=['0:27']
+13:19:28   TAP[d] RAW input tap center=(360,610)
+13:19:40   evidence 11: probe-11-d-after.xml/.png
+13:19:40   variant d: RESULT=none selected='' editor=False next=No
+13:19:43 phase 5 done, results: ['a:none', 'b:none', 'c:none', 'd:none']
+13:19:43 cleanup: backing out to the profile (BACK only, never Share)
+13:19:44 back_to_profile: iteration 0, on_profile=False, markers=['gallery/editor control', 'gallery thumbnails'], pressing BACK
+13:19:46 back_to_profile: arrived at profile after 1 iterations
+13:19:47   evidence 12: probe-12-final-profile.xml/.png
+13:19:47 cleanup: removed /sdcard/Movies/SouthFarm/probe.mp4
+13:19:48 cleanup: SouthFarm dir now: total 0
+13:19:48 TAPS issued: [('a', (360, 610), 'tap_bounds (243, 402, 477, 818)'), ('b', (360, 610), 'tap_bounds (243, 402, 477, 818)'), ('c', (360, 752), 'tap_bounds (243, 686, 477, 818)'), ('d', (360, 610), 'input tap direct')]
+13:19:48 RESULT: NO variant registered selection (['a:none', 'b:none', 'c:none', 'd:none'])

@@ -1,0 +1,40 @@
+13:45:26 ig-verify-live2 start: serial=863d00583048313238510ca492874c account=marczell.vibes video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-2.mp4
+13:45:26 caption (10 words): 'Consistency compounds quietly so show up and do the work'
+13:45:43   [tap #1] center=(648,1500)
+13:45:45 prepare OK: baseline_posts=9 baseline_tiles=6
+13:45:46   evidence saved: igverify2-baseline.xml + .png
+13:45:48 media pushed -> /sdcard/Movies/SouthFarm/igverify-live2.mp4
+13:45:50   [tap #2] center=(48,124)
+13:45:52   [tap #3] center=(360,734)
+13:45:55 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'instagram', 'stage': 'gallery', 'duration_label': '0:15'}
+13:45:55   [tap #4] center=(360,610)
+13:45:58 checkpoint editing progress=45 final_action=False evidence={'platform': 'instagram', 'stage': 'editor'}
+13:45:59   [tap #5] center=(618,1498)
+13:46:01   [tap #6] center=(360,849)
+13:46:05 checkpoint captioning progress=65 final_action=False evidence={'platform': 'instagram', 'caption_words': 10}
+13:46:06 checkpoint ready_to_publish progress=80 final_action=False evidence={'platform': 'instagram', 'stage': 'share'}
+13:46:07 checkpoint publishing progress=90 final_action=True evidence={'platform': 'instagram', 'final': 'share'}
+13:46:07   evidence saved: igverify2-share-screen.xml + .png
+13:46:07   SHARE TAP at t=421020.562
+13:46:07   [tap #7] center=(532,1460)
+13:46:08 publish OK: Share tapped; propagation begins (t_share=421020.562)
+13:46:13   evidence saved: igverify2-verify-020.xml + .png
+13:46:14   [tap #8] center=(648,1500)
+13:46:27   evidence saved: igverify2-verify-030.xml
+13:46:38   [tap #9] center=(648,1500)
+13:46:41   evidence saved: igverify2-verify-040.xml + .png
+13:46:41   [tap #10] center=(72,1500)
+13:46:45   [tap #11] center=(648,1500)
+13:46:47   DELTA DETECTED at dump #43: new_tiles=[] count_ok=True tiles 6->6 (39.3s after Share)
+13:46:48   evidence saved: igverify2-verify-delta.xml + .png
+13:46:52   [swipe-bezier motionevent] 360,350 -> 360,1000 400ms
+13:46:54   [tap #12] center=(119,992)
+13:47:02   evidence saved: igverify2-verify-050.xml
+13:47:13   [tap #13] center=(119,992)
+13:47:14 verify OK: identity='marczell.vibes Consistency compounds quietly so show up and do the work' verify_elapsed=66.8s
+13:47:15   evidence saved: igverify2-verified.xml + .png
+13:47:15 DELTA RESULT: dump #43 of verify, 39.3s after Share, tiles 6->6
+13:47:15 swipe log: [('bezier', 421060.953, (360, 350, 360, 1000, 400))]
+13:47:15 tap count total: 13
+13:47:15 RESULT: SUCCESS
+13:47:16 cleaned pushed media file from device (post itself is NOT deleted)

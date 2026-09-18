@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Día · mié 19 ago · Activity Planner</title>
+<link rel="stylesheet" href="planner.css">
+<style>
+  /* ============ Layout del día ============ */
+  .ap-day-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  .ap-day-head h2 { margin: 8px 0 6px; font-size: clamp(24px, 2.6vw, 32px); line-height: 1.05; letter-spacing: -0.055em; }
+  .ap-day-head h2 em { color: var(--accent); font-style: normal; }
+  .ap-day-head p:not(.ap-eyebrow) { color: var(--text-secondary); font-size: 13px; }
+  .ap-day-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+  .ap-day-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+  .ap-day-side { position: sticky; top: 106px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+  /* ============ Timeline ============ */
+  .ap-timeline { position: relative; padding-left: 62px; }
+  .ap-timeline::before {
+    content: ""; position: absolute; left: 53px; top: 0; bottom: 0;
+    width: 1px; background: var(--border-subtle);
+  }
+  .ap-hour { position: relative; display: flex; align-items: flex-start; gap: 0; min-height: 44px; }
+  .ap-hour-label {
+    position: absolute; left: -62px; top: 0;
+    width: 42px; text-align: right;
+    color: var(--text-dim); font-size: 10px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ap-hour.is-now .ap-hour-label { color: var(--accent); }
+  .ap-hour-tasks { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 2px 0 14px; }
+
+  /* bloque de tarea */
+  .ap-task {
+    position: relative;
+    display: flex; align-items: center; gap: 12px;
+    min-height: 52px; padding: 10px 14px;
+    border: 1px solid var(--border-subtle); border-radius: 12px;
+    background: rgba(255, 255, 255, 0.016);
+    transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+  }
+  .ap-task:hover { border-color: var(--border-default); transform: translateX(3px); }
+  .ap-task::before {
+    content: ""; position: absolute; left: -8.5px; top: 50%;
+    width: 7px; height: 7px; margin-top: -3.5px;
+    border-radius: 50%;
+    background: var(--bg-surface);
+    border: 2px solid currentColor;
+  }
+  .ap-task.t-warmup { color: #4ade80; }
+  .ap-task.t-scan { color: #93c5fd; }
+  .ap-task.t-publish { color: #e879f9; }
+
+  .ap-task-time {
+    min-width: 96px; flex: 0 0 96px;
+    display: flex; flex-direction: column; gap: 3px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .ap-task-time strong { color: var(--text-primary); font-size: 13px; letter-spacing: -0.02em; }
+  .ap-task-time small { color: var(--text-dim); font-size: 9px; }
+
+  .ap-task-icon {
+    width: 34px; height: 34px; flex: 0 0 34px;
+    display: grid; place-items: center;
+    border: 1px solid currentColor; border-radius: 10px;
+    background: rgba(0, 0, 0, 0.22);
+  }
+  .ap-task-main { min-width: 0; flex: 1; }
+  .ap-task-main > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ap-task-main strong { color: var(--text-primary); font-size: 12px; }
+  .ap-task-main span { display: block; margin-top: 5px; color: var(--text-muted); font-size: 10px; }
+  .ap-task-main span b { color: var(--text-secondary); font-weight: 600; }
+
+  .ap-task-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+
+  /* estados */
+  .ap-task.is-running { border-color: rgba(34, 197, 94, 0.4); background: linear-gradient(100deg, rgba(34, 197, 94, 0.08), rgba(255, 255, 255, 0.015)); }
+  .ap-task.is-running::before { animation: apPulseRing 1.8s ease-out infinite; }
+  .ap-task.is-done { opacity: 0.66; }
+  .ap-task.is-done .ap-task-main strong { color: var(--text-secondary); }
+  .ap-task.is-late { border-color: rgba(245, 158, 11, 0.36); background: rgba(245, 158, 11, 0.05); }
+  .ap-task.is-error { border-color: rgba(239, 68, 68, 0.34); background: rgba(239, 68, 68, 0.05); }
+
+  /* línea de ahora */
+  .ap-now-row { position: relative; margin: 4px 0; padding-left: 0; }
+  .ap-now-row::before {
+    content: ""; position: absolute; left: -62px; right: -6px; top: 50%;
+    height: 1px;
+    background: linear-gradient(90deg, rgba(134, 239, 172, 0.7), rgba(134, 239, 172, 0.15));
+  }
+  .ap-now-row::after {
+    content: "AHORA · 15:42"; position: absolute; left: -62px; top: -8px;
+    color: #bbf7d0; font-size: 8px; font-weight: 800; letter-spacing: 0.1em;
+  }
+
+  /* botones de tarea */
+  .ap-task-actions { display: flex; gap: 5px; }
+  .ap-task-actions .ap-btn { min-height: 26px; padding: 0 8px; font-size: 9px; }
+
+  /* burbujas chicas dentro de tarea */
+  .ap-task-bubble {
+    width: 24px; height: 24px; flex: 0 0 24px;
+    display: grid; place-items: center;
+    font-size: 8px; font-weight: 800;
+    border: 1px solid; border-radius: 50%;
+  }
+
+  /* ============ Semáforo de carga ============ */
+  .ap-load-strip { display: flex; gap: 4px; align-items: flex-end; height: 74px; padding-top: 4px; }
+  .ap-load-bar {
+    flex: 1;
+    display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 5px;
+    min-width: 0;
+  }
+  .ap-load-bar > div {
+    width: 100%; border-radius: 5px 5px 2px 2px;
+    background: linear-gradient(180deg, rgba(34, 197, 94, 0.55), rgba(34, 197, 94, 0.16));
+    border: 1px solid rgba(34, 197, 94, 0.28);
+    border-bottom: 0;
+    min-height: 4px;
+    transition: height 0.3s ease;
+  }
+  .ap-load-bar.is-peak > div { background: linear-gradient(180deg, rgba(245, 158, 11, 0.6), rgba(245, 158, 11, 0.16)); border-color: rgba(245, 158, 11, 0.32); }
+  .ap-load-bar span { color: var(--text-dim); font-size: 8px; font-weight: 700; }
+  .ap-load-bar.is-now span { color: var(--accent); }
+
+  .ap-load-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 14px; }
+  .ap-load-fact { padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: 9px; background: rgba(255, 255, 255, 0.016); }
+  .ap-load-fact span { color: var(--text-muted); font-size: 8px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+  .ap-load-fact strong { display: block; margin-top: 6px; color: var(--text-primary); font-size: 16px; letter-spacing: -0.04em; }
+  .ap-load-fact strong small { color: var(--text-muted); font-size: 9px; font-weight: 500; }
+
+  /* ============ Live ahora ============ */
+  .ap-live-list { display: flex; flex-direction: column; gap: 9px; }
+  .ap-live-row {
+    display: flex; align-items: center; gap: 11px;
+    padding: 11px 13px;
+    border: 1px solid rgba(34, 197, 94, 0.22); border-radius: 11px;
+    background: rgba(34, 197, 94, 0.05);
+  }
+  .ap-live-dot {
+    width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 9px rgba(34, 197, 94, 0.8);
+    animation: apPulse 1.6s ease-in-out infinite;
+  }
+  .ap-live-main { min-width: 0; flex: 1; }
+  .ap-live-main strong { display: block; overflow: hidden; color: var(--text-primary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .ap-live-main span { display: block; margin-top: 4px; color: var(--text-muted); font-size: 9px; }
+  .ap-live-prog { width: 54px; flex: 0 0 54px; text-align: right; }
+  .ap-live-prog strong { color: var(--accent); font-size: 12px; font-weight: 700; }
+  .ap-live-prog small { display: block; margin-top: 3px; color: var(--text-dim); font-size: 8px; }
+
+  /* filtro */
+  .ap-filter-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+  .ap-filter-chip {
+    min-height: 28px; padding: 0 10px;
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-muted); font-size: 9px; font-weight: 800; letter-spacing: 0.04em;
+    border: 1px solid var(--border-subtle); border-radius: 99px;
+    background: rgba(255, 255, 255, 0.018);
+    transition: 0.15s ease;
+  }
+  .ap-filter-chip:hover { color: var(--text-secondary); border-color: var(--border-default); }
+  .ap-filter-chip.is-on { color: var(--text-primary); background: var(--bg-hover); border-color: var(--border-default); }
+  .ap-filter-chip i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .ap-filter-chip.f-warmup.is-on { color: #4ade80; border-color: rgba(34, 197, 94, 0.3); background: var(--success-dim); }
+  .ap-filter-chip.f-scan.is-on { color: #93c5fd; border-color: rgba(59, 130, 246, 0.3); background: var(--info-dim); }
+  .ap-filter-chip.f-publish.is-on { color: #e879f9; border-color: rgba(192, 38, 211, 0.3); background: var(--purple-dim); }
+
+  @media (max-width: 1080px) {
+    .ap-day-layout { grid-template-columns: 1fr; }
+    .ap-day-side { position: static; }
+  }
+  @media (max-width: 700px) {
+    .ap-timeline { padding-left: 46px; }
+    .ap-hour-label { left: -46px; width: 30px; font-size: 9px; }
+    .ap-timeline::before { left: 39px; }
+    .ap-task { flex-wrap: wrap; }
+    .ap-task-time { flex-basis: auto; min-width: 0; }
+    .ap-task-right { width: 100%; justify-content: space-between; }
+    .ap-now-row::before { left: -46px; }
+    .ap-now-row::after { left: -46px; }
+  }
+</style>
+</head>
+<body>
+<div class="ap-app">
+
+  <!-- ==================== SIDEBAR ==================== -->
+  <aside class="ap-sidebar">
+    <div class="ap-sidebar-top">
+      <div class="ap-brand-lockup">
+        <div class="ap-brand-mark">SF</div>
+        <div><strong>SouthFarm</strong><small>command center</small></div>
+      </div>
+      <div class="ap-workspace-chip"><span class="ap-online-dot"></span>Agencia Sur</div>
+    </div>
+    <nav class="ap-side-nav" aria-label="Navegación del workspace">
+      <p class="ap-nav-caption">WORKSPACE</p>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M10 20v-5h4v5"/></svg>
+      </span><span>Command center</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+      </span><span>Crear publicación</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="3" width="12" height="19" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      </span><span>Device fleet</span></a>
+      <a class="ap-nav-item is-active" href="planner-week.html" aria-current="page"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="16" rx="2.5"/><path d="M3.5 9.5h17M8 3v3M16 3v3"/><path d="m9 15 2 2 4-4.5"/></svg>
+      </span><span>Activity Planner</span><b>NEW</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2.5"/></svg>
+      </span><span>Activity history</span></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c.8-3 3-4.5 5.5-4.5s4.7 1.5 5.5 4.5"/><path d="M16 8.5a3 3 0 1 1 4.2 4"/></svg>
+      </span><span>Team</span><b>RBAC</b></a>
+      <a class="ap-nav-item" href="#"><span class="ap-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.15-1.4l2-1.55-2-3.4-2.4.9A7 7 0 0 0 14 4.7L13.6 2h-3.2L10 4.7a7 7 0 0 0-2.45 1.4l-2.4-.9-2 3.4 2 1.55A7 7 0 0 0 5 12c0 .48.05.95.15 1.4l-2 1.55 2 3.4 2.4-.9A7 7 0 0 0 10 19.3l.4 2.7h3.2l.4-2.7a7 7 0 0 0 2.45-1.4l2.4.9 2-3.4-2-1.55c.1-.45.15-.92.15-1.4Z"/></svg>
+      </span><span>Settings</span></a>
+    </nav>
+    <div class="ap-sidebar-bottom">
+      <div class="ap-user-chip">
+        <div class="ap-avatar">J</div>
+        <div class="ap-user-copy"><strong>Josué</strong><span>owner</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==================== MAIN ==================== -->
+  <div class="ap-main">
+    <header class="ap-topbar">
+      <div>
+        <p class="ap-eyebrow ap-eyebrow-accent">ACTIVITY PLANNER / SEMANA 17–23 AGO</p>
+        <h1>Miércoles 19 de agosto</h1>
+      </div>
+      <div class="ap-topbar-actions">
+        <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>En vivo · 15:42 BA</span>
+        <a class="ap-btn ap-btn-ghost" href="planner-week.html">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 18l-6-6 6-6"/></svg>
+          Volver a la semana
+        </a>
+        <a class="ap-btn ap-btn-ghost" href="index.html">Hub</a>
+      </div>
+    </header>
+
+    <main class="ap-content">
+      <div class="ap-page-stack">
+
+        <!-- Intro + nav de día -->
+        <section class="ap-day-head">
+          <div>
+            <p class="ap-eyebrow ap-eyebrow-accent">CALENDARIO DEL DÍA</p>
+            <h2>El día, <em>tarea por tarea.</em></h2>
+            <p>12:00–22:00 de Buenos Aires · un teléfono ejecuta una tarea a la vez.</p>
+          </div>
+          <div class="ap-day-controls">
+            <div class="ap-week-range">
+              <button title="Día anterior" aria-label="Día anterior"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
+              <span>mié 19 ago</span>
+              <button title="Día siguiente" aria-label="Día siguiente"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
+            </div>
+            <button class="ap-btn" id="nowBtn">Ahora</button>
+            <button class="ap-btn ap-btn-primary" id="addTaskBtn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+              Nueva tarea
+            </button>
+          </div>
+        </section>
+
+        <!-- Filtros -->
+        <section class="ap-card" style="padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">
+          <div class="ap-filter-chips" role="group" aria-label="Filtrar por tipo de tarea">
+            <button class="ap-filter-chip f-warmup is-on" data-filter="warmup" aria-pressed="true"><i></i>Warmup</button>
+            <button class="ap-filter-chip f-scan is-on" data-filter="scan" aria-pressed="true"><i></i>Scan</button>
+            <button class="ap-filter-chip f-publish is-on" data-filter="publish" aria-pressed="true"><i></i>Publish</button>
+            <button class="ap-filter-chip" data-filter="late" aria-pressed="false">Solo atrasadas</button>
+          </div>
+          <span style="color:var(--text-dim);font-size:10px" id="taskCount"></span>
+        </section>
+
+        <div class="ap-day-layout">
+          <!-- ============ Timeline ============ -->
+          <section class="ap-card">
+            <div class="ap-card-heading">
+              <div>
+                <p class="ap-eyebrow">TIMELINE · 12:00–22:00</p>
+                <h3>Agenda de hoy</h3>
+                <p class="ap-card-subtitle">Cada bloque: hora, tipo, cluster, cuenta, celular asignado y estado.</p>
+              </div>
+              <span class="ap-badge ap-badge-live"><span class="ap-badge-dot"></span>3 ejecutando</span>
+            </div>
+            <div class="ap-timeline" id="timeline"></div>
+          </section>
+
+          <!-- ============ Lateral ============ -->
+          <aside class="ap-day-side">
+
+            <!-- Live ahora -->
+            <section class="ap-card" style="border-color:rgba(34,197,94,.22)">
+              <div class="ap-card-heading" style="margin-bottom:14px">
+                <div>
+                  <p class="ap-eyebrow ap-eyebrow-accent">LIVE</p>
+                  <h3>Ejecutándose ahora</h3>
+                </div>
+              </div>
+              <div class="ap-live-list">
+                <div class="ap-live-row">
+                  <span class="ap-live-dot"></span>
+                  <div class="ap-live-main">
+                    <strong>Warmup · Marczell Clips</strong>
+                    <span>@marczell.clips · IG · n9 · 24 min</span>
+                  </div>
+                  <div class="ap-live-prog"><strong>68%</strong><small>16:18 fin</small></div>
+                </div>
+                <div class="ap-live-row">
+                  <span class="ap-live-dot"></span>
+                  <div class="ap-live-main">
+                    <strong>Warmup · Nova Gaming</strong>
+                    <span>@novagaming · TT · n11 · 11 min</span>
+                  </div>
+                  <div class="ap-live-prog"><strong>31%</strong><small>16:05 fin</small></div>
+                </div>
+                <div class="ap-live-row">
+                  <span class="ap-live-dot"></span>
+                  <div class="ap-live-main">
+                    <strong>Scan · Cocina Sur</strong>
+                    <span>Instagram · n15 · 4 min</span>
+                  </div>
+                  <div class="ap-live-prog"><strong>54%</strong><small>15:58 fin</small></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- Semáforo de carga -->
+            <section class="ap-card">
+              <div class="ap-card-heading" style="margin-bottom:10px">
+                <div>
+                  <p class="ap-eyebrow">LOAD BY HOUR</p>
+                  <h3>Carga del día</h3>
+                  <p class="ap-card-subtitle">Tareas por hora · pico 18:00 con 9.</p>
+                </div>
+              </div>
+              <div class="ap-load-strip" id="loadStrip"></div>
+              <div class="ap-load-facts">
+                <div class="ap-load-fact"><span>Total del día</span><strong>47 <small>tareas</small></strong></div>
+                <div class="ap-load-fact"><span>Completadas</span><strong>18 <small>38%</small></strong></div>
+                <div class="ap-load-fact"><span>En cola</span><strong>26</strong></div>
+                <div class="ap-load-fact"><span>Atrasadas</span><strong style="color:#fbbf24">2</strong></div>
+              </div>
+            </section>
+
+            <div class="ap-mockup-note">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 8v5M12 16.5h.01"/></svg>
+              <span><strong>Mockup 4/4</strong> · Los bloques en verde con pulso están corriendo ahora. Probá los filtros por tipo.</span>
+            </div>
+
+          </aside>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<div class="ap-toast" id="toast" role="status"></div>
+
+<script>
+/* ============================================================
+   Datos ficticios — mié 19 ago 2026, 15:42 BA
+   ============================================================ */
+
+var TASK_ICONS = {
+  warmup: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l3.5-3.5"/><circle cx="12" cy="15" r="1.6"/></svg>',
+  scan: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.8-4.8"/></svg>',
+  publish: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="m10.5 9.5 5 3-5 3z"/></svg>'
+};
+
+var STATUS = {
+  running: { label: 'Ejecutando', cls: 'ap-badge ap-badge-live' },
+  queued: { label: 'En cola', cls: 'ap-badge ap-badge-neutral' },
+  done: { label: 'Completada', cls: 'ap-badge ap-badge-live' },
+  late: { label: 'Atrasada', cls: 'ap-badge ap-badge-warn' },
+  error: { label: 'Error', cls: 'ap-badge ap-badge-bad' }
+};
+
+var TASKS = [
+  { h: 12, t: '12:00', type: 'warmup', cluster: 'Nova Gaming', account: '@nova.gaming', plat: 'ig', platLabel: 'IG', device: 'n12', dur: '40 min', status: 'done', task: 'warmup_ig' },
+  { h: 12, t: '12:15', type: 'scan', cluster: 'Cocina Sur', account: 'Instagram', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '6 min', status: 'done', task: 'scan_ig' },
+  { h: 12, t: '12:30', type: 'warmup', cluster: 'Marczell Clips', account: '@marczellclips', plat: 'tt', platLabel: 'TT', device: 'n07', dur: '40 min', status: 'done', task: 'warmup_tiktok' },
+  { h: 13, t: '13:00', type: 'publish', cluster: 'Marczell Clips', account: '@marczell.clips', plat: 'ig', platLabel: 'IG', device: 'n9', dur: '0:34', status: 'done', task: 'publish_reel', title: 'Skate park al atardecer — cut fijo' },
+  { h: 13, t: '13:05', type: 'scan', cluster: 'Marczell Clips', account: 'TikTok', plat: 'tt', platLabel: 'TT', device: 'n07', dur: '5 min', status: 'done', task: 'scan_tiktok' },
+  { h: 13, t: '13:30', type: 'warmup', cluster: 'Cocina Sur', account: '@cocina.sur', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '40 min', status: 'done', task: 'warmup_ig' },
+  { h: 14, t: '14:00', type: 'warmup', cluster: 'Nova Gaming', account: '@Nova Gaming', plat: 'yt', platLabel: 'YT', device: 'n14', dur: '40 min', status: 'done', task: 'warmup_youtube' },
+  { h: 14, t: '14:20', type: 'warmup', cluster: 'Marczell Clips', account: '@Marczell Clips', plat: 'yt', platLabel: 'YT', device: 'n08', dur: '40 min', status: 'done', task: 'warmup_youtube' },
+  { h: 15, t: '15:00', type: 'warmup', cluster: 'Cocina Sur', account: '@cocinasur', plat: 'tt', platLabel: 'TT', device: 'n16', dur: '40 min', status: 'late', task: 'warmup_tiktok', lateBy: '+45 min' },
+  { h: 15, t: '15:18', type: 'warmup', cluster: 'Marczell Clips', account: '@marczell.clips', plat: 'ig', platLabel: 'IG', device: 'n9', dur: '40 min', status: 'running', task: 'warmup_ig' },
+  { h: 15, t: '15:31', type: 'warmup', cluster: 'Nova Gaming', account: '@novagaming', plat: 'tt', platLabel: 'TT', device: 'n11', dur: '40 min', status: 'running', task: 'warmup_tiktok' },
+  { h: 15, t: '15:38', type: 'scan', cluster: 'Cocina Sur', account: 'Instagram', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '6 min', status: 'running', task: 'scan_ig' },
+  { h: 16, t: '16:00', type: 'warmup', cluster: 'Nova Gaming', account: '@nova.gaming', plat: 'ig', platLabel: 'IG', device: 'n12', dur: '40 min', status: 'queued', task: 'warmup_ig', manual: true },
+  { h: 16, t: '16:30', type: 'warmup', cluster: 'Marczell Clips', account: '@marczellclips', plat: 'tt', platLabel: 'TT', device: 'n07', dur: '40 min', status: 'queued', task: 'warmup_tiktok' },
+  { h: 17, t: '17:00', type: 'scan', cluster: 'Nova Gaming', account: 'YouTube', plat: 'yt', platLabel: 'YT', device: 'n14', dur: '5 min', status: 'queued', task: 'scan_youtube' },
+  { h: 17, t: '17:30', type: 'warmup', cluster: 'Cocina Sur', account: '@cocina.sur', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '40 min', status: 'queued', task: 'warmup_ig' },
+  { h: 18, t: '18:00', type: 'publish', cluster: 'Nova Gaming', account: '@novagaming', plat: 'tt', platLabel: 'TT', device: 'n11', dur: '0:28', status: 'queued', task: 'publish_reel', title: 'Esto pasó en el local ayer' },
+  { h: 18, t: '18:30', type: 'publish', cluster: 'Cocina Sur', account: '@cocina.sur', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '0:41', status: 'late', task: 'publish_reel', title: 'Receta express: ñoquis de papa', lateBy: 'sin video en cola' },
+  { h: 18, t: '18:40', type: 'warmup', cluster: 'Marczell Clips', account: '@Marczell Clips', plat: 'yt', platLabel: 'YT', device: 'n08', dur: '40 min', status: 'queued', task: 'warmup_youtube' },
+  { h: 19, t: '19:00', type: 'warmup', cluster: 'Nova Gaming', account: '@Nova Gaming', plat: 'yt', platLabel: 'YT', device: 'n14', dur: '40 min', status: 'queued', task: 'warmup_youtube' },
+  { h: 19, t: '19:30', type: 'warmup', cluster: 'Marczell Clips', account: '@marczell.clips', plat: 'ig', platLabel: 'IG', device: 'n9', dur: '40 min', status: 'queued', task: 'warmup_ig' },
+  { h: 20, t: '20:00', type: 'warmup', cluster: 'Cocina Sur', account: '@cocinasur', plat: 'tt', platLabel: 'TT', device: 'n16', dur: '40 min', status: 'queued', task: 'warmup_tiktok' },
+  { h: 20, t: '20:15', type: 'scan', cluster: 'Marczell Clips', account: 'Instagram', plat: 'ig', platLabel: 'IG', device: 'n9', dur: '6 min', status: 'queued', task: 'scan_ig' },
+  { h: 21, t: '21:15', type: 'scan', cluster: 'Marczell Clips', account: 'TikTok', plat: 'tt', platLabel: 'TT', device: 'n07', dur: '5 min', status: 'queued', task: 'scan_tiktok' },
+  { h: 22, t: '22:00', type: 'scan', cluster: 'Cocina Sur', account: 'Instagram', plat: 'ig', platLabel: 'IG', device: 'n15', dur: '6 min', status: 'queued', task: 'scan_ig' }
+];
+
+var HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
+var NOW_HOUR = 15;
+
+var PLAT_BUBBLE = {
+  ig: 'ap-bubble-ig', tt: 'ap-bubble-tt', yt: 'ap-bubble-yt'
+};
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+var toast = document.getElementById('toast');
+var toastTimer = null;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('is-visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toast.classList.remove('is-visible'); }, 2600);
+}
+
+/* ---- timeline ---- */
+var timeline = document.getElementById('timeline');
+var filters = { warmup: true, scan: true, publish: true, late: false };
+
+function taskHTML(task) {
+  var st = STATUS[task.status];
+  var stateCls = task.status === 'running' ? ' is-running' : task.status === 'done' ? ' is-done' : task.status === 'late' ? ' is-late' : task.status === 'error' ? ' is-error' : '';
+  var name = task.type === 'publish' ? (task.title || 'Publicación') : (task.type === 'scan' ? 'Scan ' + (task.account === 'Instagram' ? 'IG' : task.account === 'TikTok' ? 'TT' : 'YT') : 'Warmup ' + task.platLabel);
+  var isAccountTask = task.account.charAt(0) === '@';
+  return '<div class="ap-task t-' + task.type + stateCls + '" data-type="' + task.type + '" data-status="' + task.status + '">'
+    + '<div class="ap-task-time"><strong>' + task.t + '</strong><small>' + esc(task.task) + (task.manual ? ' · manual' : '') + '</small></div>'
+    + '<div class="ap-task-icon">' + TASK_ICONS[task.type] + '</div>'
+    + '<div class="ap-task-main">'
+    + '<div><strong>' + esc(name) + '</strong>'
+    + '<span class="ap-pill ap-pill-' + task.plat + '" style="margin-left:2px">' + task.platLabel + '</span>'
+    + (task.status === 'running' ? '<span class="ap-badge ap-badge-live" style="margin-left:2px"><span class="ap-badge-dot"></span>Ejecutando</span>' : '')
+    + '</div>'
+    + '<span>' + esc(task.cluster) + ' · ' + (isAccountTask ? '<b>' + esc(task.account) + '</b>' : esc(task.account)) + ' · celular <b>' + task.device + '</b> · ' + task.dur + (task.lateBy ? ' · <b style="color:#fbbf24">' + task.lateBy + '</b>' : '') + '</span>'
+    + '</div>'
+    + '<div class="ap-task-right">'
+    + (task.status !== 'running' ? '<span class="' + st.cls + '"><span class="ap-badge-dot"></span>' + st.label + '</span>' : '')
+    + '<div class="ap-task-actions">'
+    + (task.status === 'queued' || task.status === 'late' ? '<button class="ap-btn ap-btn-ghost ap-btn-sm" data-act="Mover">' + 'Mover' + '</button><button class="ap-btn ap-btn-danger ap-btn-sm" data-act="Cancelar">' + 'Cancelar' + '</button>' : '')
+    + (task.status === 'done' ? '<button class="ap-btn ap-btn-ghost ap-btn-sm" data-act="Ver resultado">Ver</button>' : '')
+    + '</div>'
+    + '</div>'
+    + '</div>';
+}
+
+function renderTimeline() {
+  var html = '';
+  HOURS.forEach(function (h) {
+    var hourTasks = TASKS.filter(function (t) { return t.h === h; }).filter(function (t) {
+      if (!filters[t.type]) return false;
+      if (filters.late && t.status !== 'late') return false;
+      return true;
+    });
+    html += '<div class="ap-hour' + (h === NOW_HOUR ? ' is-now' : '') + '">'
+      + '<span class="ap-hour-label">' + (h < 10 ? '0' + h : h) + ':00</span>'
+      + '<div class="ap-hour-tasks">';
+    if (h === NOW_HOUR) html += '<div class="ap-now-row" style="height:0"></div>';
+    if (hourTasks.length) {
+      html += hourTasks.map(taskHTML).join('');
+    } else {
+      html += '<span style="color:var(--text-dim);font-size:10px;padding:6px 0">— sin tareas —</span>';
+    }
+    html += '</div></div>';
+  });
+  timeline.innerHTML = html;
+  var visible = TASKS.filter(function (t) {
+    if (!filters[t.type]) return false;
+    if (filters.late && t.status !== 'late') return false;
+    return true;
+  }).length;
+  document.getElementById('taskCount').textContent = visible + ' de ' + TASKS.length + ' tareas visibles';
+}
+renderTimeline();
+
+/* filtros */
+Array.prototype.forEach.call(document.querySelectorAll('.ap-filter-chip'), function (chip) {
+  chip.addEventListener('click', function () {
+    var key = chip.dataset.filter;
+    filters[key] = !filters[key];
+    chip.classList.toggle('is-on', filters[key]);
+    chip.setAttribute('aria-pressed', filters[key] ? 'true' : 'false');
+    renderTimeline();
+  });
+});
+
+/* acciones de tarea (delegación) */
+timeline.addEventListener('click', function (e) {
+  var btn = e.target.closest('[data-act]');
+  if (btn) {
+    var taskEl = btn.closest('.ap-task');
+    showToast('[' + btn.dataset.act + '] ' + taskEl.querySelector('.ap-task-main strong').textContent + ' · acción simulada.');
+    return;
+  }
+  var taskEl2 = e.target.closest('.ap-task');
+  if (taskEl2) showToast('Detalle de tarea: ' + taskEl2.querySelector('.ap-task-main strong').textContent + ' (mockup).');
+});
+
+/* semáforo de carga */
+var LOAD = [2, 3, 2, 4, 2, 2, 3, 2, 2, 1, 1];
+var loadStrip = document.getElementById('loadStrip');
+loadStrip.innerHTML = HOURS.map(function (h, i) {
+  var max = Math.max.apply(null, LOAD);
+  var pct = 8 + (LOAD[i] / max) * 66;
+  var peak = LOAD[i] === max;
+  return '<div class="ap-load-bar' + (peak ? ' is-peak' : '') + (h === NOW_HOUR ? ' is-now' : '') + '" title="' + LOAD[i] + ' tareas a las ' + h + ':00">'
+    + '<div style="height:' + pct + '%"></div>'
+    + '<span>' + h + '</span>'
+    + '</div>';
+}).join('');
+
+/* nav */
+document.getElementById('nowBtn').addEventListener('click', function () {
+  var nowEl = timeline.querySelector('.ap-hour.is-now');
+  if (nowEl) nowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  showToast('Saltando a las 15:00 · ahora.');
+});
+document.getElementById('addTaskBtn').addEventListener('click', function () {
+  showToast('Abriría el creador de tarea manual (cuenta, tipo, hora, duración).');
+});
+</script>
+</body>
+</html>

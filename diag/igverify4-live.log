@@ -1,0 +1,24 @@
+15:40:56 ig-verify-live4 start: serial=863d00583048313238510ca492874c account=marczell.vibes video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-4.mp4
+15:40:56 caption (9 words): 'Fall in love with the process and trust it'
+15:40:57 PRE-CHECK OK wall=15:40:57.778: accessibility service answered a fresh dump on first try (0.7s)
+15:41:13 prepare OK: baseline_posts=11 baseline_tiles=6 wall=15:41:13.954
+15:41:14   evidence saved: igverify4-baseline.xml + .png
+15:41:16 media pushed -> /sdcard/Movies/SouthFarm/igverify-live4.mp4 wall=15:41:16.744
+15:41:18   [tap #1] center=(48,124) wall=15:41:18.325
+15:41:20   [tap #2] center=(360,734) wall=15:41:20.715
+15:41:22 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'instagram', 'stage': 'gallery', 'duration_label': '0:17'} wall=15:41:22.172
+15:41:22   [tap #3] center=(360,2250) wall=15:41:22.172
+15:41:37 ABORTED (fail-closed, no retry):
+15:41:37 Traceback (most recent call last):
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\ig-verify-live4.py", line 278, in main
+    adapter.publish(job, device, make_checkpoint(device))
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\instagram.py", line 265, in publish
+    editor = self._select_video(device, duration); checkpoint("editing", 45, evidence={"platform": "instagram", "stage": "editor"})
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\instagram.py", line 229, in _select_video
+    raise PublisherError("MEDIA_UNSELECTABLE", "No Instagram gallery candidate accepted the selection tap", retryable=True)
+southfarm_publisher.models.PublisherError: No Instagram gallery candidate accepted the selection tap
+
+15:41:38   evidence saved: igverify4-aborted.xml + .png
+15:41:38 RESULT: FAILURE
+15:41:38 cleaned pushed media file from device (post itself is NOT deleted)

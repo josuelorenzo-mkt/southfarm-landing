@@ -1,0 +1,191 @@
+[worker] config ok: api=http://127.0.0.1:3325 device_row=10 forbidden=[]
+[worker] run_once claimed=True elapsed=87.3s
+[worker] final status: {
+  "id": 10,
+  "workspace_id": 10,
+  "device_id": 10,
+  "social_account_id": 28,
+  "platform": "instagram",
+  "caption": "Stay present, tomorrow is not promised",
+  "word_count": 6,
+  "scheduled_for": "2026-08-17T13:56:31.185Z",
+  "status": "completed",
+  "current_step": "completed",
+  "progress_percent": 95,
+  "attempt_count": 1,
+  "final_action_at": "2026-08-17T13:57:46.319Z",
+  "published_at": "2026-08-17T13:58:35.660Z",
+  "verified_at": "2026-08-17T13:58:35.660Z",
+  "remote_post_identity": "marczell.vibes Stay present, tomorrow is not promised",
+  "error_code": null,
+  "error_message": null,
+  "cancel_requested_at": null,
+  "created_at": "2026-08-17T13:56:32.313Z",
+  "updated_at": "2026-08-17T13:58:35.660Z",
+  "completed_at": "2026-08-17T13:58:35.660Z",
+  "media": {
+    "id": 10,
+    "media_key": "10.mp4",
+    "original_filename": "MP-V-2.mp4",
+    "mime_type": "video/mp4",
+    "file_extension": "mp4",
+    "size_bytes": 14368435,
+    "sha256": "56b65a3ca93ad088230e8d38f4c569c0c7237938535b75972f5ef3b1bda3de57"
+  },
+  "events": [
+    {
+      "id": 73,
+      "from_status": null,
+      "to_status": "queued",
+      "current_step": "queued",
+      "message": null,
+      "actor_type": "user",
+      "created_at": "2026-08-17T13:56:32.313Z",
+      "payload": null
+    },
+    {
+      "id": 74,
+      "from_status": "queued",
+      "to_status": "claimed",
+      "current_step": "claimed",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:08.492Z",
+      "payload": null
+    },
+    {
+      "id": 75,
+      "from_status": "claimed",
+      "to_status": "preparing",
+      "current_step": "preparing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:08.731Z",
+      "payload": {
+        "progress_percent": 1
+      }
+    },
+    {
+      "id": 76,
+      "from_status": "preparing",
+      "to_status": "transferring",
+      "current_step": "transferring",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:28.418Z",
+      "payload": {
+        "progress_percent": 5
+      }
+    },
+    {
+      "id": 77,
+      "from_status": "transferring",
+      "to_status": "selecting_media",
+      "current_step": "selecting_media",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:35.872Z",
+      "payload": {
+        "progress_percent": 25,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "gallery",
+          "duration_label": "0:15"
+        }
+      }
+    },
+    {
+      "id": 78,
+      "from_status": "selecting_media",
+      "to_status": "editing",
+      "current_step": "editing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:38.883Z",
+      "payload": {
+        "progress_percent": 45,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "editor"
+        }
+      }
+    },
+    {
+      "id": 79,
+      "from_status": "editing",
+      "to_status": "captioning",
+      "current_step": "captioning",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:44.858Z",
+      "payload": {
+        "progress_percent": 65,
+        "evidence": {
+          "platform": "instagram",
+          "caption_words": 6
+        }
+      }
+    },
+    {
+      "id": 80,
+      "from_status": "captioning",
+      "to_status": "ready_to_publish",
+      "current_step": "ready_to_publish",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:45.647Z",
+      "payload": {
+        "progress_percent": 80,
+        "evidence": {
+          "platform": "instagram",
+          "stage": "share"
+        }
+      }
+    },
+    {
+      "id": 81,
+      "from_status": "ready_to_publish",
+      "to_status": "publishing",
+      "current_step": "publishing",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:46.319Z",
+      "payload": {
+        "progress_percent": 90,
+        "evidence": {
+          "platform": "instagram",
+          "final": "share"
+        }
+      }
+    },
+    {
+      "id": 82,
+      "from_status": "publishing",
+      "to_status": "verifying",
+      "current_step": "verifying",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:57:46.632Z",
+      "payload": {
+        "progress_percent": 95
+      }
+    },
+    {
+      "id": 83,
+      "from_status": "verifying",
+      "to_status": "completed",
+      "current_step": "completed",
+      "message": null,
+      "actor_type": "worker",
+      "created_at": "2026-08-17T13:58:35.660Z",
+      "payload": {
+        "result": null,
+        "errorCode": null,
+        "errorMessage": null,
+        "remotePostIdentity": "marczell.vibes Stay present, tomorrow is not promised",
+        "publishedAt": "2026-08-17T13:58:35.660Z",
+        "verifiedAt": "2026-08-17T13:58:35.660Z"
+      }
+    }
+  ]
+}

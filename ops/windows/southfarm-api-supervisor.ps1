@@ -56,6 +56,10 @@ try {
   $env:JWT_SECRET = [string]$runtimeConfig.jwt_secret
   $env:SOUTHFARM_JWT_LEGACY_SECRETS = [string]$runtimeConfig.legacy_jwt_secrets
   $env:NODE_ENV = "production"
+  # Access JWT de larga vida: la flota llama refresh en carreras concurrentes
+  # (register antes de cada tarea + pollers); con 15m el churn generaba
+  # reutilización de refresh tokens y logouts por reuse-detection.
+  $env:SOUTHFARM_ACCESS_TOKEN_TTL = "12h"
   # The workspace is intentionally manual_only for the current MVP phase.
   $env:SOUTHFARM_AUTO_PLANNER_ENABLED = "false"
   $env:SOUTHFARM_SCHEDULER_MODE = "fixed"
@@ -76,7 +80,14 @@ try {
     Add-Content -LiteralPath $OutputLog -Value ("{0:o} Starting SouthFarm API from {1}" -f (Get-Date), $BackendPath)
     Set-Location -LiteralPath $BackendPath
 
+    # Con EAP=Stop, PowerShell 5.1 convierte la PRIMERA línea que el backend
+    # escriba a stderr (redirigida con *>>) en NativeCommandError terminal,
+    # matando al supervisor y al árbol del proceso node. Bajamos EAP solo para
+    # la invocación: stderr sigue cayendo al log pero nunca termina el script.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     & $NodePath (Join-Path $BackendPath "dist\index.js") *>> $OutputLog
+    $ErrorActionPreference = $previousEap
     $exitCode = $LASTEXITCODE
     Add-Content -LiteralPath $ErrorLog -Value ("{0:o} SouthFarm API exited with code {1}; restarting in {2}s." -f (Get-Date), $exitCode, $restartDelay)
     Start-Sleep -Seconds $restartDelay

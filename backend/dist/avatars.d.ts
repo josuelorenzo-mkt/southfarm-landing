@@ -1,0 +1,12 @@
+import type { Express } from 'express';
+export declare const AVATARS_ROOT: string;
+declare const AVATAR_PLATFORMS: readonly ["instagram", "tiktok", "youtube"];
+export type AvatarPlatform = typeof AVATAR_PLATFORMS[number];
+export declare function sanitizeAvatarUsername(username: string): string;
+export declare function avatarFileName(platform: AvatarPlatform, username: string): string;
+export declare function avatarFilePath(platform: AvatarPlatform, username: string): string;
+export declare function avatarRelativeUrl(platform: AvatarPlatform, username: string): string;
+export declare function fetchInstagramProfilePicUrl(username: string): Promise<string>;
+export declare function ensureAvatarStored(platform: string, username: string): Promise<string>;
+export declare function registerAvatarRoutes(app: Express): void;
+export {};

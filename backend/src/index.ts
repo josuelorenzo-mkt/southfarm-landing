@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import https from 'https';
 import path from 'path';
-import { createHash, randomBytes, randomUUID } from 'crypto';
+import { existsSync, statSync } from 'fs';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 import { applyAuthMigrations, cleanupRefreshSessions } from './auth-migrations.js';
 import { applySchedulerMigrations } from './scheduler-migrations.js';
@@ -13,7 +14,10 @@ import { applyPublicationMigrations } from './publications-migrations.js';
 import { PublicationStore } from './publications-domain.js';
 import { registerPublicationRoutes } from './publications-routes.js';
 import { registerPublicationWorkerRoutes } from './publication-worker-routes.js';
-import { signSouthFarmJwt, verifySouthFarmJwt } from './jwt-config.js';
+import { ensureAvatarStored, fetchInstagramProfilePicUrl, registerAvatarRoutes } from './avatars.js';
+import { applyClusterMigrations } from './cluster-migrations.js';
+import { registerActivityPlanner, runActivityPlannerStartup, type PlannerDeps } from './activity-planner.js';
+import { signSouthFarmJwt, verifySouthFarmJwt, JWT_SECRET } from './jwt-config.js';
 import {
   BUENOS_AIRES_TIMEZONE,
   DAILY_MAX_WARMUP_SECONDS,
@@ -37,6 +41,8 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const PUBLICATION_MEDIA_ROOT = path.resolve(String(process.env.SOUTHFARM_PUBLICATION_MEDIA_ROOT || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'publish-media')));
+const APP_APK_PATH = path.resolve(String(process.env.SOUTHFARM_APP_APK_PATH || path.join(process.env.ProgramData || 'C:\\ProgramData', 'SouthFarm', 'app', 'southfarm.apk')));
+const APP_LINK_TTL_SECONDS = Math.min(3600, Math.max(60, Number(process.env.SOUTHFARM_APP_LINK_TTL_SECONDS || 900)));
 const PUBLISHER_WORKER_TOKEN = String(process.env.SOUTHFARM_PUBLISHER_WORKER_TOKEN || '').trim();
 const PUBLISHER_WORKER_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.SOUTHFARM_PUBLISHER_WORKER_ENABLED || 'false'));
 if (PUBLISHER_WORKER_ENABLED && !PUBLISHER_WORKER_TOKEN) {
@@ -82,6 +88,56 @@ const SUPPORTED_TASK_TYPES = new Set([
   'scan_tiktok',
   'scan_youtube',
 ]);
+
+// FIX 1 [CRÍTICO] — Task types the Android accessibility service can actually
+// execute (SouthFarmAccessibilityService.kt handles exactly these 6). The
+// claim endpoint only hands out these types: anything else (currently
+// publish_reel, which requires the web panel to upload the video first, and
+// any future type) stays pending/overdue in the queue instead of entering the
+// claim → silent discard → lease-expire → re-claim loop that inflated
+// attempt_count and left phantom "running" tasks.
+export const EXECUTABLE_TASK_TYPES = [
+  'warmup_ig',
+  'warmup_tiktok',
+  'warmup_youtube',
+  'scan_instagram',
+  'scan_tiktok',
+  'scan_youtube',
+] as const;
+
+const EXTRA_EXECUTABLE_TASK_TYPES_ENV = 'SOUTHFARM_EXTRA_EXECUTABLE_TYPES';
+
+/**
+ * Task types the claim endpoint may hand out: the base EXECUTABLE_TASK_TYPES
+ * plus any extra types enabled at runtime via SOUTHFARM_EXTRA_EXECUTABLE_TYPES
+ * (comma-separated, trimmed, empty entries dropped, deduplicated against the
+ * base). The env var is read on every call, so a process restart with a new
+ * value takes effect without code changes. This is how new types (currently
+ * publish_reel, which the Android app cannot execute yet) are staged on STAGING
+ * while production keeps the base list.
+ */
+export function executableTaskTypes(): string[] {
+  const extra = String(process.env[EXTRA_EXECUTABLE_TASK_TYPES_ENV] || '')
+    .split(',')
+    .map((type) => type.trim())
+    .filter((type) => type.length > 0);
+  const seen = new Set<string>(EXECUTABLE_TASK_TYPES);
+  const merged: string[] = [...EXECUTABLE_TASK_TYPES];
+  for (const type of extra) {
+    if (!seen.has(type)) {
+      seen.add(type);
+      merged.push(type);
+    }
+  }
+  return merged;
+}
+
+const configuredExtraExecutableTaskTypes = executableTaskTypes();
+if (configuredExtraExecutableTaskTypes.length > EXECUTABLE_TASK_TYPES.length) {
+  console.log(
+    `[Config] Extra executable task types: ${configuredExtraExecutableTaskTypes.slice(EXECUTABLE_TASK_TYPES.length).join(', ')}`,
+  );
+}
 
 // Middleware
 app.use(cors());
@@ -165,11 +221,12 @@ db.exec(`
     last_seen_at TEXT,
     workspace_id INTEGER,
     installation_id TEXT,
-    lifecycle_status TEXT DEFAULT 'active',
+    lifecycle_status TEXT DEFAULT 'enrolled',
     paired_at TEXT,
     revoked_at TEXT,
     last_auth_at TEXT,
     device_token_hash TEXT,
+    agent_token_version INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
   );
@@ -316,15 +373,130 @@ for (const [name, type] of [
   ['last_seen_at', 'TEXT'],
   ['workspace_id', 'INTEGER'],
   ['installation_id', 'TEXT'],
-  ['lifecycle_status', "TEXT DEFAULT 'active'"],
+  ['lifecycle_status', "TEXT DEFAULT 'enrolled'"],
   ['paired_at', 'TEXT'],
   ['revoked_at', 'TEXT'],
   ['last_auth_at', 'TEXT'],
   ['device_token_hash', 'TEXT'],
+  ['agent_token_version', 'INTEGER NOT NULL DEFAULT 1'],
 ] as const) {
   if (!deviceColumns.has(name)) {
     db.exec(`ALTER TABLE devices ADD COLUMN ${name} ${type}`);
   }
+}
+
+// Ciclo de vida explícito de un dispositivo:
+//   pending  → reservado, aún sin enrolamiento completo (Fase 2)
+//   enrolled → vinculado y autorizado al workspace
+//   revoked  → desvinculado; solo claim vuelve a enrolar
+// 'active' era el valor legado de enrolled: se normaliza (idempotente).
+db.exec(`
+  UPDATE devices
+  SET lifecycle_status = 'enrolled'
+  WHERE lifecycle_status IS NULL
+     OR TRIM(lifecycle_status) = ''
+     OR lifecycle_status = 'active'
+`);
+
+const workspaceColumns = new Set(
+  (db.prepare('PRAGMA table_info(workspaces)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!workspaceColumns.has('bridge_url')) {
+  db.exec('ALTER TABLE workspaces ADD COLUMN bridge_url TEXT');
+}
+if (!workspaceColumns.has('strict_bridge_mode')) {
+  db.exec('ALTER TABLE workspaces ADD COLUMN strict_bridge_mode INTEGER NOT NULL DEFAULT 0');
+}
+
+// ─── Screen streaming (Fase 2): registro de bridges, attachments y sesiones ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS screen_bridges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    token TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    public_url TEXT,
+    last_seen_at TEXT,
+    version TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+  );
+  CREATE TABLE IF NOT EXISTS bridge_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bridge_id INTEGER NOT NULL,
+    adb_serial TEXT NOT NULL,
+    device_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'unassigned',
+    last_seen_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (bridge_id) REFERENCES screen_bridges(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    UNIQUE (bridge_id, adb_serial)
+  );
+  CREATE TABLE IF NOT EXISTS screen_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    device_id INTEGER NOT NULL,
+    bridge_id INTEGER NOT NULL,
+    adb_serial TEXT,
+    nonce TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'requested',
+    expires_at TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id),
+    FOREIGN KEY (device_id) REFERENCES devices(id),
+    FOREIGN KEY (bridge_id) REFERENCES screen_bridges(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_screen_bridges_workspace ON screen_bridges(workspace_id);
+  CREATE INDEX IF NOT EXISTS idx_bridge_attachments_bridge ON bridge_attachments(bridge_id, adb_serial);
+  CREATE INDEX IF NOT EXISTS idx_bridge_attachments_device ON bridge_attachments(device_id);
+  CREATE INDEX IF NOT EXISTS idx_screen_sessions_device ON screen_sessions(device_id, status);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_screen_sessions_nonce ON screen_sessions(nonce);
+`);
+
+// Migración aditiva para bases ya creadas con la versión previa de Fase 2.
+const screenBridgeColumns = new Set(
+  (db.prepare('PRAGMA table_info(screen_bridges)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!screenBridgeColumns.has('public_url')) {
+  db.exec('ALTER TABLE screen_bridges ADD COLUMN public_url TEXT');
+}
+
+// ─── Fase 5: reconciliación y alertas ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reconciliation_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'warn',
+    device_id INTEGER,
+    bridge_id INTEGER,
+    adb_serial TEXT,
+    detail TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolved_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_recon_alerts_workspace ON reconciliation_alerts(workspace_id, status);
+  CREATE INDEX IF NOT EXISTS idx_recon_alerts_key ON reconciliation_alerts(workspace_id, kind, device_id, adb_serial);
+`);
+
+// Contador de fallos de autenticación reportados por cada bridge (heartbeat).
+const screenBridgeAuditColumns = new Set(
+  (db.prepare('PRAGMA table_info(screen_bridges)').all() as Array<{ name: string }>)
+    .map((column) => column.name),
+);
+if (!screenBridgeAuditColumns.has('auth_failures')) {
+  db.exec('ALTER TABLE screen_bridges ADD COLUMN auth_failures INTEGER NOT NULL DEFAULT 0');
 }
 
 const taskRunColumns = new Set(
@@ -366,6 +538,7 @@ db.exec(`
   applySchedulerMigrations(db);
   applyAuthMigrations(db);
   applyPublicationMigrations(db);
+  applyClusterMigrations(db);
   cleanupRefreshSessions(db, new Date().toISOString());
 
 const publicationStore = new PublicationStore(db);
@@ -425,13 +598,62 @@ function deviceView(device: any): any {
   const currentTask = Number.isInteger(Number(device.id))
     ? activeTaskForDevice(Number(device.id))
     : null;
+  // Enrolamiento normalizado: 'active' (legado) se reporta como 'enrolled'.
+  const enrollmentStatus = device.lifecycle_status === 'revoked'
+    ? 'revoked'
+    : device.lifecycle_status === 'pending'
+      ? 'pending'
+      : 'enrolled';
   const view: any = {
     ...device,
     alias: device.device_alias || null,
     display_name: device.device_alias || device.device_name || 'Android device',
     online,
-    device_status: device.lifecycle_status || 'active',
+    device_status: enrollmentStatus,
     connection_status: online ? 'online' : device.last_seen_at ? 'offline' : 'never_seen',
+    // Señales separadas (cada una con su fuente de verdad y timestamp):
+    // enrollment lo controla la API; agent es el heartbeat autenticado del
+    // teléfono. attachment (USB) y screen (sesión) se suman en la Fase 2.
+    enrollment: {
+      status: enrollmentStatus,
+      paired_at: device.paired_at || null,
+      revoked_at: device.revoked_at || null,
+    },
+    agent: {
+      last_seen_at: device.last_seen_at || null,
+      last_auth_at: device.last_auth_at || null,
+      online,
+      app_version: device.app_version || null,
+    },
+    // Señal USB: el attachment vigente en algún bridge registrado del workspace.
+    attachment: (() => {
+      const att = db.prepare(`
+        SELECT ba.adb_serial, ba.last_seen_at, sb.id AS bridge_id, sb.name AS bridge_name
+        FROM bridge_attachments ba
+        JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE ba.device_id = ? AND sb.workspace_id = ?
+        ORDER BY ba.last_seen_at DESC LIMIT 1
+      `).get(device.id, device.workspace_id) as any | undefined;
+      return att ? {
+        bridge_id: att.bridge_id,
+        bridge_name: att.bridge_name,
+        adb_serial: att.adb_serial,
+        last_seen_at: att.last_seen_at || null,
+      } : null;
+    })(),
+    // Señal pantalla: sesión de visualización activa (requested/live) si la hay.
+    screen: (() => {
+      const session = db.prepare(`
+        SELECT id, status, created_at FROM screen_sessions
+        WHERE device_id = ? AND status IN ('requested', 'live')
+        ORDER BY id DESC LIMIT 1
+      `).get(device.id) as any | undefined;
+      return session ? {
+        session_id: session.id,
+        status: session.status,
+        created_at: session.created_at,
+      } : null;
+    })(),
     current_task: currentTask ? {
       id: currentTask.id,
       task_type: currentTask.task_type,
@@ -490,7 +712,11 @@ function findDeviceForUser(
     `).get(userId, deviceValue);
   }
   if (!device && !preferStableId && deviceValue && /^\d+$/.test(deviceValue)) {
-    device = db.prepare('SELECT * FROM devices WHERE user_id = ? AND id = ?').get(userId, Number(deviceValue));
+    device = db.prepare(`
+      SELECT * FROM devices
+      WHERE user_id = ? AND id = ? AND lifecycle_status != 'revoked'
+      ORDER BY id DESC LIMIT 1
+    `).get(userId, Number(deviceValue));
   }
   return device || null;
 }
@@ -499,11 +725,14 @@ function findDeviceFromPayload(userId: number, payload: Record<string, unknown>)
   return findDeviceForUser(userId, payload.device_id, true, payload.installation_id);
 }
 
+type DeviceTouchMode = 'presence' | 'register' | 'enroll';
+
 function touchDevice(
   userId: number,
   payload: Record<string, unknown>,
-  options: { allowCreate?: boolean } = {},
+  options: { allowCreate?: boolean; mode?: DeviceTouchMode } = {},
 ): any {
+  const mode: DeviceTouchMode = options.mode ?? (options.allowCreate ? 'enroll' : 'register');
   const stableDeviceId = stringValue(payload.device_id);
   if (!stableDeviceId) throw new Error('device_id required');
   const installationId = deviceInstallationId(payload);
@@ -518,33 +747,71 @@ function touchDevice(
   const existing = findDeviceFromPayload(userId, payload) as any;
 
   if (existing) {
-    db.prepare(`
-      UPDATE devices
-      SET device_name = COALESCE(?, device_name),
-          android_version = COALESCE(?, android_version),
-          app_version = COALESCE(?, app_version),
-          device_id = ?, installation_id = ?, workspace_id = ?,
-          lifecycle_status = 'active', revoked_at = NULL,
-          last_seen_at = ?, last_auth_at = ?
-      WHERE id = ?
-    `).run(
-      deviceName,
-      androidVersion,
-      appVersion,
-      stableDeviceId,
-      installationId,
-      workspaceId,
-      seenAt,
-      seenAt,
-      existing.id,
-    );
+    if (mode === 'presence') {
+      // Heartbeat: refresco de presencia únicamente. La identidad
+      // (device_id/installation_id/workspace) y el ciclo de vida NO se tocan:
+      // ni re-vincular ni reactivar live aquí, eso solo ocurre en claim.
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(deviceName, androidVersion, appVersion, seenAt, seenAt, existing.id);
+    } else if (mode === 'enroll') {
+      // Re-claim de una instalación existente: (re)enrola explícitamente.
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            lifecycle_status = 'enrolled', revoked_at = NULL, paired_at = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(
+        deviceName,
+        androidVersion,
+        appVersion,
+        stableDeviceId,
+        installationId,
+        workspaceId,
+        seenAt,
+        seenAt,
+        seenAt,
+        existing.id,
+      );
+    } else {
+      // register: refresca identidad reportada por el teléfono, sin tocar
+      // lifecycle ni tokens (la rotación vive únicamente en claim).
+      db.prepare(`
+        UPDATE devices
+        SET device_name = COALESCE(?, device_name),
+            android_version = COALESCE(?, android_version),
+            app_version = COALESCE(?, app_version),
+            device_id = ?, installation_id = ?, workspace_id = ?,
+            last_seen_at = ?, last_auth_at = ?
+        WHERE id = ?
+      `).run(
+        deviceName,
+        androidVersion,
+        appVersion,
+        stableDeviceId,
+        installationId,
+        workspaceId,
+        seenAt,
+        seenAt,
+        existing.id,
+      );
+    }
   } else if (options.allowCreate) {
     db.prepare(`
       INSERT INTO devices
         (user_id, workspace_id, device_id, installation_id, device_name,
          android_version, app_version, lifecycle_status, paired_at,
          last_seen_at, last_auth_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)
     `).run(
       userId,
       workspaceId,
@@ -565,10 +832,19 @@ function touchDevice(
     .get(workspaceId, installationId);
 }
 
-function issueDeviceToken(deviceId: number): string {
-  const rawToken = `sfd_${randomBytes(32).toString('base64url')}`;
-  db.prepare('UPDATE devices SET device_token_hash = ?, last_auth_at = ? WHERE id = ?')
-    .run(hashInviteToken(rawToken), nowIso(), deviceId);
+function issueDeviceToken(deviceId: number, options: { rotateVersion?: boolean } = {}): string {
+  // El token embebe la versión del agente: subir agent_token_version invalida
+  // de golpe todos los tokens emitidos para la versión anterior, aun cuando el
+  // hash en DB se restaurara de un backup. La rotación de versión se hace en
+  // claim (re-enrolamiento) y al revocar.
+  const device = db.prepare('SELECT agent_token_version FROM devices WHERE id = ?').get(deviceId) as any;
+  const nextVersion = Number(device?.agent_token_version || 1) + (options.rotateVersion ? 1 : 0);
+  const rawToken = `sfd_v${nextVersion}_${randomBytes(32).toString('base64url')}`;
+  db.prepare(`
+    UPDATE devices
+    SET device_token_hash = ?, agent_token_version = ?, last_auth_at = ?
+    WHERE id = ?
+  `).run(hashInviteToken(rawToken), nextVersion, nowIso(), deviceId);
   return rawToken;
 }
 
@@ -1294,6 +1570,41 @@ function rotateRefreshSession(rawToken: string, userAgent: string | null): Rotat
 
     const now = nowIso();
     if (current.revoked_at) {
+      // EXCEPCIÓN (carrera de refresh simultáneo): el cliente Flutter no tiene
+      // single-flight en refreshSession; con varios flujos concurrentes el
+      // mismo token vencido puede llegar dos veces: el primero rota, el resto
+      // llega con el ya-revocado y antes se mataba la familia entera =
+      // logout masivo en los teléfonos. Si la rotación es reciente (gracia) y
+      // la familia conserva al menos una sesión activa, se emite una sesión
+      // hermana nueva en vez de revocar todo. Fuera de gracia o sin hermana
+      // activa sigue siendo tratarlo como robo y revocar la familia.
+      const revokedAtMs = Date.parse(current.revoked_at);
+      const graceMs = Number(process.env.SOUTHFARM_REFRESH_REUSE_GRACE_MS || '60000');
+      if (Number.isFinite(revokedAtMs) && Date.now() - revokedAtMs <= graceMs) {
+        const activeSibling = db.prepare(`
+          SELECT id FROM refresh_sessions
+          WHERE family_id = ? AND revoked_at IS NULL AND expires_at > ?
+          LIMIT 1
+        `).get(current.family_id, now) as { id: number } | undefined;
+        if (activeSibling) {
+          const graceRawToken = `sfr_${randomBytes(48).toString('base64url')}`;
+          const graceHash = hashInviteToken(graceRawToken);
+          const graceExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+          db.prepare(`
+            INSERT INTO refresh_sessions
+              (user_id, family_id, token_hash, created_at, expires_at, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            current.user_id,
+            current.family_id,
+            graceHash,
+            now,
+            graceExpiresAt,
+            userAgent,
+          );
+          return { userId: Number(current.user_id), refreshToken: graceRawToken };
+        }
+      }
       // A rotated token must never be accepted twice. Reuse revokes the
       // complete family so a stolen token cannot keep a session alive.
       db.prepare(`
@@ -1347,7 +1658,9 @@ function revokeRefreshToken(rawToken: string): void {
 
 function workspaceMembership(userId: number): any | null {
   return db.prepare(`
-    SELECT wm.*, w.name AS workspace_name, w.owner_user_id
+    SELECT wm.*, w.name AS workspace_name, w.owner_user_id,
+           w.bridge_url AS workspace_bridge_url,
+           w.strict_bridge_mode AS workspace_strict_bridge_mode
     FROM workspace_members wm
     JOIN workspaces w ON w.id = wm.workspace_id
     WHERE wm.user_id = ? AND wm.status = 'active'
@@ -1370,6 +1683,16 @@ function workspaceUserIds(userId: number): number[] {
 function scopedUsers(userId: number): { ids: number[]; placeholders: string } {
   const ids = workspaceUserIds(userId);
   return { ids, placeholders: ids.map(() => '?').join(', ') };
+}
+
+// Un token de dispositivo (authType 'device') solo debe ver el historial que
+// ESE teléfono generó en su workspace; los JWT de usuario (command center)
+// siguen viendo todo el workspace. Devuelve el devices.id propio del token,
+// o null si el llamante es un usuario.
+function deviceScopedId(req: any): number | null {
+  return req.user?.authType === 'device' && Number.isInteger(Number(req.user.deviceId))
+    ? Number(req.user.deviceId)
+    : null;
 }
 
 type SchedulerControlMode = 'normal' | 'manual_only' | 'paused';
@@ -1575,7 +1898,7 @@ db.transaction(() => {
   `).run();
   db.prepare(`
     UPDATE devices
-    SET lifecycle_status = 'active'
+    SET lifecycle_status = 'enrolled'
     WHERE lifecycle_status IS NULL OR TRIM(lifecycle_status) = ''
   `).run();
   db.prepare(`
@@ -2210,12 +2533,16 @@ function auth(req: any, res: any, next: any) {
   } catch {
     // Device tokens are intentionally opaque and scoped to one paired
     // installation. They let the mobile agent keep working after a user JWT
-    // expires, without giving the phone a team-management role.
+    // expires, without giving the phone a team-management role. Tokens embed
+    // their agent_token_version (sfd_v<N>_...; sin prefijo = legado v1): una
+    // fila cuya versión avanzó rechaza todo token emitido antes de la rotación.
+    const versionMatch = /^sfd_v(\d+)_/.exec(bearer);
+    const tokenVersion = versionMatch ? Number(versionMatch[1]) : 1;
     const device: any = db.prepare(`
       SELECT * FROM devices
-      WHERE device_token_hash = ? AND lifecycle_status = 'active'
+      WHERE device_token_hash = ? AND lifecycle_status = 'enrolled' AND agent_token_version = ?
       LIMIT 1
-    `).get(hashInviteToken(bearer));
+    `).get(hashInviteToken(bearer), tokenVersion);
     if (!device || !device.workspace_id) return res.status(401).json({ error: 'Invalid token' });
     const membership: any = db.prepare(`
       SELECT wm.* FROM workspace_members wm
@@ -2276,6 +2603,8 @@ function authUserView(userId: number): any | null {
       id: membership.workspace_id,
       name: membership.workspace_name,
       owner_user_id: membership.owner_user_id,
+      bridge_url: membership.workspace_bridge_url || null,
+      strict_bridge_mode: !!membership.workspace_strict_bridge_mode,
     },
   };
 }
@@ -2397,9 +2726,356 @@ app.get('/api/team/members', auth, (req: any, res) => {
     workspace: {
       id: req.user.workspaceId,
       name: workspaceMembership(req.user.userId)?.workspace_name || 'SouthFarm workspace',
+      bridge_url: workspaceMembership(req.user.userId)?.workspace_bridge_url || null,
+      strict_bridge_mode: !!workspaceMembership(req.user.userId)?.workspace_strict_bridge_mode,
     },
     members: members.map(memberUserView),
   });
+});
+
+app.patch('/api/team/workspace', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const membership = workspaceMembership(req.user.userId);
+  if (!membership) return res.status(403).json({ error: 'User is not a member of a workspace' });
+
+  if ('bridge_url' in req.body) {
+    const rawBridgeUrl = stringValue(req.body.bridge_url);
+    let bridgeUrl: string | null = null;
+    if (rawBridgeUrl) {
+      try {
+        const parsed = new URL(rawBridgeUrl);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        bridgeUrl = parsed.toString().replace(/\/$/, '');
+      } catch {
+        return res.status(400).json({ error: 'bridge_url must be a valid http(s) URL' });
+      }
+    }
+    db.prepare('UPDATE workspaces SET bridge_url = ? WHERE id = ?').run(bridgeUrl, membership.workspace_id);
+  }
+
+  if ('strict_bridge_mode' in req.body) {
+    // Solo el owner enciende el modo estricto: exige bridges registrados y
+    // capabilities firmadas; admins operan, el owner decide la política.
+    if (normalizeRole(membership.role) !== 'owner') {
+      return res.status(403).json({ error: 'Only the workspace owner can change strict_bridge_mode' });
+    }
+    db.prepare('UPDATE workspaces SET strict_bridge_mode = ? WHERE id = ?')
+      .run(req.body.strict_bridge_mode ? 1 : 0, membership.workspace_id);
+  }
+
+  const updated = db.prepare('SELECT bridge_url, strict_bridge_mode FROM workspaces WHERE id = ?').get(membership.workspace_id) as any;
+  res.json({
+    workspace: {
+      id: membership.workspace_id,
+      name: membership.workspace_name,
+      bridge_url: updated?.bridge_url || null,
+      strict_bridge_mode: !!updated?.strict_bridge_mode,
+    },
+  });
+});
+
+// ─── Screen bridges (Fase 2): registro, heartbeat, attachments y sesiones ───
+// El token del bridge vive en DB (columna token) porque es la llave HMAC con
+// la que la API firma capabilities de un solo uso que el bridge valida
+// offline. Nunca se devuelve por ninguna ruta de lectura.
+const BRIDGE_CAPABILITY_TTL_SECONDS = Math.min(
+  300,
+  Math.max(30, Number(process.env.SOUTHFARM_BRIDGE_CAPABILITY_TTL_SECONDS || 120)),
+);
+
+function screenBridgeAuth(req: any): any | null {
+  const header = req.headers.authorization || '';
+  if (!header.startsWith('Bearer ')) return null;
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE token_hash = ? LIMIT 1',
+  ).get(hashInviteToken(header.slice(7))) as any;
+  return bridge || null;
+}
+
+function bridgeView(bridge: any): any {
+  const online = typeof bridge.last_seen_at === 'string'
+    && Date.now() - Date.parse(bridge.last_seen_at) <= 120_000;
+  const attachments = db.prepare(`
+    SELECT ba.id, ba.adb_serial, ba.device_id, ba.status, ba.last_seen_at,
+           COALESCE(d.device_alias, d.device_name) AS device_alias
+    FROM bridge_attachments ba
+    LEFT JOIN devices d ON d.id = ba.device_id
+    WHERE ba.bridge_id = ?
+    ORDER BY ba.adb_serial
+  `).all(bridge.id);
+  return {
+    id: bridge.id,
+    workspace_id: bridge.workspace_id,
+    name: bridge.name,
+    online,
+    last_seen_at: bridge.last_seen_at || null,
+    version: bridge.version || null,
+    // URL pública por bridge (ej. screen-us.southfarm.tech): un workspace puede
+    // tener varias computadoras con teléfonos y cada bridge sirve su propio
+    // host de streaming.
+    public_url: bridge.public_url || null,
+    attachments,
+  };
+}
+
+app.get('/api/bridges', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridges = db.prepare(
+    'SELECT * FROM screen_bridges WHERE workspace_id = ? ORDER BY id',
+  ).all(req.user.workspaceId) as any[];
+  res.json({ bridges: bridges.map(bridgeView) });
+});
+
+app.post('/api/bridges', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const name = stringValue(req.body.name)?.trim() || 'Screen Bridge';
+  let publicUrl: string | null = null;
+  if (stringValue(req.body.public_url)) {
+    try {
+      const parsed = new URL(String(req.body.public_url));
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+      publicUrl = parsed.toString().replace(/\/$/, '');
+    } catch {
+      return res.status(400).json({ error: 'public_url must be a valid http(s) URL' });
+    }
+  }
+  const rawToken = `sfb_${randomBytes(32).toString('base64url')}`;
+  const result = db.prepare(
+    'INSERT INTO screen_bridges (workspace_id, name, token, token_hash, public_url) VALUES (?, ?, ?, ?, ?)',
+  ).run(req.user.workspaceId, name, rawToken, hashInviteToken(rawToken), publicUrl);
+  res.status(201).json({
+    bridge: { id: Number(result.lastInsertRowid), workspace_id: req.user.workspaceId, name, public_url: publicUrl },
+    // El token se muestra UNA vez: se pega en la config del runtime del bridge.
+    token: rawToken,
+  });
+});
+
+app.patch('/api/bridges/:id', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?',
+  ).get(req.params.id, req.user.workspaceId) as any;
+  if (!bridge) return res.status(404).json({ error: 'Bridge not found' });
+
+  if ('name' in req.body) {
+    const name = stringValue(req.body.name)?.trim();
+    if (name) db.prepare('UPDATE screen_bridges SET name = ? WHERE id = ?').run(name, bridge.id);
+  }
+  if ('public_url' in req.body) {
+    const raw = stringValue(req.body.public_url);
+    let publicUrl: string | null = null;
+    if (raw) {
+      try {
+        const parsed = new URL(raw);
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('bad protocol');
+        publicUrl = parsed.toString().replace(/\/$/, '');
+      } catch {
+        return res.status(400).json({ error: 'public_url must be a valid http(s) URL' });
+      }
+    }
+    db.prepare('UPDATE screen_bridges SET public_url = ? WHERE id = ?').run(publicUrl, bridge.id);
+  }
+  const updated = db.prepare('SELECT * FROM screen_bridges WHERE id = ?').get(bridge.id) as any;
+  res.json({ bridge: bridgeView(updated) });
+});
+
+app.delete('/api/bridges/:id', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?',
+  ).get(req.params.id, req.user.workspaceId) as any;
+  if (!bridge) return res.status(404).json({ error: 'Bridge not found' });
+  db.transaction(() => {
+    db.prepare('DELETE FROM bridge_attachments WHERE bridge_id = ?').run(bridge.id);
+    db.prepare(`
+      UPDATE screen_sessions SET status = 'ended', ended_at = ?
+      WHERE bridge_id = ? AND status IN ('requested', 'live')
+    `).run(nowIso(), bridge.id);
+    db.prepare('DELETE FROM screen_bridges WHERE id = ?').run(bridge.id);
+  })();
+  res.json({ ok: true });
+});
+
+app.post('/api/bridges/:id/rotate-token', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?',
+  ).get(req.params.id, req.user.workspaceId) as any;
+  if (!bridge) return res.status(404).json({ error: 'Bridge not found' });
+  const rawToken = `sfb_${randomBytes(32).toString('base64url')}`;
+  db.prepare('UPDATE screen_bridges SET token = ?, token_hash = ? WHERE id = ?')
+    .run(rawToken, hashInviteToken(rawToken), bridge.id);
+  res.json({ token: rawToken });
+});
+
+app.patch('/api/bridges/:id/attachments', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const bridge = db.prepare(
+    'SELECT * FROM screen_bridges WHERE id = ? AND workspace_id = ?',
+  ).get(req.params.id, req.user.workspaceId) as any;
+  if (!bridge) return res.status(404).json({ error: 'Bridge not found' });
+  const serial = stringValue(req.body.serial);
+  if (!serial) return res.status(400).json({ error: 'serial is required' });
+  const attachment = db.prepare(
+    'SELECT * FROM bridge_attachments WHERE bridge_id = ? AND adb_serial = ?',
+  ).get(bridge.id, serial) as any;
+  if (!attachment) return res.status(404).json({ error: 'Attachment not reported by this bridge yet' });
+
+  if (req.body.device_id === null || req.body.device_id === '') {
+    db.prepare("UPDATE bridge_attachments SET device_id = NULL, status = 'unassigned' WHERE id = ?")
+      .run(attachment.id);
+    return res.json({ ok: true, attachment: bridgeView(bridge).attachments.find((a: any) => a.id === attachment.id) });
+  }
+
+  const device = db.prepare(`
+    SELECT * FROM devices WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+  `).get(Number(req.body.device_id), req.user.workspaceId) as any;
+  if (!device) return res.status(404).json({ error: 'Device not found in this workspace' });
+
+  // Un device solo puede estar pegado a un serial por bridge: despejo otros.
+  db.prepare('UPDATE bridge_attachments SET device_id = NULL, status = ? WHERE bridge_id = ? AND device_id = ?')
+    .run('unassigned', bridge.id, device.id);
+  db.prepare("UPDATE bridge_attachments SET device_id = ?, status = 'assigned' WHERE id = ?")
+    .run(device.id, attachment.id);
+  res.json({ ok: true, attachment: bridgeView(bridge).attachments.find((a: any) => a.id === attachment.id) });
+});
+
+app.post('/api/bridges/heartbeat', (req: any, res) => {
+  const bridge = screenBridgeAuth(req);
+  if (!bridge) return res.status(401).json({ error: 'Invalid bridge token' });
+  const now = nowIso();
+  const serials: unknown = req.body?.serials;
+  const list = Array.isArray(serials) ? serials.map(s => stringValue(s)).filter(Boolean) : [];
+  db.transaction(() => {
+    db.prepare('UPDATE screen_bridges SET last_seen_at = ?, version = ?, auth_failures = ? WHERE id = ?')
+      .run(now, stringValue(req.body?.version), Math.max(0, Number(req.body?.auth_failures || 0)), bridge.id);
+    const insert = db.prepare(`
+      INSERT INTO bridge_attachments (bridge_id, adb_serial, status, last_seen_at)
+      VALUES (?, ?, 'unassigned', ?)
+      ON CONFLICT(bridge_id, adb_serial) DO UPDATE SET last_seen_at = excluded.last_seen_at
+    `);
+    for (const serial of list) insert.run(bridge.id, serial, now);
+    db.prepare(`
+      UPDATE bridge_attachments SET status =
+        CASE WHEN device_id IS NOT NULL THEN 'assigned' ELSE 'unassigned' END
+      WHERE bridge_id = ? AND last_seen_at < ?
+    `).run(bridge.id, now);
+  })();
+  res.json({ ok: true, now });
+});
+
+app.get('/api/bridges/session-check', (req: any, res) => {
+  const bridge = screenBridgeAuth(req);
+  if (!bridge) return res.status(401).json({ error: 'Invalid bridge token' });
+  const sessionId = Number(req.query.session_id);
+  const session = db.prepare(
+    'SELECT * FROM screen_sessions WHERE id = ? AND bridge_id = ?',
+  ).get(sessionId, bridge.id) as any;
+  if (!session) return res.json({ status: 'unknown' });
+  if (session.status === 'requested' && Date.parse(session.expires_at) > Date.now()) {
+    db.prepare("UPDATE screen_sessions SET status = 'live' WHERE id = ?").run(session.id);
+    return res.json({ status: 'live' });
+  }
+  res.json({ status: session.status });
+});
+
+function signScreenCapability(payload: Record<string, unknown>, bridgeToken: string): string {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = createHmac('sha256', bridgeToken).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+app.post('/api/devices/:id/screen-session', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  const device = db.prepare(`
+    SELECT * FROM devices WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+  `).get(req.params.id, req.user.workspaceId) as any;
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+
+  const workspace = db.prepare(
+    'SELECT * FROM workspaces WHERE id = ?',
+  ).get(req.user.workspaceId) as any;
+  if (!workspace?.strict_bridge_mode) {
+    return res.status(409).json({
+      error: 'Strict bridge mode is disabled for this workspace',
+      code: 'STRICT_MODE_DISABLED',
+    });
+  }
+
+  const attachment = db.prepare(`
+    SELECT ba.*, sb.token AS bridge_token, sb.public_url AS bridge_public_url
+    FROM bridge_attachments ba
+    JOIN screen_bridges sb ON sb.id = ba.bridge_id
+    WHERE ba.device_id = ? AND sb.workspace_id = ?
+    ORDER BY ba.last_seen_at DESC LIMIT 1
+  `).get(device.id, req.user.workspaceId) as any;
+  if (!attachment) {
+    return res.status(409).json({
+      error: 'Device is not attached to any registered bridge',
+      code: 'NO_ACTIVE_ATTACHMENT',
+    });
+  }
+
+  const nonce = randomBytes(16).toString('hex');
+  const expiresAt = new Date(Date.now() + BRIDGE_CAPABILITY_TTL_SECONDS * 1000);
+  const sessionResult = db.prepare(`
+    INSERT INTO screen_sessions (workspace_id, device_id, bridge_id, adb_serial, nonce, status, expires_at)
+    VALUES (?, ?, ?, ?, ?, 'requested', ?)
+  `).run(req.user.workspaceId, device.id, attachment.bridge_id, attachment.adb_serial, nonce, expiresAt.toISOString());
+  const sessionId = Number(sessionResult.lastInsertRowid);
+
+  const capability = signScreenCapability({
+    v: 1,
+    aud: 'screen-bridge',
+    session: sessionId,
+    ws: req.user.workspaceId,
+    dev: device.id,
+    br: attachment.bridge_id,
+    serial: attachment.adb_serial,
+    exp: Math.floor(expiresAt.getTime() / 1000),
+    nonce,
+  }, attachment.bridge_token);
+
+  // Host de streaming: primero la URL pública del bridge dueño del attachment
+  // (soporta varias computadoras por workspace), con fallback al bridge_url
+  // del workspace para el caso de un solo bridge.
+  const bridgeHost = String(attachment.bridge_public_url || workspace.bridge_url || '')
+    .replace(/\/$/, '')
+    .replace(/^http/i, 'ws');
+  if (!bridgeHost) {
+    return res.status(409).json({
+      error: 'Bridge has no public URL and workspace has no bridge_url configured',
+      code: 'NO_BRIDGE_URL',
+    });
+  }
+
+  res.status(201).json({
+    session_id: sessionId,
+    expires_at: expiresAt.toISOString(),
+    stream_url: `${bridgeHost}/ws/stream/${encodeURIComponent(attachment.adb_serial)}?cap=${encodeURIComponent(capability)}`,
+  });
+});
+
+// ─── App móvil: descarga autenticada (el APK NO es público) ───
+function signAppDownloadLink(expiresAtEpoch: number): string {
+  const payload = String(expiresAtEpoch);
+  const sig = createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32);
+  return `${payload}.${sig}`;
+}
+
+app.post('/api/devices/app/install-link', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  const expiresAt = Math.floor(Date.now() / 1000) + APP_LINK_TTL_SECONDS;
+  res.json({
+    path: `/api/devices/app/download/${signAppDownloadLink(expiresAt)}`,
+    expires_at: new Date(expiresAt * 1000).toISOString(),
+    size_bytes: statSync(APP_APK_PATH).size,
+  });
+});
+
+app.get('/api/devices/app/download/:token', (req, res) => {
+  const [payload, sig] = String(req.params.token || '').split('.');
+  const expected = payload ? createHmac('sha256', JWT_SECRET).update(`app-download:${payload}`).digest('hex').slice(0, 32) : '';
+  const sigBuf = Buffer.from(String(sig || ''), 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  if (!payload || !sig || sigBuf.length !== expBuf.length || !timingSafeEqual(sigBuf, expBuf)) {
+    return res.status(403).json({ error: 'Invalid download link' });
+  }
+  if (Number(payload) * 1000 < Date.now()) return res.status(410).json({ error: 'Download link expired' });
+  if (!existsSync(APP_APK_PATH)) return res.status(404).json({ error: 'APK no desplegado en el servidor' });
+  res.download(APP_APK_PATH, 'southfarm.apk');
 });
 
 app.get('/api/team/invites', auth, requireRole('owner', 'admin'), (req: any, res) => {
@@ -2562,8 +3238,8 @@ app.post('/api/devices/claim', auth, requireRole('owner', 'admin', 'operator'), 
           AND (installation_id IS NULL OR installation_id != ?)
       `).run(seenAt, req.user.workspaceId, payload.device_id, installationId);
 
-      const claimed = touchDevice(req.user.userId, payload, { allowCreate: true });
-      deviceToken = issueDeviceToken(Number(claimed.id));
+      const claimed = touchDevice(req.user.userId, payload, { allowCreate: true, mode: 'enroll' });
+      deviceToken = issueDeviceToken(Number(claimed.id), { rotateVersion: true });
       db.prepare(`
         UPDATE device_pairings
         SET consumed_at = ?, consumed_by_user_id = ?, consumed_device_id = ?
@@ -2589,9 +3265,23 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
         code: 'DEVICE_NOT_PAIRED',
       });
     }
-    const device = touchDevice(req.user.userId, req.body);
-    const deviceToken = issueDeviceToken(Number(device.id));
-    res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+    const device = touchDevice(req.user.userId, req.body, { mode: 'register' });
+    // Este endpoint SOLO re-registra dispositivos ya emparejados (si no existe
+    // la fila responde 409 y el emparejamiento real ocurre en /devices/claim).
+    //
+    // Cuándo devolver device_token:
+    // - JWT de USUARIO → SÍ: el teléfono puede haber perdido su device_token
+    //   (reinstalación borra SharedPreferences) y necesita uno para que el
+    //   servicio de accesibilidad pueda hacer heartbeat. Es seguro: el register
+    //   corre al inicio de la app, no durante tareas.
+    // - Token de DISPOSITIVO → NO: rotar invalidaría el token que la tarea
+    //   remota capturó al reclamar, rompiendo tareas en curso.
+    if (req.user.authType === 'user') {
+      const deviceToken = issueDeviceToken(Number(device.id));
+      return res.status(200).json({ device: deviceView(device), device_token: deviceToken });
+    }
+    // Llamada con token de dispositivo: solo refresh de presencia.
+    res.status(200).json({ device: deviceView(device) });
   } catch (error: any) {
     res.status(error.code === 'DEVICE_NOT_PAIRED' ? 409 : 400).json({
       error: error.message || 'device_id required',
@@ -2601,8 +3291,13 @@ app.post('/api/devices/register', auth, requireRole('owner', 'admin', 'operator'
 });
 
 app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
+  // Presence comes from the paired device agent itself. A user JWT must not
+  // be able to keep a device row "online" on the phone's behalf.
+  if (req.user.authType !== 'device') {
+    return res.status(403).json({ error: 'Device token required', code: 'DEVICE_TOKEN_REQUIRED' });
+  }
   try {
-    const device = touchDevice(req.user.userId, req.body);
+    const device = touchDevice(req.user.userId, req.body, { mode: 'presence' });
     res.json({
       ok: true,
       server_time: nowIso(),
@@ -2617,10 +3312,12 @@ app.post('/api/devices/heartbeat', auth, requireRole('owner', 'admin', 'operator
 });
 
 app.get('/api/devices', auth, (req: any, res) => {
+  // Incluye revocados al final: la flota debe poder mostrarlos como estado
+  // (Fase 4); los consumidores que ejecutan acciones ya filtran lifecycle.
   const devices = db.prepare(`
     SELECT * FROM devices
-    WHERE workspace_id = ? AND lifecycle_status != 'revoked'
-    ORDER BY id
+    WHERE workspace_id = ?
+    ORDER BY (lifecycle_status = 'revoked') ASC, id
   `).all(req.user.workspaceId);
   res.json({ devices: devices.map(deviceView) });
 });
@@ -2863,15 +3560,264 @@ app.patch('/api/devices/:id', auth, requireRole('owner', 'admin'), (req: any, re
 
 app.delete('/api/devices/:id', auth, requireRole('owner', 'admin'), (req: any, res) => {
   const now = nowIso();
-  const r = db.prepare(`
-    UPDATE devices
-    SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL
-    WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
-  `).run(now, req.params.id, req.user.workspaceId);
+  const r = db.transaction(() => {
+    const update = db.prepare(`
+      UPDATE devices
+      SET lifecycle_status = 'revoked', revoked_at = ?, device_token_hash = NULL,
+          agent_token_version = agent_token_version + 1
+      WHERE id = ? AND workspace_id = ? AND lifecycle_status != 'revoked'
+    `).run(now, req.params.id, req.user.workspaceId);
+    if (update.changes > 0) {
+      // Cascada de streaming: las sesiones activas pasan a 'revoked' (el bridge
+      // las corta en su próximo session-check, ≤ 30 s) y el serial queda
+      // desasignado hasta que un admin lo mapee de nuevo.
+      db.prepare(`
+        UPDATE screen_sessions SET status = 'revoked', ended_at = ?
+        WHERE device_id = ? AND status IN ('requested', 'live')
+      `).run(now, req.params.id);
+      db.prepare(`
+        UPDATE bridge_attachments SET device_id = NULL, status = 'unassigned'
+        WHERE device_id = ?
+      `).run(req.params.id);
+    }
+    return update;
+  })();
   r.changes
     ? res.json({ ok: true, status: 'revoked' })
     : res.status(404).json({ error: 'Device not found' });
 });
+
+// ─── Fase 5: reconciliador de la flota (detección de contradicciones) ───
+// Corre dentro del proceso del API: compara los tres planos (API, bridges,
+// teléfonos) y levanta/resuelve alertas. Nunca borra ni corrige datos por su
+// cuenta: las correcciones conflictivas quedan para resolución manual.
+const RECONCILER_INTERVAL_MS = Math.max(1_000, Number(process.env.SOUTHFARM_RECONCILER_INTERVAL_MS || 60_000));
+const RECON_BRIDGE_OFFLINE_MS = Math.max(5_000, Number(process.env.SOUTHFARM_RECON_BRIDGE_OFFLINE_MS || 300_000));
+const RECON_ATTACHMENT_STALE_MS = Math.max(5_000, Number(process.env.SOUTHFARM_RECON_ATTACHMENT_STALE_MS || 300_000));
+const RECON_REVOKED_ACTIVITY_MS = Math.max(5_000, Number(process.env.SOUTHFARM_RECON_REVOKED_ACTIVITY_MS || 120_000));
+
+type ReconRef = { device_id?: number | null; bridge_id?: number | null; adb_serial?: string | null };
+const reconKey = (refs: ReconRef) => `${refs.device_id ?? ''}|${refs.adb_serial ?? ''}|${refs.bridge_id ?? ''}`;
+
+function raiseReconciliationAlert(
+  workspaceId: number,
+  kind: string,
+  severity: 'critical' | 'warn' | 'info',
+  detail: string,
+  refs: ReconRef,
+): void {
+  const now = nowIso();
+  const existing = db.prepare(`
+    SELECT id, occurrences FROM reconciliation_alerts
+    WHERE workspace_id = ? AND kind = ? AND status = 'open'
+      AND device_id IS ? AND bridge_id IS ? AND adb_serial IS ?
+    LIMIT 1
+  `).get(workspaceId, kind, refs.device_id ?? null, refs.bridge_id ?? null, refs.adb_serial ?? null) as any | undefined;
+  if (existing) {
+    db.prepare(`
+      UPDATE reconciliation_alerts
+      SET occurrences = occurrences + 1, last_seen_at = ?, detail = ?, severity = ?
+      WHERE id = ?
+    `).run(now, detail, severity, existing.id);
+  } else {
+    db.prepare(`
+      INSERT INTO reconciliation_alerts
+        (workspace_id, kind, severity, device_id, bridge_id, adb_serial, detail, first_seen_at, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(workspaceId, kind, severity, refs.device_id ?? null, refs.bridge_id ?? null, refs.adb_serial ?? null, detail, now, now);
+    console.warn(`[Reconciler] alerta ${kind} (${severity}) ws=${workspaceId}: ${detail}`);
+  }
+}
+
+function resolveStaleReconciliationAlerts(workspaceId: number, kind: string, keepKeys: Set<string>): void {
+  const open = db.prepare(`
+    SELECT id, device_id, adb_serial, bridge_id FROM reconciliation_alerts
+    WHERE workspace_id = ? AND kind = ? AND status = 'open'
+  `).all(workspaceId, kind) as any[];
+  for (const alert of open) {
+    const key = reconKey({ device_id: alert.device_id, adb_serial: alert.adb_serial, bridge_id: alert.bridge_id });
+    if (!keepKeys.has(key)) {
+      db.prepare(`
+        UPDATE reconciliation_alerts SET status = 'resolved', resolved_at = ?, resolved_by = 'reconciliador'
+        WHERE id = ? AND status = 'open'
+      `).run(nowIso(), alert.id);
+    }
+  }
+}
+
+function runReconciliation(): void {
+  const now = nowIso();
+  const workspaces = db.prepare('SELECT id FROM workspaces ORDER BY id').all() as any[];
+  for (const ws of workspaces) {
+    const wid = Number(ws.id);
+
+    // Regla 1: un dispositivo mapeado en más de un bridge o con más de un serial.
+    const conflicts = db.prepare(`
+      SELECT ba.device_id,
+             COUNT(DISTINCT ba.bridge_id) AS bridges,
+             COUNT(DISTINCT ba.adb_serial) AS serials,
+             GROUP_CONCAT(DISTINCT sb.name) AS bridge_names,
+             GROUP_CONCAT(DISTINCT ba.adb_serial) AS serial_list
+      FROM bridge_attachments ba
+      JOIN screen_bridges sb ON sb.id = ba.bridge_id
+      WHERE ba.device_id IS NOT NULL AND sb.workspace_id = ?
+      GROUP BY ba.device_id
+      HAVING COUNT(DISTINCT ba.bridge_id) > 1 OR COUNT(DISTINCT ba.adb_serial) > 1
+    `).all(wid) as any[];
+    const conflictKeys = new Set<string>();
+    for (const conflict of conflicts) {
+      conflictKeys.add(reconKey({ device_id: Number(conflict.device_id) }));
+      raiseReconciliationAlert(wid, 'serial_conflict', 'critical',
+        `Dispositivo mapeado en ${conflict.bridges} bridge(s) (${conflict.bridge_names}) y ${conflict.serials} serial(es): ${conflict.serial_list}. Resolver manualmente desde el panel.`,
+        { device_id: Number(conflict.device_id), adb_serial: conflict.serial_list });
+    }
+    resolveStaleReconciliationAlerts(wid, 'serial_conflict', conflictKeys);
+
+    // Regla 2: bridge sin reportar dentro de la ventana (offline).
+    const bridges = db.prepare(`
+      SELECT id, name, last_seen_at, auth_failures FROM screen_bridges WHERE workspace_id = ?
+    `).all(wid) as any[];
+    const offlineKeys = new Set<string>();
+    for (const bridge of bridges) {
+      const seenMs = bridge.last_seen_at ? Date.now() - Date.parse(bridge.last_seen_at) : Number.POSITIVE_INFINITY;
+      if (seenMs > RECON_BRIDGE_OFFLINE_MS) {
+        offlineKeys.add(reconKey({ bridge_id: Number(bridge.id) }));
+        raiseReconciliationAlert(wid, 'bridge_offline', 'warn',
+          `El bridge «${bridge.name}» no reporta desde ${bridge.last_seen_at || 'nunca'}.`,
+          { bridge_id: Number(bridge.id) });
+      }
+    }
+    resolveStaleReconciliationAlerts(wid, 'bridge_offline', offlineKeys);
+
+    // Regla 3: attachment asignado cuyo bridge dejó de verlo (stale).
+    const staleAttachments = db.prepare(`
+      SELECT ba.id, ba.device_id, ba.adb_serial, ba.last_seen_at, sb.name AS bridge_name, sb.id AS bridge_id
+      FROM bridge_attachments ba
+      JOIN screen_bridges sb ON sb.id = ba.bridge_id
+      WHERE sb.workspace_id = ? AND ba.device_id IS NOT NULL
+    `).all(wid) as any[]; // el filtro por antigüedad se hace en JS (compara timestamps ISO)
+    const staleKeys = new Set<string>();
+    for (const att of staleAttachments) {
+      const seenMs = att.last_seen_at ? Date.now() - Date.parse(att.last_seen_at) : Number.POSITIVE_INFINITY;
+      if (seenMs <= RECON_ATTACHMENT_STALE_MS) continue;
+      staleKeys.add(reconKey({ device_id: Number(att.device_id), adb_serial: att.adb_serial, bridge_id: Number(att.bridge_id) }));
+      raiseReconciliationAlert(wid, 'attachment_stale', 'info',
+        `El serial ${att.adb_serial} (asignado) no es visto por «${att.bridge_name}» desde ${att.last_seen_at || 'nunca'}.`,
+        { device_id: Number(att.device_id), adb_serial: att.adb_serial, bridge_id: Number(att.bridge_id) });
+    }
+    resolveStaleReconciliationAlerts(wid, 'attachment_stale', staleKeys);
+
+    // Regla 4: dispositivo revocado con señal reciente (anomalía de seguridad).
+    const revokedCutoff = new Date(Date.now() - RECON_REVOKED_ACTIVITY_MS).toISOString();
+    const revokedActive = db.prepare(`
+      SELECT id, device_alias, device_name, last_seen_at FROM devices
+      WHERE workspace_id = ? AND lifecycle_status = 'revoked'
+        AND last_seen_at IS NOT NULL AND last_seen_at > ?
+    `).all(wid, revokedCutoff) as any[];
+    const revokedKeys = new Set<string>();
+    for (const device of revokedActive) {
+      revokedKeys.add(reconKey({ device_id: Number(device.id) }));
+      raiseReconciliationAlert(wid, 'revoked_activity', 'critical',
+        `El dispositivo revocado «${device.device_alias || device.device_name || device.id}» tiene señal de heartbeat reciente (${device.last_seen_at}). Investigar.`,
+        { device_id: Number(device.id) });
+    }
+    resolveStaleReconciliationAlerts(wid, 'revoked_activity', revokedKeys);
+
+    // Regla 5: el bridge reportó rechazos de autenticación en su último ciclo.
+    const authFailKeys = new Set<string>();
+    for (const bridge of bridges) {
+      const failures = Number((bridge as any).auth_failures || 0);
+      if (failures > 0) {
+        authFailKeys.add(reconKey({ bridge_id: Number(bridge.id) }));
+        raiseReconciliationAlert(wid, 'auth_failures', 'warn',
+          `«${bridge.name}» reportó ${failures} rechazo(s) de autenticación desde su último reporte (token o capability inválidos).`,
+          { bridge_id: Number(bridge.id) });
+      }
+    }
+    resolveStaleReconciliationAlerts(wid, 'auth_failures', authFailKeys);
+
+    // Limpieza silenciosa: sesiones de pantalla vencidas que quedaron abiertas.
+    db.prepare(`
+      UPDATE screen_sessions SET status = 'ended', ended_at = ?
+      WHERE workspace_id = ? AND status IN ('requested', 'live') AND expires_at <= ?
+    `).run(now, wid, now);
+  }
+}
+
+app.get('/api/reconciliation/alerts', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const alerts = db.prepare(`
+    SELECT * FROM reconciliation_alerts
+    WHERE workspace_id = ? AND status = 'open'
+    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, last_seen_at DESC
+  `).all(req.user.workspaceId);
+  res.json({ alerts });
+});
+
+app.post('/api/reconciliation/alerts/:id/resolve', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const alert = db.prepare(
+    'SELECT * FROM reconciliation_alerts WHERE id = ? AND workspace_id = ? AND status = ?'
+  ).get(req.params.id, req.user.workspaceId, 'open') as any;
+  if (!alert) return res.status(404).json({ error: 'Alert not found' });
+  db.prepare(`
+    UPDATE reconciliation_alerts SET status = 'resolved', resolved_at = ?, resolved_by = ?
+    WHERE id = ?
+  `).run(nowIso(), req.user.email || 'owner', alert.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/reconciliation/overview', auth, requireRole('owner', 'admin'), (req: any, res) => {
+  const wid = req.user.workspaceId;
+  const devices = db.prepare(`
+    SELECT lifecycle_status, last_seen_at FROM devices WHERE workspace_id = ?
+  `).all(wid) as any[];
+  const onlineCutoff = new Date(Date.now() - DEVICE_ONLINE_WINDOW_SECONDS * 1000).toISOString();
+  res.json({
+    devices: {
+      total: devices.length,
+      enrolled: devices.filter(d => d.lifecycle_status === 'enrolled' || d.lifecycle_status === 'active').length,
+      revoked: devices.filter(d => d.lifecycle_status === 'revoked').length,
+      agents_online: devices.filter(d => d.lifecycle_status !== 'revoked' && d.last_seen_at && d.last_seen_at > onlineCutoff).length,
+    },
+    bridges: {
+      total: Number((db.prepare('SELECT COUNT(*) AS n FROM screen_bridges WHERE workspace_id = ?').get(wid) as any).n),
+      online: Number((db.prepare(`
+        SELECT COUNT(*) AS n FROM screen_bridges
+        WHERE workspace_id = ? AND last_seen_at IS NOT NULL AND last_seen_at > ?
+      `).get(wid, new Date(Date.now() - 120_000).toISOString()) as any).n),
+      auth_failures_last_report: Number((db.prepare('SELECT COALESCE(SUM(auth_failures), 0) AS n FROM screen_bridges WHERE workspace_id = ?').get(wid) as any).n),
+    },
+    attachments: {
+      assigned: Number((db.prepare(`
+        SELECT COUNT(*) AS n FROM bridge_attachments ba JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE sb.workspace_id = ? AND ba.device_id IS NOT NULL
+      `).get(wid) as any).n),
+      unassigned: Number((db.prepare(`
+        SELECT COUNT(*) AS n FROM bridge_attachments ba JOIN screen_bridges sb ON sb.id = ba.bridge_id
+        WHERE sb.workspace_id = ? AND ba.device_id IS NULL
+      `).get(wid) as any).n),
+    },
+    sessions_live: Number((db.prepare(`
+      SELECT COUNT(*) AS n FROM screen_sessions WHERE workspace_id = ? AND status = 'live'
+    `).get(wid) as any).n),
+    open_alerts: db.prepare(`
+      SELECT severity, COUNT(*) AS n FROM reconciliation_alerts
+      WHERE workspace_id = ? AND status = 'open' GROUP BY severity
+    `).all(wid),
+  });
+});
+
+// Agenda el reconciliador: primera corrida temprana tras el arranque.
+let reconciliationTimer: NodeJS.Timeout | null = setInterval(() => {
+  try { runReconciliation(); } catch (error) {
+    console.error('[Reconciler] corrida falló:', error instanceof Error ? error.message : error);
+  }
+}, RECONCILER_INTERVAL_MS);
+if (typeof reconciliationTimer.unref === 'function') reconciliationTimer.unref();
+setTimeout(() => {
+  try { runReconciliation(); } catch (error) {
+    console.error('[Reconciler] corrida inicial falló:', error instanceof Error ? error.message : error);
+  }
+}, 8_000).unref();
 
 // ─── Tasks ───
 app.get('/api/tasks', (_req, res) => {
@@ -2890,7 +3836,17 @@ app.post('/api/tasks/run', auth, requireRole('owner', 'admin', 'operator'), (req
   const { task_type, device_id, params } = req.body;
   if (!task_type || typeof task_type !== 'string') return res.status(400).json({ error: 'task_type required' });
   if (!SUPPORTED_TASK_TYPES.has(task_type)) return res.status(400).json({ error: 'Unsupported task_type' });
-  const device = findDeviceForWorkspace(req.user.userId, device_id);
+  // Un token de dispositivo solo puede crear runs para SU teléfono.
+  const runCreateDeviceScope = deviceScopedId(req);
+  let device: any;
+  if (runCreateDeviceScope !== null) {
+    device = db.prepare("SELECT * FROM devices WHERE id = ? AND lifecycle_status != 'revoked'").get(runCreateDeviceScope);
+    if (device && device_id && stringValue(device_id) && String(device_id) !== String(device.device_id)) {
+      return res.status(403).json({ error: 'A device token can only create runs for its own device' });
+    }
+  } else {
+    device = findDeviceForWorkspace(req.user.userId, device_id);
+  }
   if (!device) return res.status(404).json({ error: 'Assigned device not found' });
 
   // Normalize account in params: strip leading @
@@ -3281,11 +4237,17 @@ app.get('/api/tasks/runs', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const runDeviceScope = deviceScopedId(req);
+  if (runDeviceScope !== null) {
+    // Token de dispositivo: SOLO el historial de ese teléfono.
+    where.push('device_id = ?');
+    values.push(runDeviceScope);
+  }
   if (status) {
     where.push('status = ?');
     values.push(status);
   }
-  if (req.query.device_id !== undefined) {
+  if (runDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id, true, req.query.installation_id);
     if (!device) return res.json({ runs: [] });
     where.push('device_id = ?');
@@ -3322,6 +4284,11 @@ app.get('/api/tasks/runs/:id', auth, (req: any, res) => {
   const run = db.prepare(`SELECT * FROM task_runs WHERE id = ? AND user_id IN (${placeholders})`)
     .get(req.params.id, ...ids);
   if (!run) return res.status(404).json({ error: 'Run not found' });
+  // Un token de dispositivo solo consulta runs de SU teléfono.
+  const runDeviceScope = deviceScopedId(req);
+  if (runDeviceScope !== null && Number((run as any).device_id) !== runDeviceScope) {
+    return res.status(404).json({ error: 'Run not found' });
+  }
   const safeRun = { ...(run as any) };
   delete safeRun.claim_token;
   res.json({ run: safeRun });
@@ -3331,6 +4298,7 @@ app.get('/api/tasks/runs/:id', auth, (req: any, res) => {
 app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (req: any, res) => {
   const userId = req.user.userId;
   try {
+    const executableTypes = executableTaskTypes();
     const result = db.transaction(() => {
       const device = touchDevice(userId, req.body);
       refreshTaskLifecycle();
@@ -3351,12 +4319,13 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const existing: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND status IN ('running', 'paused')
           AND claim_token IS NOT NULL
           AND lease_expires_at > ?
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
-      `).get(userId, device.id, now);
+      `).get(userId, device.id, ...executableTypes, now);
 
       if (existing) {
         const leaseExpiresAt = taskLeaseExpiresAt();
@@ -3375,6 +4344,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
       const candidate: any = db.prepare(`
         SELECT * FROM task_runs
         WHERE user_id = ? AND device_id = ?
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3395,7 +4365,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
           COALESCE(scheduled_for, created_at) ASC,
           id ASC
         LIMIT 1
-      `).get(userId, device.id, now, now, now);
+      `).get(userId, device.id, ...executableTypes, now, now, now);
 
       if (!candidate) return { device, task: null, reused: false };
 
@@ -3412,6 +4382,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
             attempt_count = COALESCE(attempt_count, 0) + 1,
             updated_at = ?
         WHERE id = ? AND user_id = ? AND device_id = ?
+          AND task_type IN (${executableTypes.map(() => '?').join(',')})
           AND ${queueFilter}
           AND (
             (
@@ -3431,6 +4402,7 @@ app.post('/api/tasks/claim', auth, requireRole('owner', 'admin', 'operator'), (r
         candidate.id,
         userId,
         device.id,
+        ...executableTypes,
         now,
         now,
         now,
@@ -3827,33 +4799,42 @@ app.patch('/api/tasks/runs/:id', auth, requireRole('owner', 'admin', 'operator')
 });
 
 // ─── IG Accounts (per device) ───
-// ─── Scrape IG profile pic ───
+// ─── Avatar serving + profile-photo pipeline ───
+// Local mirror of the scanned profile photos lives in backend/src/avatars.ts:
+// GET /api/avatars/:filename serves data/avatars/ with a long cache, and
+// ensureAvatarStored() scrapes + downloads a photo for any platform. Registered
+// without auth because clients render these paths directly in <img> tags.
+registerAvatarRoutes(app);
+
+// Legacy Instagram-only scrape kept for the /api/ig-accounts endpoints, which
+// continue to store the CDN URL exactly as before; the implementation now
+// delegates to the shared avatar module so the og:image handling lives in one
+// place.
 function fetchProfilePicUrl(username: string): Promise<string> {
-  return new Promise((resolve) => {
-    const url = `https://www.instagram.com/${username}/`;
-    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' } }, (res) => {
-      let html = '';
-      res.on('data', (chunk: Buffer) => { html += chunk.toString(); });
-      res.on('end', () => {
-        const match = html.match(/og:image[^>]*content="([^"]+)"/);
-        const picUrl = match ? match[1].replace(/&amp;/g, '&') : '';
-        resolve(picUrl);
-      });
-    });
-    req.setTimeout(8000, () => { req.destroy(); resolve(''); });
-    req.on('error', () => resolve(''));
-  });
+  return fetchInstagramProfilePicUrl(username);
 }
 
 app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), async (req: any, res) => {
   const { device_id, usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
   const numericDeviceId = resolveSocialDeviceId(req.user.userId, device_id);
-  if (!numericDeviceId) return res.status(400).json({ error: 'device_id required' });
-  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
+  // Token de dispositivo: las cuentas se atribuyen SIEMPRE a ese teléfono;
+  // si el payload apunta a otro dispositivo, se rechaza.
+  const socialWriteScope = deviceScopedId(req);
+  if (socialWriteScope !== null) {
+    if (numericDeviceId !== null && numericDeviceId !== socialWriteScope) {
+      return res.status(403).json({ error: 'A device token can only write accounts for its own device' });
+    }
+    if (!numericDeviceId && !db.prepare('SELECT id FROM devices WHERE id = ?').get(socialWriteScope)) {
+      return res.status(403).json({ error: 'Device token has no valid device row' });
+    }
+  }
+  const effectiveDeviceId = socialWriteScope !== null ? socialWriteScope : numericDeviceId;
+  if (!effectiveDeviceId) return res.status(400).json({ error: 'device_id required' });
+  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(effectiveDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
   // Replace all accounts for this user+device
-  db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(dataUserId, numericDeviceId);
+  db.prepare('DELETE FROM ig_accounts WHERE user_id = ? AND device_id = ?').run(dataUserId, effectiveDeviceId);
   const insert = db.prepare('INSERT OR IGNORE INTO ig_accounts (user_id, device_id, username, profile_pic_url) VALUES (?, ?, ?, ?)');
   let insertedCount = 0;
   // Insert immediately so mobile clients do not wait on Instagram HTML.
@@ -3861,14 +4842,14 @@ app.post('/api/ig-accounts', auth, requireRole('owner', 'admin', 'operator'), as
   for (const u of usernames) {
     const username = String(u || '').replace(/^@+/, '').trim();
     if (!username) continue;
-    insertedCount += Number(insert.run(dataUserId, numericDeviceId, username, '').changes || 0);
+    insertedCount += Number(insert.run(dataUserId, effectiveDeviceId, username, '').changes || 0);
     void fetchProfilePicUrl(username).then((picUrl) => {
       if (!picUrl) return;
       db.prepare('UPDATE ig_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND username = ?')
-        .run(picUrl, dataUserId, numericDeviceId, username);
+        .run(picUrl, dataUserId, effectiveDeviceId, username);
     }).catch(() => {});
   }
-  const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), 'instagram', {
+  const scanSession = recordScanSession(dataUserId, Number(effectiveDeviceId), 'instagram', {
     accountsFound: insertedCount,
     status: req.body.scan_status,
     startedAt: req.body.scan_started_at,
@@ -3922,19 +4903,59 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
   }
 
   const numericDeviceId = resolveSocialDeviceId(req.user.userId, device_id);
-  if (!numericDeviceId) return res.status(400).json({ error: 'device_id required' });
-  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(numericDeviceId) as { user_id: number } | undefined;
+  // Token de dispositivo: las cuentas se atribuyen SIEMPRE a ese teléfono;
+  // si el payload apunta a otro dispositivo, se rechaza.
+  const socialWriteScope = deviceScopedId(req);
+  if (socialWriteScope !== null) {
+    if (numericDeviceId !== null && numericDeviceId !== socialWriteScope) {
+      return res.status(403).json({ error: 'A device token can only write accounts for its own device' });
+    }
+    if (!numericDeviceId && !db.prepare('SELECT id FROM devices WHERE id = ?').get(socialWriteScope)) {
+      return res.status(403).json({ error: 'Device token has no valid device row' });
+    }
+  }
+  const effectiveDeviceId = socialWriteScope !== null ? socialWriteScope : numericDeviceId;
+  if (!effectiveDeviceId) return res.status(400).json({ error: 'device_id required' });
+  const deviceOwner = db.prepare('SELECT user_id FROM devices WHERE id = ?').get(effectiveDeviceId) as { user_id: number } | undefined;
   const dataUserId = deviceOwner?.user_id ?? req.user.userId;
 
-  db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
-    .run(dataUserId, numericDeviceId, platform);
+  // Snapshot the photo pointers of the rows about to be wiped by the DELETE
+  // below, so a rescan never loses them. Values may be local /api/avatars/...
+  // paths or absolute CDN URLs stored by older builds — both are used verbatim.
+  const previousPicUrls = new Map<string, string>();
+  for (const row of db.prepare(
+    'SELECT username, profile_pic_url FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?'
+  ).all(dataUserId, effectiveDeviceId, platform) as Array<{ username: string; profile_pic_url: string }>) {
+    if (row.profile_pic_url) previousPicUrls.set(String(row.username), row.profile_pic_url);
+  }
+
+  try {
+    // Desvincular referencias ANTES del borrado: task_runs.social_account_id
+    // apunta a social_accounts y, con foreign_keys=ON, borrar cuentas
+    // referenciadas por tareas (warmups/scan) tira SQLITE_CONSTRAINT.
+    db.prepare(`
+      UPDATE task_runs SET social_account_id = NULL
+      WHERE social_account_id IN (
+        SELECT id FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?
+      )
+    `).run(dataUserId, effectiveDeviceId, platform);
+    db.prepare('DELETE FROM social_accounts WHERE user_id = ? AND device_id = ? AND platform = ?')
+      .run(dataUserId, effectiveDeviceId, platform);
+  } catch (error: any) {
+    console.error('[SocialAccounts] replace failed:', error?.code || error?.message);
+    return res.status(500).json({ error: 'Could not replace scanned accounts' });
+  }
   const insert = db.prepare(
     `INSERT OR IGNORE INTO social_accounts
       (user_id, device_id, platform, username, profile_pic_url,
        display_name, source_account_name, source_account_email, byline)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
+  const updatePicUrl = db.prepare(
+    'UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?'
+  );
   let insertedCount = 0;
+  const accountsWithoutPic = new Set<string>();
   for (const rawAccount of rawAccounts) {
     const account = rawAccount && typeof rawAccount === 'object'
       ? rawAccount
@@ -3944,7 +4965,7 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
     const picUrl = String(account.profile_pic_url || '');
     insertedCount += Number(insert.run(
       dataUserId,
-      numericDeviceId,
+      effectiveDeviceId,
       platform,
       username,
       picUrl,
@@ -3953,15 +4974,34 @@ app.post('/api/social-accounts', auth, requireRole('owner', 'admin', 'operator')
       String(account.source_account_email || ''),
       String(account.byline || ''),
     ).changes || 0);
-    if (platform === 'instagram' && !picUrl) {
-      void fetchProfilePicUrl(username).then((profilePicUrl) => {
-        if (!profilePicUrl) return;
-        db.prepare('UPDATE social_accounts SET profile_pic_url = ? WHERE user_id = ? AND device_id = ? AND platform = ? AND username = ?')
-          .run(profilePicUrl, dataUserId, numericDeviceId, platform, username);
-      }).catch(() => {});
-    }
+    if (!picUrl) accountsWithoutPic.add(username);
   }
-  const scanSession = recordScanSession(dataUserId, Number(numericDeviceId), platform, {
+  // Re-attach photos that survived a previous scan (local data only, no
+  // network, so it happens before the response is sent); the accounts still
+  // left without a photo go through the async avatar pipeline below.
+  const accountsStillWithoutPic = [...accountsWithoutPic].filter((username) => {
+    const previous = previousPicUrls.get(username);
+    if (!previous) return true;
+    updatePicUrl.run(previous, dataUserId, effectiveDeviceId, platform, username);
+    return false;
+  });
+  // Best-effort avatar pipeline for everything still without a photo, now for
+  // all platforms (Instagram, TikTok, YouTube) and not just Instagram: fetch
+  // the profile page, download the image once into data/avatars/ and store the
+  // local /api/avatars/... path. Runs after the inserts without blocking the
+  // response, and skips the external scrape when the file already exists.
+  void (async () => {
+    for (const username of accountsStillWithoutPic) {
+      try {
+        const storedUrl = await ensureAvatarStored(platform, username);
+        if (!storedUrl) continue;
+        updatePicUrl.run(storedUrl, dataUserId, effectiveDeviceId, platform, username);
+      } catch {
+        // Best-effort: leave profile_pic_url empty and move on.
+      }
+    }
+  })();
+  const scanSession = recordScanSession(dataUserId, Number(effectiveDeviceId), platform, {
     accountsFound: insertedCount,
     status: req.body.scan_status,
     startedAt: req.body.scan_started_at,
@@ -3978,8 +5018,14 @@ app.get('/api/social-accounts', auth, (req: any, res) => {
   }
 
   const deviceStrId = req.query.device_id as string | undefined;
+  const accountsDeviceScope = deviceScopedId(req);
   let accounts: any[];
-  if (deviceStrId) {
+  if (accountsDeviceScope !== null) {
+    // Token de dispositivo: solo las cuentas detectadas por ESE teléfono.
+    accounts = platform === 'all'
+      ? db.prepare('SELECT * FROM social_accounts WHERE device_id = ? ORDER BY platform, username').all(accountsDeviceScope)
+      : db.prepare('SELECT * FROM social_accounts WHERE device_id = ? AND platform = ? ORDER BY username').all(accountsDeviceScope, platform);
+  } else if (deviceStrId) {
     const device = findDeviceForWorkspace(req.user.userId, deviceStrId);
     if (!device) {
       accounts = [];
@@ -4063,7 +5109,21 @@ app.post('/api/scan-sessions', auth, requireRole('owner', 'admin', 'operator'), 
   }
   let deviceId: number | null = null;
   let dataUserId = req.user.userId;
-  if (req.body.device_id !== undefined && req.body.device_id !== null) {
+  const writeDeviceScope = deviceScopedId(req);
+  if (writeDeviceScope !== null) {
+    // Token de dispositivo: la sesión se atribuye SIEMPRE a ese teléfono,
+    // aunque el payload no traiga device_id (sesiones generadas en la app).
+    const own = db.prepare('SELECT * FROM devices WHERE id = ?').get(writeDeviceScope) as any;
+    if (!own) return res.status(403).json({ error: 'Device token has no valid device row' });
+    if (req.body.device_id !== undefined && req.body.device_id !== null) {
+      const claimed = findDeviceForWorkspace(req.user.userId, req.body.device_id);
+      if (!claimed || Number(claimed.id) !== writeDeviceScope) {
+        return res.status(403).json({ error: 'A device token can only write sessions for its own device' });
+      }
+    }
+    deviceId = writeDeviceScope;
+    dataUserId = Number(own.user_id);
+  } else if (req.body.device_id !== undefined && req.body.device_id !== null) {
     const device = findDeviceForWorkspace(req.user.userId, req.body.device_id);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     deviceId = Number(device.id);
@@ -4090,6 +5150,12 @@ app.get('/api/scan-sessions', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`ss.user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const scanDeviceScope = deviceScopedId(req);
+  if (scanDeviceScope !== null) {
+    // Token de dispositivo: SOLO los scans de ese teléfono.
+    where.push('ss.device_id = ?');
+    values.push(scanDeviceScope);
+  }
   if (platform !== 'all') {
     where.push('ss.platform = ?');
     values.push(platform);
@@ -4098,7 +5164,7 @@ app.get('/api/scan-sessions', auth, (req: any, res) => {
     where.push('ss.status = ?');
     values.push(String(req.query.status));
   }
-  if (req.query.device_id !== undefined) {
+  if (scanDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id);
     if (!device) return res.json({ sessions: [] });
     where.push('ss.device_id = ?');
@@ -4126,7 +5192,21 @@ app.post('/api/warmup-sessions', auth, requireRole('owner', 'admin', 'operator')
 
   let deviceId: number | null = null;
   let dataUserId = req.user.userId;
-  if (req.body.device_id !== undefined && req.body.device_id !== null) {
+  const writeDeviceScope = deviceScopedId(req);
+  if (writeDeviceScope !== null) {
+    // Token de dispositivo: la sesión se atribuye SIEMPRE a ese teléfono,
+    // aunque el payload no traiga device_id (sesiones generadas en la app).
+    const own = db.prepare('SELECT * FROM devices WHERE id = ?').get(writeDeviceScope) as any;
+    if (!own) return res.status(403).json({ error: 'Device token has no valid device row' });
+    if (req.body.device_id !== undefined && req.body.device_id !== null) {
+      const claimed = findDeviceForWorkspace(req.user.userId, req.body.device_id);
+      if (!claimed || Number(claimed.id) !== writeDeviceScope) {
+        return res.status(403).json({ error: 'A device token can only write sessions for its own device' });
+      }
+    }
+    deviceId = writeDeviceScope;
+    dataUserId = Number(own.user_id);
+  } else if (req.body.device_id !== undefined && req.body.device_id !== null) {
     const device = findDeviceForWorkspace(req.user.userId, req.body.device_id);
     if (!device) return res.status(404).json({ error: 'Device not found' });
     deviceId = Number(device.id);
@@ -4230,6 +5310,12 @@ app.get('/api/warmup-sessions', auth, (req: any, res) => {
   const { ids, placeholders } = scopedUsers(req.user.userId);
   const where = [`ws.user_id IN (${placeholders})`];
   const values: any[] = [...ids];
+  const warmupDeviceScope = deviceScopedId(req);
+  if (warmupDeviceScope !== null) {
+    // Token de dispositivo: SOLO las sesiones de ese teléfono.
+    where.push('ws.device_id = ?');
+    values.push(warmupDeviceScope);
+  }
   if (platform !== 'all') {
     where.push('ws.platform = ?');
     values.push(platform);
@@ -4238,7 +5324,7 @@ app.get('/api/warmup-sessions', auth, (req: any, res) => {
     where.push('ws.status = ?');
     values.push(String(req.query.status));
   }
-  if (req.query.device_id !== undefined) {
+  if (warmupDeviceScope === null && req.query.device_id !== undefined) {
     const device = findDeviceForWorkspace(req.user.userId, req.query.device_id);
     if (!device) return res.json({ sessions: [] });
     where.push('ws.device_id = ?');
@@ -4261,8 +5347,13 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
     return res.status(400).json({ error: 'platform must be all, instagram, tiktok, or youtube' });
   }
   const { ids, placeholders } = scopedUsers(req.user.userId);
+  // Token de dispositivo: las estadísticas cubren SOLO ese teléfono.
+  const statsDeviceScope = deviceScopedId(req);
+  const deviceFilter = statsDeviceScope !== null ? ' AND device_id = ?' : '';
   const platformFilter = platform === 'all' ? '' : ' AND platform = ?';
-  const filterArgs = platform === 'all' ? [...ids] : [...ids, platform];
+  const filterArgs = statsDeviceScope !== null
+    ? (platform === 'all' ? [...ids, statsDeviceScope] : [...ids, platform, statsDeviceScope])
+    : (platform === 'all' ? [...ids] : [...ids, platform]);
   const totals: any = db.prepare(`
     SELECT
       COUNT(*) AS total_sessions,
@@ -4274,7 +5365,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(saves), 0) AS saves,
       COALESCE(SUM(elapsed_sec), 0) AS elapsed_sec
     FROM warmup_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
   `).get(...filterArgs);
   const byPlatform = db.prepare(`
     SELECT platform, COUNT(*) AS sessions,
@@ -4284,7 +5375,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(likes), 0) AS likes,
       COALESCE(SUM(saves), 0) AS saves
     FROM warmup_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
     GROUP BY platform
     ORDER BY platform
   `).all(...filterArgs);
@@ -4293,7 +5384,7 @@ app.get('/api/stats/overview', auth, (req: any, res) => {
       COALESCE(SUM(accounts_found), 0) AS accounts_found,
       MAX(completed_at) AS last_completed_at
     FROM scan_sessions
-    WHERE user_id IN (${placeholders})${platformFilter}
+    WHERE user_id IN (${placeholders})${deviceFilter}${platformFilter}
     GROUP BY platform
     ORDER BY platform
   `).all(...filterArgs);
@@ -4406,6 +5497,60 @@ if (AUTO_PLANNER_ENABLED) {
     + (AUTO_PLANNER_WORKSPACE_ID ? ` for workspace ${AUTO_PLANNER_WORKSPACE_ID}.` : '.'),
   );
 }
+// ─── Activity Planner (clusters + routines + weekly generation) ───
+registerActivityPlanner(app, {
+  db,
+  mediaRoot: PUBLICATION_MEDIA_ROOT,
+  auth,
+  requireRole,
+  nowIso,
+  parseParams,
+  stringValue,
+  numberValue,
+  jsonValue,
+  workspaceMembership,
+  scopedUsers,
+  dateKeyInTimezone,
+  taskView,
+  recordTaskEvent,
+  ensureWorkspaceControl,
+  workspaceControlBlocksAutomatic,
+  normalizePlatform,
+  accountKeyFor,
+  deviceIsOnline,
+  plannerDateKey,
+} as PlannerDeps);
+runActivityPlannerStartup({
+  db,
+  auth,
+  requireRole,
+  nowIso,
+  parseParams,
+  stringValue,
+  numberValue,
+  jsonValue,
+  workspaceMembership,
+  scopedUsers,
+  dateKeyInTimezone,
+  taskView,
+  recordTaskEvent,
+  ensureWorkspaceControl,
+  workspaceControlBlocksAutomatic,
+  normalizePlatform,
+  accountKeyFor,
+  deviceIsOnline,
+  plannerDateKey,
+} as PlannerDeps);
+
+// Red de seguridad: un rechazo no manejado en un handler async (Express 4 no
+// los captura) NO debe tumbar la API entera con toda la flota colgando de
+// ella. Se registra con stack en stderr y el proceso sigue vivo.
+process.on('unhandledRejection', (reason) => {
+  console.error('[Fatal-guard] unhandledRejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[Fatal-guard] uncaughtException:', error);
+});
 
 // ─── Process-level safety net for the residual window ───
 // The Express middleware above only sees errors that travel through next(err).

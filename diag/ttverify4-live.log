@@ -1,0 +1,64 @@
+20:32:54 tt-verify-live4 start: serial=863d00583048313238510ca492874c account=@marczell.vibes video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-3.mp4
+20:32:54 caption (7 words): 'Growth begins where your comfort zone ends'
+20:32:55 PRE-CHECK probe wall=20:32:55.443: accessibility service answered a fresh dump on first try (1.0s)
+20:32:56 PRE-CHECK RESULT: VIVO wall=20:32:56.120 (ensure_accessibility_healthy healthy no-op path in 0.7s)
+20:32:57 NETWORK CHECK RESULT: OK wall=20:32:57.259 (ping/dumpsys probe in 1.1s)
+20:33:13   cold-start: dump #1 lacks com.zhiliaoapp.musically (only system UI rendered); waiting for the app tree (elapsed=0.0s)...
+20:33:18   [tap #1] center=(648,1495) wall=20:33:18.201
+20:33:20 prepare OK: identity=@marczell.vibes baseline_play_counts=['80', '209', '152', '86', '578'] wall=20:33:20.696
+20:33:21   evidence saved: ttverify4-baseline.xml + .png
+20:33:23 media pushed -> /sdcard/Movies/SouthFarm/ttverify-live4.mp4 wall=20:33:23.390
+20:33:25   [tap #2] center=(360,1495) wall=20:33:25.262
+20:33:28   [tap #3] center=(80,1460) wall=20:33:28.530
+20:33:30   [picker dump #9] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26']
+20:33:30 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'tiktok', 'stage': 'picker', 'duration_formats': ['00:15', '0:15']} wall=20:33:30.349
+20:33:30 SELECT MEDIA: start wall=20:33:30.349 duration=15s expected_labels=['00:15', '0:15']
+20:33:30   [candidate #1] rid='com.zhiliaoapp.musically:id/gi4' text='00:15' arrival_bounds=(145, 450, 239, 496) in_viewport=True -> re-dumping fresh (up to 2)
+20:33:31   [picker dump #10] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26']
+20:33:31   [candidate #1] ACCEPTED after 1 fresh dump(s): fresh_bounds=(4, 258, 239, 496) in_viewport=True
+20:33:31   [tap #4] center=(121,377) wall=20:33:31.530
+20:33:34   [picker dump #11] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26']
+20:33:35   [picker dump #12] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26']
+20:33:35   [tap #5] center=(532,1468) wall=20:33:35.594
+20:33:39 SELECT MEDIA: done wall=20:33:39.882 in 9.5s
+20:33:39 checkpoint editing progress=45 final_action=False evidence={'platform': 'tiktok', 'stage': 'editor'} wall=20:33:39.882
+20:33:40   [tap #6] center=(530,1476) wall=20:33:40.683
+20:33:42   [tap #7] center=(221,328) wall=20:33:42.945
+20:33:44   [caption write] 'Growth begins where your comfort zone ends' wall=20:33:44.432
+20:33:47 checkpoint captioning progress=65 final_action=False evidence={'platform': 'tiktok', 'caption_words': 7} wall=20:33:47.132
+20:33:47   [back keyevent] wall=20:33:47.132
+20:33:48 checkpoint ready_to_publish progress=80 final_action=False evidence={'platform': 'tiktok', 'stage': 'post'} wall=20:33:48.335
+20:33:49 checkpoint publishing progress=90 final_action=True evidence={'platform': 'tiktok', 'final': 'post'} wall=20:33:49.105
+20:33:49   evidence saved: ttverify4-post-screen.xml + .png
+20:33:49   POST TAP at t=445482.125 wall=20:33:49.806 (last publish tap; no re-tap ever)
+20:33:49   [tap #8] center=(532,1472) wall=20:33:49.808
+20:34:00   TOAST 'Video posted!' seen wall=20:34:00.386 (10.6s after Post)
+20:34:00 publish OK: Post tapped; propagation begins (t_post=445482.125 wall=20:34:00.386)
+20:34:20 TAB-CYCLE [verify-cycle(3s)]: start wall=20:34:20.393 (30.6s after Post)
+20:34:21   [verify dump #27] wall=20:34:21.874 32.1s after Post counts=[] grid=True
+20:34:21   [tap #9] center=(648,1495) wall=20:34:21.875
+20:34:26   [verify dump #28] wall=20:34:26.388 36.6s after Post counts=['0', '80', '209', '152', '86'] grid=True
+20:34:26   [tap #10] center=(72,1495) wall=20:34:26.389
+20:34:31   [verify dump #29] wall=20:34:31.623 41.8s after Post counts=[] grid=False
+20:34:31   [tap #11] center=(648,1495) wall=20:34:31.626
+20:34:36   [swipe-bezier motionevent verify-refresh] 360,350 -> 360,1000 400ms wall=20:34:36.011
+20:34:36 TAB-CYCLE [verify-cycle(3s)]: done wall=20:34:36.011 in 15.6s
+20:34:36 VERIFY CHECK 1: start wall=20:34:36.011 (46.2s after Post)
+20:34:38   [verify dump #30] wall=20:34:38.204 48.4s after Post counts=['0', '80', '209', '152', '86'] grid=True
+20:34:38   evidence saved: ttverify4-verify-030.xml
+20:34:38 VERIFY CHECK 1: NOT verified wall=20:34:38.310 in 2.3s (no delta or no identity)
+20:35:02   [swipe-bezier motionevent verify-refresh] 360,350 -> 360,1000 400ms wall=20:35:02.144
+20:35:02 VERIFY CHECK 2: start wall=20:35:02.144 (72.3s after Post)
+20:35:04   [verify dump #31] wall=20:35:04.348 74.5s after Post counts=['0', '80', '209', '152', '86'] grid=True
+20:35:04 VERIFY CHECK 2: NOT verified wall=20:35:04.348 in 2.2s (no delta or no identity)
+20:35:18   [swipe-bezier motionevent verify-refresh] 360,350 -> 360,1000 400ms wall=20:35:18.360
+20:35:18 VERIFY CHECK 3: start wall=20:35:18.360 (88.5s after Post)
+20:35:20   [verify dump #32] wall=20:35:20.596 90.8s after Post counts=['0', '80', '210', '152', '86'] grid=True
+20:35:20 VERIFY CHECK 3: NOT verified wall=20:35:20.598 in 2.2s (no delta or no identity)
+20:35:20 verify OK wall=20:35:20.598: identity=<PublicationStatus.UNVERIFIED: 'unverified'> verify_elapsed=80.2s (confirmed at check 3)
+20:35:21   evidence saved: ttverify4-verified.xml + .png
+20:35:21 DELTA RESULT: never observed by the harness
+20:35:21 swipe log: [('bezier', 445524.296, (360, 350, 360, 1000, 400)), ('bezier', 445550.625, (360, 350, 360, 1000, 400)), ('bezier', 445566.671, (360, 350, 360, 1000, 400))]
+20:35:21 tap count total: 11
+20:35:21 RESULT: SUCCESS
+20:35:21 cleaned pushed media file from device (post itself is NOT deleted)

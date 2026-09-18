@@ -1,0 +1,78 @@
+19:50:11 tt-verify-live3 start: serial=863d00583048313238510ca492874c account=@marczell.vibes video=C:\Users\josu_\Downloads\Videos to test\0730 MA-V-2.mp4
+19:50:11 caption (8 words): 'Your habits shape your future not your dreams'
+19:50:12 PRE-CHECK probe wall=19:50:12.438: accessibility service answered a fresh dump on first try (1.1s)
+19:50:13 PRE-CHECK RESULT: VIVO wall=19:50:13.088 (ensure_accessibility_healthy healthy no-op path in 0.6s)
+19:50:14 NETWORK CHECK RESULT: OK wall=19:50:14.202 (ping/dumpsys probe in 1.1s)
+19:50:31   cold-start: dump #1 lacks com.zhiliaoapp.musically (only system UI rendered); waiting for the app tree (elapsed=0.0s)...
+19:50:32   cold-start: dump #2 lacks com.zhiliaoapp.musically (only system UI rendered); waiting for the app tree (elapsed=1.6s)...
+19:50:35   [tap #1] center=(648,1495) wall=19:50:35.648
+19:50:39 prepare OK: identity=@marczell.vibes baseline_play_counts=['65', '152', '86', '578', '646'] wall=19:50:39.469
+19:50:40   evidence saved: ttverify3-baseline.xml + .png
+19:50:42 media pushed -> /sdcard/Movies/SouthFarm/ttverify-live3.mp4 wall=19:50:42.885
+19:50:44   [tap #2] center=(360,1495) wall=19:50:44.724
+19:50:47   [tap #3] center=(80,1460) wall=19:50:47.710
+19:50:49   [picker dump #10] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26', '00:33']
+19:50:49 checkpoint selecting_media progress=25 final_action=False evidence={'platform': 'tiktok', 'stage': 'picker', 'duration_formats': ['00:15', '0:15']} wall=19:50:49.469
+19:50:49 SELECT MEDIA: start wall=19:50:49.469 duration=15s expected_labels=['00:15', '0:15']
+19:50:49   [candidate #1] rid='com.zhiliaoapp.musically:id/gi4' text='00:15' arrival_bounds=(145, 450, 239, 496) in_viewport=True -> re-dumping fresh (up to 2)
+19:50:50   [picker dump #11] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26', '00:33']
+19:50:50   [candidate #1] ACCEPTED after 1 fresh dump(s): fresh_bounds=(4, 258, 239, 496) in_viewport=True
+19:50:50   [tap #4] center=(121,377) wall=19:50:50.564
+19:50:54   [picker dump #12] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26', '00:33']
+19:50:55   [picker dump #13] 15 thumbs bounds=[(4, 258, 239, 496), (243, 258, 478, 496), (482, 258, 716, 496), (4, 500, 239, 738), (243, 500, 478, 738), (482, 500, 716, 738), (4, 742, 239, 980), (243, 742, 478, 980), (482, 742, 716, 980), (4, 984, 239, 1222), (243, 984, 478, 1222), (482, 984, 716, 1222), (4, 1226, 239, 1392), (243, 1226, 478, 1392), (482, 1226, 716, 1392)] duration_labels=['00:15', '00:14', '00:13', '00:27', '00:27', '00:27', '00:20', '00:20', '00:41', '00:26', '00:26', '00:33']
+19:50:55   [tap #5] center=(532,1468) wall=19:50:55.109
+19:50:58 SELECT MEDIA: done wall=19:50:58.325 in 8.8s
+19:50:58 checkpoint editing progress=45 final_action=False evidence={'platform': 'tiktok', 'stage': 'editor'} wall=19:50:58.325
+19:50:59   [tap #6] center=(530,1476) wall=19:50:59.077
+19:51:01   [tap #7] center=(221,328) wall=19:51:01.766
+19:51:03   [caption write] 'Your habits shape your future not your dreams' wall=19:51:03.256
+19:51:05 checkpoint captioning progress=65 final_action=False evidence={'platform': 'tiktok', 'caption_words': 8} wall=19:51:05.962
+19:51:05   [back keyevent] wall=19:51:05.965
+19:51:07 checkpoint ready_to_publish progress=80 final_action=False evidence={'platform': 'tiktok', 'stage': 'post'} wall=19:51:07.165
+19:51:07 checkpoint publishing progress=90 final_action=True evidence={'platform': 'tiktok', 'final': 'post'} wall=19:51:07.914
+19:51:08   evidence saved: ttverify3-post-screen.xml + .png
+19:51:08   POST TAP at t=442920.953 wall=19:51:08.578 (last publish tap; no re-tap ever)
+19:51:08   [tap #8] center=(532,1472) wall=19:51:08.578
+19:51:31   TOAST 'Video posted!' seen wall=19:51:31.581 (23.0s after Post)
+19:51:31 publish OK: Post tapped; propagation begins (t_post=442920.953 wall=19:51:31.583)
+19:51:51 TAB-CYCLE [verify-cycle(3s)]: start wall=19:51:51.584 (43.0s after Post)
+19:51:52   [verify dump #38] wall=19:51:52.716 44.1s after Post counts=[] grid=True
+19:51:52   [tap #9] center=(648,1495) wall=19:51:52.716
+19:51:57   [verify dump #39] wall=19:51:57.625 49.0s after Post counts=['0', '71', '152', '86', '578'] grid=True
+19:51:57 ABORTED (fail-closed, no retry):
+19:51:57 Traceback (most recent call last):
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\tt-verify-live3.py", line 512, in main
+    identity = adapter.verify(job, device)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\tiktok.py", line 565, in verify
+    self._tab_cycle_resync(device, self._VERIFY_TAB_WAIT)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\tt-verify-live3.py", line 401, in traced_resync
+    original_resync(device, tab_wait)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\tiktok.py", line 448, in _tab_cycle_resync
+    self._cycle_tab(device, label="Home", wait=tab_wait)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\tiktok.py", line 433, in _cycle_tab
+    self._tap_tab(device, label=label)
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\tiktok.py", line 421, in _tap_tab
+    tab = self._profile_tab(nodes) if label == "Profile" else self._home_tab(nodes)
+                                                              ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\tiktok.py", line 409, in _home_tab
+    return (self._one(nodes, error="TAB_BAR", content_desc="Home", required=False)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\SouthFarm\source\.worktrees\semiorganic-publishing\publisher_worker\southfarm_publisher\platforms\common.py", line 85, in _one
+    raise PublisherError("SELECTOR_COLLISION", f"Ambiguous {error} selector")
+southfarm_publisher.models.PublisherError: Ambiguous TAB_BAR selector
+
+19:51:57 ABORT DIAGNOSTIC [SELECTOR_COLLISION]: bottom-bar/tab candidates on the screen at abort
+19:51:58   tab candidate: rid='com.android.systemui:id/home' text='' cd='Home' bounds='[280,1544][440,1640]' clickable='true'
+19:51:58   tab candidate: rid='com.zhiliaoapp.musically:id/o74' text='' cd='Home' bounds='[0,1446][144,1544]' clickable='true'
+19:51:58   tab candidate: rid='' text='Home' cd='' bounds='[0,1507][144,1533]' clickable='false'
+19:51:58   tab candidate: rid='com.zhiliaoapp.musically:id/o73' text='' cd='Friends' bounds='[144,1446][288,1544]' clickable='true'
+19:51:58   tab candidate: rid='' text='Friends' cd='' bounds='[144,1507][288,1533]' clickable='false'
+19:51:58   tab candidate: rid='com.zhiliaoapp.musically:id/o70' text='' cd='Create' bounds='[288,1446][432,1544]' clickable='true'
+19:51:58   tab candidate: rid='com.zhiliaoapp.musically:id/o75' text='' cd='Inbox' bounds='[432,1446][576,1544]' clickable='true'
+19:51:58   tab candidate: rid='' text='Inbox' cd='' bounds='[432,1507][576,1533]' clickable='false'
+19:51:58   tab candidate: rid='com.zhiliaoapp.musically:id/o76' text='' cd='Profile' bounds='[576,1446][720,1544]' clickable='true'
+19:51:58   tab candidate: rid='' text='Profile' cd='' bounds='[576,1507][720,1533]' clickable='false'
+19:51:59   evidence saved: ttverify3-aborted.xml + .png
+19:51:59 RESULT: FAILURE
+19:51:59 cleaned pushed media file from device (post itself is NOT deleted)
